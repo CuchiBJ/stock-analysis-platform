@@ -47,9 +47,9 @@ async def get_live_transitions(
                     StockMetrics.distance_to_ema21 >= -5,
                     StockMetrics.avg_volume_10d >= 700000,
                     StockMetrics.adr_percent >= 3,
-                    StockMetrics.current_price >= StockMetrics.low_52w * 1.6,
+                    StockMetrics.current_price >= StockMetrics.low_52w * 1.7,
                     StockMetrics.current_price > StockMetrics.ema50,
-                    StockMetrics.distance_to_high_52w >= -10
+                    StockMetrics.distance_to_high_52w >= -40
                 )
             )
             .order_by(StockMetrics.date.desc())
