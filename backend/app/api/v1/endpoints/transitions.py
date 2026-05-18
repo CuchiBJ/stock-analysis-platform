@@ -35,14 +35,14 @@ async def get_live_transitions(
     try:
         transition_engine = TransitionEngine(db)
         
-        # Get recent stock metrics (last 2 days)
-        cutoff_date = (datetime.utcnow() - timedelta(days=2)).strftime("%Y-%m-%d")
+        # Get recent stock metrics (last 7 days instead of 2 days to capture more transitions)
+        cutoff_date = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
         
         result = await db.execute(
             select(StockMetrics)
             .where(StockMetrics.date >= cutoff_date)
             .order_by(StockMetrics.date.desc())
-            .limit(limit * 2)  # Get more to calculate transitions
+            .limit(500)  # Get more records to ensure we have enough per symbol
         )
         recent_metrics = result.scalars().all()
         
