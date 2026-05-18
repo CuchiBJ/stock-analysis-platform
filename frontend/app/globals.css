@@ -4,62 +4,111 @@
 
 @layer base {
   :root {
-    /* Professional Financial Palette - Light Theme */
+    /* Bloomberg/Koyfin Institutional Palette - Light Theme */
     --background: 0 0% 100%;
-    --foreground: 222.2 47.4% 11.2%;
+    --foreground: 220 15% 20%;
+    /* Dark gray, not black */
     --card: 0 0% 100%;
-    --card-foreground: 222.2 47.4% 11.2%;
+    --card-foreground: 220 15% 20%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 47.4% 11.2%;
-    --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 221.2 83.2% 53.3%;
-    /* Financial chart colors - professional palette */
-    --chart-1: 142 71% 45%; /* Green - positive */
-    --chart-2: 0 84% 60%; /* Red - negative */
-    --chart-3: 221.2 83.2% 53.3%; /* Blue - primary */
-    --chart-4: 45 93% 47%; /* Gold - accent */
-    --chart-5: 262 83% 58%; /* Purple - secondary */
-    --radius: 0.375rem;
+    --popover-foreground: 220 15% 20%;
+    --primary: 220 30% 35%;
+    /* Muted blue-gray */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 10% 95%;
+    /* Light gray background */
+    --secondary-foreground: 220 15% 20%;
+    --muted: 220 10% 95%;
+    --muted-foreground: 220 10% 50%;
+    /* Muted text */
+    --accent: 220 20% 90%;
+    --accent-foreground: 220 15% 20%;
+    --destructive: 0 70% 45%;
+    /* Darker red, not bright */
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 10% 90%;
+    /* Subtle borders */
+    --input: 220 10% 90%;
+    --ring: 220 30% 35%;
+    /* Bloomberg/Koyfin chart colors - muted institutional */
+    --chart-1: 140 50% 35%;
+    /* Dark green - positive */
+    --chart-2: 0 60% 40%;
+    /* Dark red - negative */
+    --chart-3: 220 30% 35%;
+    /* Blue-gray - primary */
+    --chart-4: 45 60% 45%;
+    /* Muted gold - accent */
+    --chart-5: 260 40% 40%;
+    /* Muted purple - secondary */
+    --radius: 0.25rem;
+    /* Smaller radius for institutional look */
+
+    /* Enhanced block distinction colors */
+    --block-market-context: 220 30% 98%;
+    /* Very light blue-gray */
+    --block-live-transitions: 140 30% 97%;
+    /* Very light green */
+    --block-actionable: 45 30% 97%;
+    /* Very light gold */
+    --block-sector: 260 30% 97%;
+    /* Very light purple */
+    --block-structure: 0 30% 98%;
+    /* Very light red-gray */
   }
 
   .dark {
-    /* Professional Financial Palette - Dark Theme */
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 224.3 76.3% 48%;
-    /* Financial chart colors - professional palette (dark) */
-    --chart-1: 142 71% 45%; /* Green - positive */
-    --chart-2: 0 84% 60%; /* Red - negative */
-    --chart-3: 217.2 91.2% 59.8%; /* Blue - primary */
-    --chart-4: 45 93% 47%; /* Gold - accent */
-    --chart-5: 262 83% 58%; /* Purple - secondary */
+    /* Bloomberg/Koyfin Institutional Palette - Dark Theme */
+    --background: 220 20% 8%;
+    /* Dark gray, not black */
+    --foreground: 220 10% 90%;
+    /* Light gray, not white */
+    --card: 220 20% 10%;
+    /* Slightly lighter than background */
+    --card-foreground: 220 10% 90%;
+    --popover: 220 20% 10%;
+    --popover-foreground: 220 10% 90%;
+    --primary: 220 25% 55%;
+    /* Muted blue */
+    --primary-foreground: 220 10% 95%;
+    --secondary: 220 15% 15%;
+    /* Dark gray */
+    --secondary-foreground: 220 10% 90%;
+    --muted: 220 15% 15%;
+    --muted-foreground: 220 10% 60%;
+    /* Muted text */
+    --accent: 220 20% 20%;
+    --accent-foreground: 220 10% 90%;
+    --destructive: 0 60% 35%;
+    /* Dark red */
+    --destructive-foreground: 220 10% 95%;
+    --border: 220 15% 18%;
+    /* Subtle borders */
+    --input: 220 15% 18%;
+    --ring: 220 25% 55%;
+    /* Bloomberg/Koyfin chart colors - muted institutional (dark) */
+    --chart-1: 140 50% 40%;
+    /* Dark green - positive */
+    --chart-2: 0 60% 45%;
+    /* Dark red - negative */
+    --chart-3: 220 25% 55%;
+    /* Muted blue - primary */
+    --chart-4: 45 60% 50%;
+    /* Muted gold - accent */
+    --chart-5: 260 40% 45%;
+    /* Muted purple - secondary */
+
+    /* Enhanced block distinction colors (dark) */
+    --block-market-context: 220 25% 12%;
+    /* Dark blue-gray */
+    --block-live-transitions: 140 25% 11%;
+    /* Dark green */
+    --block-actionable: 45 25% 11%;
+    /* Dark gold */
+    --block-sector: 260 25% 11%;
+    /* Dark purple */
+    --block-structure: 0 25% 12%;
+    /* Dark red-gray */
   }
 }
 
@@ -67,6 +116,7 @@
   * {
     @apply border-border;
   }
+
   body {
     @apply bg-background text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;

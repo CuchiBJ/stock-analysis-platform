@@ -1,0 +1,10 @@
+Collecting redis
+  Downloading redis-7.4.0-py3-none-any.whl (409 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 409.8/409.8 KB 5.1 MB/s eta 0:00:00
+Collecting hiredis
+  Downloading hiredis-3.3.1-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (168 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 168.8/168.8 KB 7.9 MB/s eta 0:00:00
+Requirement already satisfied: websockets in ./venv/lib/python3.10/site-packages (16.0)
+Requirement already satisfied: async-timeout>=4.0.3 in ./venv/lib/python3.10/site-packages (from redis) (5.0.1)
+Installing collected packages: redis, hiredis
+Successfully installed hiredis-3.3.1 redis-7.4.0

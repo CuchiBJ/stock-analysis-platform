@@ -1,10 +1,8 @@
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from app.data.ingestors.stock_ingestor import StockIngestor
 from app.data.ingestors.price_ingestor import PriceIngestor
 from app.data.ingestors.metrics_calculator import MetricsCalculator
+from app.core.config import settings
 from datetime import datetime, time
 import pytz
 import logging
@@ -14,110 +12,108 @@ logger = logging.getLogger(__name__)
 
 
 class DataScheduler:
-    def __init__(self, db_factory):
-        """
-        db_factory: callable that returns AsyncSession
-        """
-        self.db_factory = db_factory
-        self.scheduler = AsyncIOScheduler()
+    def __init__(self, database_url=None):
+        if database_url:
+            self.engine = create_async_engine(database_url, echo=False)
+            self.async_session_maker = async_sessionmaker(
+                self.engine, class_=AsyncSession, expire_on_commit=False
+            )
+        else:
+            self.engine = None
+            self.async_session_maker = None
+        self._running = False
 
-    async def ingest_stock_list(self):
-        """Daily task: ingest stock list"""
-        async with self.db_factory() as db:
+    def _get_db(self):
+        """Get database session"""
+        if self.async_session_maker:
+            return self.async_session_maker()
+        raise RuntimeError("Database not initialized")
+
+    async def trigger_metrics_update(self, limit=100):
+        """Manually trigger metrics calculation"""
+        async with self._get_db() as db:
             ingestor = StockIngestor(db)
-            try:
-                count = await ingestor.ingest_stock_list()
-                logger.info(f"Stock list ingestion complete: {count} stocks")
-            except Exception as e:
-                logger.error(f"Stock list ingestion failed: {e}")
+            symbols = await ingestor.get_active_symbols(limit=limit)
+            logger.info(f"Calculating metrics for {len(symbols)} symbols...")
+            
+            calculator = MetricsCalculator(db)
+            count = await calculator.calculate_metrics_batch(symbols)
+            logger.info(f"Metrics calculated for {count} symbols")
+            return count
 
-    async def ingest_latest_prices(self):
-        """Task: ingest intraday prices (runs every 15min during market hours)"""
-        # Check if it's market hours (9:30 AM - 4:00 PM ET)
+    async def _scheduler_loop(self):
+        """Background scheduler loop that executes jobs based on time"""
+        logger.info("Scheduler loop started")
         et_tz = pytz.timezone('US/Eastern')
-        now = datetime.now(et_tz)
         market_open = time(9, 30)
         market_close = time(16, 0)
-        current_time = now.time()
         
-        # Skip if outside market hours
-        if not (market_open <= current_time <= market_close):
-            logger.info(f"Skipping intraday price ingestion - outside market hours (current time: {current_time})")
-            return
+        last_price_update = None
+        last_metrics_update = None
         
-        async with self.db_factory() as db:
+        # Trigger initial metrics update immediately
+        logger.info("Triggering initial metrics update")
+        await self.trigger_metrics_update(limit=100)
+        last_metrics_update = datetime.now(et_tz)
+        
+        while self._running:
+            now = datetime.now(et_tz)
+            current_time = now.time()
+            
+            # Check if within market hours
+            if market_open <= current_time <= market_close:
+                # Price update every 15 minutes
+                if last_price_update is None or (now - last_price_update).total_seconds() >= 900:
+                    logger.info(f"Triggering price update (current time: {current_time})")
+                    # Run price update in background to not block metrics
+                    asyncio.create_task(self._update_prices())
+                    last_price_update = now
+                
+                # Metrics update every 30 minutes
+                if last_metrics_update is None or (now - last_metrics_update).total_seconds() >= 1800:
+                    logger.info(f"Triggering metrics update (current time: {current_time})")
+                    await self.trigger_metrics_update(limit=100)
+                    last_metrics_update = now
+            else:
+                logger.info(f"Outside market hours (current time: {current_time})")
+            
+            # Sleep for 30 seconds before checking again
+            await asyncio.sleep(30)
+
+    async def _update_prices(self):
+        """Update prices"""
+        async with self._get_db() as db:
             ingestor = PriceIngestor(db)
             try:
                 count = await ingestor.ingest_intraday_prices()
-                logger.info(f"Intraday prices ingestion complete: {count} symbols at {now.strftime('%Y-%m-%d %H:%M:%S')}")
+                logger.info(f"Price update complete: {count} symbols")
             except Exception as e:
-                logger.error(f"Intraday prices ingestion failed: {e}")
+                logger.error(f"Price update failed: {e}")
 
-    async def calculate_metrics(self):
-        """Daily task: calculate metrics"""
-        async with self.db_factory() as db:
-            calculator = MetricsCalculator(db)
-            
-            try:
-                # Get symbols needing update
-                symbols = await calculator.get_symbols_needing_update(hours=24)
-                
-                if not symbols:
-                    # If none need update, calculate for top 100 active stocks
-                    ingestor = StockIngestor(db)
-                    symbols = await ingestor.get_active_symbols(limit=100)
-                
-                count = await calculator.calculate_metrics_batch(symbols)
-                logger.info(f"Metrics calculation complete: {count} symbols")
-            except Exception as e:
-                logger.error(f"Metrics calculation failed: {e}")
+    async def run(self):
+        """Run the scheduler loop"""
+        self._running = True
+        try:
+            await self._scheduler_loop()
+        except asyncio.CancelledError:
+            logger.info("Scheduler cancelled")
+        finally:
+            self._running = False
+            if self.engine:
+                await self.engine.dispose()
 
-    def start(self):
-        """Start the scheduler"""
-        # Ingest stock list daily at 2 AM
-        self.scheduler.add_job(
-            self.ingest_stock_list,
-            CronTrigger(hour=2, minute=0),
-            id='ingest_stock_list',
-            replace_existing=True
-        )
-        
-        # Ingest intraday prices every 15 minutes during market hours (9:30 AM - 4:00 PM ET)
-        self.scheduler.add_job(
-            self.ingest_latest_prices,
-            IntervalTrigger(minutes=15),
-            id='ingest_latest_prices',
-            replace_existing=True
-        )
-        
-        # Calculate metrics daily at 7 PM
-        self.scheduler.add_job(
-            self.calculate_metrics,
-            CronTrigger(hour=19, minute=0),
-            id='calculate_metrics',
-            replace_existing=True
-        )
-        
-        self.scheduler.start()
-        logger.info("Data scheduler started - intraday prices update every 15min during market hours (9:30 AM - 4:00 PM ET)")
-        
-        # Trigger initial price update if within market hours
-        asyncio.create_task(self._initial_price_update())
+    def stop(self):
+        """Stop the scheduler"""
+        self._running = False
+
+
+if __name__ == "__main__":
+    import sys
+    logging.basicConfig(level=logging.INFO)
     
-    async def _initial_price_update(self):
-        """Initial price update on startup if within market hours"""
-        await asyncio.sleep(2)  # Wait for scheduler to start
-        et_tz = pytz.timezone('US/Eastern')
-        now = datetime.now(et_tz)
-        market_open = time(9, 30)
-        market_close = time(16, 0)
-        current_time = now.time()
-        
-        if market_open <= current_time <= market_close:
-            logger.info(f"Triggering initial price update on startup (current time: {current_time})")
-            await self.ingest_latest_prices()
-
-    def shutdown(self):
-        """Shutdown the scheduler"""
-        self.scheduler.shutdown()
-        logger.info("Data scheduler shutdown")
+    scheduler = DataScheduler(settings.database_url)
+    try:
+        asyncio.run(scheduler.run())
+    except KeyboardInterrupt:
+        logger.info("Scheduler stopped by user")
+        scheduler.stop()

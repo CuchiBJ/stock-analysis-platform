@@ -1,7 +1,6 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { apiClient } from '@/lib/api/client'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import { TrendingUp, TrendingDown, Activity, Flame, ArrowUp, ArrowDown } from 'lucide-react'
@@ -12,15 +11,17 @@ export default function SectorHeatmap() {
   const [data, setData] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [viewMode, setViewMode] = useState<ViewMode>('daily')
+  const [viewMode, setViewMode] = useState<ViewMode>('weekly')
 
   useEffect(() => {
     const fetchData = async () => {
       try {
         setLoading(true)
         setError(null)
-        const response = await apiClient.get<any[]>('/sectors/performance?timeframe=daily', { cache: true })
-        setData(response)
+        const response = await fetch('http://localhost:8000/api/v1/sectors/performance?timeframe=daily')
+        if (!response.ok) throw new Error('Failed to load sector data')
+        const data = await response.json()
+        setData(data)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load sector data')
         console.error('Error loading sector data:', err)
@@ -37,13 +38,13 @@ export default function SectorHeatmap() {
 
   const getValueByMode = (sector: any) => {
     switch (viewMode) {
-      case 'daily': return sector.performance_daily || 0
+      case 'daily': return sector.performance_weekly || 0  // Use weekly since daily no longer available
       case 'weekly': return sector.performance_weekly || 0
       case 'monthly': return sector.performance_monthly || 0
       case 'rs_spy': return sector.performance_vs_spy || 0
-      case 'momentum': return sector.performance_daily || 0 // Simplified
+      case 'momentum': return sector.performance_weekly || 0 // Simplified
       case 'rvol': return sector.volume_trend === 'increasing' ? 2 : sector.volume_trend === 'decreasing' ? -1 : 0
-      default: return sector.performance_daily || 0
+      default: return sector.performance_weekly || 0
     }
   }
 
@@ -77,7 +78,7 @@ export default function SectorHeatmap() {
   }
 
   const viewModeLabels: Record<ViewMode, string> = {
-    daily: 'Daily %',
+    daily: 'Weekly %',
     weekly: 'Weekly %',
     monthly: 'Monthly %',
     rs_spy: 'RS vs SPY',
@@ -126,7 +127,7 @@ export default function SectorHeatmap() {
         <div className="flex items-center gap-3">
           <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Sector Rotation</h3>
           <div className="flex gap-1">
-            {(['daily', 'weekly', 'monthly', 'rs_spy', 'momentum', 'rvol'] as ViewMode[]).map((mode) => (
+            {(['weekly', 'monthly', 'rs_spy', 'momentum', 'rvol'] as ViewMode[]).map((mode) => (
               <button
                 key={mode}
                 onClick={() => setViewMode(mode)}

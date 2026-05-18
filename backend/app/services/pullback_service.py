@@ -5,6 +5,8 @@ from sqlalchemy import select, and_, or_
 from typing import List, Dict, Optional
 from app.models.stock import Stock, StockMetrics
 from app.services.sector_mapping import map_sector_to_tradingview
+# from app.core.redis import redis_client  # DISABLED - Redis not running
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -22,11 +24,11 @@ class PullbackService:
         limit: int = 50
     ) -> List[Dict]:
         """
-        Get quality pullbacks - strong leaders above EMA21
+        Get quality pullbacks - strong leaders near EMA21
 
         Criteria:
         - Pullback quality score >= min_score
-        - Price above EMA21 (optimal pullback zone)
+        - Price within 2% of EMA21 (near optimal pullback zone)
         - Near ATH (within 20%)
         - Strong weekly structure
         - Volume contraction
@@ -37,15 +39,36 @@ class PullbackService:
         - ADR% > 3% (avoid low volatility stocks)
         """
         try:
-            # Get stocks with metrics
+            # Try cache first (DISABLED - Redis not running)
+            # cache_key = f"quality_pullbacks:{min_score}:{limit}"
+            # redis = await redis_client.get_client()
+            # cached = await redis.get(cache_key)
+            
+            # if cached:
+            #     logger.info(f"Cache hit for {cache_key}")
+            #     return json.loads(cached)
+            
+            # Use subquery to get only the latest metrics per symbol
+            from sqlalchemy import func
+            subquery = select(
+                StockMetrics.symbol,
+                func.max(StockMetrics.date).label('max_date')
+            ).group_by(StockMetrics.symbol).subquery()
+            
+            # Get stocks with metrics (latest date only)
             result = await self.db.execute(
                 select(Stock, StockMetrics)
                 .join(StockMetrics, Stock.symbol == StockMetrics.symbol)
+                .join(
+                    subquery,
+                    (StockMetrics.symbol == subquery.c.symbol) &
+                    (StockMetrics.date == subquery.c.max_date)
+                )
                 .where(
                     and_(
                         Stock.is_active == True,
                         StockMetrics.pullback_quality_score >= min_score,
-                        StockMetrics.distance_to_ema21 >= 0,  # Price above EMA21 (optimal pullback zone)
+                        StockMetrics.distance_to_ema21 >= -2,  # Within 2% of EMA21 (near optimal pullback zone)
                         StockMetrics.distance_to_high_52w >= -20,  # Within 20% of ATH
                         StockMetrics.weekly_trend_quality >= 0.5,  # Strong weekly trend
                         StockMetrics.setup_quality.in_(['excellent', 'good', 'fair']),
@@ -88,6 +111,7 @@ class PullbackService:
                     'relative_volume': metrics.relative_volume
                 })
             
+            logger.info(f"Returning {len(pullbacks)} quality pullbacks")
             return pullbacks
             
         except Exception as e:

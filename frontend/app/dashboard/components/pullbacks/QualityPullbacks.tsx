@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 
 interface QualityPullback {
   symbol: string
@@ -22,29 +22,17 @@ interface QualityPullback {
 }
 
 export default function QualityPullbacks() {
-  const [stocks, setStocks] = useState<QualityPullback[]>([])
-  const [loading, setLoading] = useState(true)
-  const [lastUpdated, setLastUpdated] = useState<Date>(new Date())
-
-  const fetchData = async () => {
-    try {
-      const response = await fetch('/api/v1/pullbacks/quality/?limit=25')
-      const data = await response.json()
-      setStocks(data)
-      setLastUpdated(new Date())
-    } catch (error) {
-      console.error('Error fetching quality pullbacks:', error)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    fetchData()
-    // Auto-refresh every 60 seconds
-    const interval = setInterval(fetchData, 60000)
-    return () => clearInterval(interval)
-  }, [])
+  const { data: stocks = [], isLoading, error } = useQuery({
+    queryKey: ['quality-pullbacks'],
+    queryFn: async () => {
+      const response = await fetch('http://localhost:8000/api/v1/pullbacks/quality/?limit=25')
+      if (!response.ok) {
+        throw new Error('Failed to fetch quality pullbacks')
+      }
+      return response.json() as Promise<QualityPullback[]>
+    },
+    refetchInterval: 60000, // Auto-refresh every 60 seconds
+  })
 
   const getSetupQualityColor = (quality: string) => {
     switch (quality) {
@@ -69,7 +57,7 @@ export default function QualityPullbacks() {
     return num.toFixed(decimals)
   }
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="bg-white rounded-lg shadow p-4">
         <div className="animate-pulse space-y-3">
@@ -108,9 +96,12 @@ export default function QualityPullbacks() {
           </thead>
           <tbody className="divide-y divide-gray-100">
             {stocks.map((pullback) => (
-              <tr key={pullback.symbol} className="hover:bg-gray-50">
+              <tr
+                key={pullback.symbol}
+                className="hover:bg-gray-50 transition-colors duration-200 cursor-pointer group"
+              >
                 <td className="px-3 py-2">
-                  <div className="font-semibold text-gray-900">{pullback.symbol}</div>
+                  <div className="font-semibold text-gray-900 group-hover:text-blue-600 transition-colors duration-200">{pullback.symbol}</div>
                   <div className="text-xs text-gray-500 truncate max-w-[120px]">{pullback.name}</div>
                 </td>
                 <td className="px-3 py-2">

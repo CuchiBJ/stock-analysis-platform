@@ -20,19 +20,27 @@ class TickerListSource:
     def get_sp500_tickers(self) -> List[str]:
         """Fetch S&P 500 tickers using yfinance"""
         try:
-            # Use pandas to read Wikipedia table
+            # Use pandas to read Wikipedia table with proper headers
             url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
             headers = {'User-Agent': 'Mozilla/5.0'}
             tables = pd.read_html(url, header=0)
             df = tables[0]
-            tickers = df['Symbol'].tolist()
+            
+            # Ensure we get the Symbol column
+            if 'Symbol' in df.columns:
+                tickers = df['Symbol'].tolist()
+            elif 'Ticker symbol' in df.columns:
+                tickers = df['Ticker symbol'].tolist()
+            else:
+                logger.error(f"Available columns: {df.columns.tolist()}")
+                return []
             
             # Clean tickers
             clean_tickers = []
             for ticker in tickers:
                 if isinstance(ticker, str):
                     ticker = ticker.replace('.', '').replace('-', '')
-                    if ticker and ticker.isalpha():
+                    if ticker and ticker.isalpha() and len(ticker) <= 5:  # Valid ticker length
                         clean_tickers.append(ticker.upper())
             
             logger.info(f"Fetched {len(clean_tickers)} S&P 500 tickers")
@@ -57,16 +65,17 @@ class TickerListSource:
                     ticker_col = 'Ticker' if 'Ticker' in df.columns else 'Symbol'
                     tickers = df[ticker_col].tolist()
                     
-                    # Clean tickers
+                    # Clean tickers with validation
                     clean_tickers = []
                     for ticker in tickers:
                         if isinstance(ticker, str):
                             ticker = ticker.replace('.', '').replace('-', '')
-                            if ticker and ticker.isalpha():
+                            if ticker and ticker.isalpha() and len(ticker) <= 5:  # Valid ticker
                                 clean_tickers.append(ticker.upper())
                     
-                    logger.info(f"Fetched {len(clean_tickers)} Russell 2000 tickers")
-                    return clean_tickers
+                    if clean_tickers:
+                        logger.info(f"Fetched {len(clean_tickers)} Russell 2000 tickers")
+                        return clean_tickers
             
             logger.warning("Could not find ticker table for Russell 2000")
             return []
@@ -90,16 +99,17 @@ class TickerListSource:
                     ticker_col = 'Ticker' if 'Ticker' in df.columns else 'Symbol'
                     tickers = df[ticker_col].tolist()
                     
-                    # Clean tickers
+                    # Clean tickers with validation
                     clean_tickers = []
                     for ticker in tickers:
                         if isinstance(ticker, str):
                             ticker = ticker.replace('.', '').replace('-', '')
-                            if ticker and ticker.isalpha():
+                            if ticker and ticker.isalpha() and len(ticker) <= 5:  # Valid ticker
                                 clean_tickers.append(ticker.upper())
                     
-                    logger.info(f"Fetched {len(clean_tickers)} Russell Midcap tickers")
-                    return clean_tickers
+                    if clean_tickers:
+                        logger.info(f"Fetched {len(clean_tickers)} Russell Midcap tickers")
+                        return clean_tickers
             
             logger.warning("Could not find ticker table for Russell Midcap")
             return []
@@ -125,8 +135,8 @@ class TickerListSource:
                 if len(cells) > 1:
                     ticker = cells[1].text.strip()
                     ticker = ticker.replace('.', '').replace('-', '')
-                    if ticker:
-                        tickers.append(ticker)
+                    if ticker and ticker.isalpha() and len(ticker) <= 5:  # Valid ticker
+                        tickers.append(ticker.upper())
             
             logger.info(f"Fetched {len(tickers)} NASDAQ-100 tickers")
             return tickers

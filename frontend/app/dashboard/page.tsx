@@ -1,89 +1,76 @@
 'use client'
 
+import { useEffect } from 'react'
 import DashboardLayout from '@/components/layout/DashboardLayout'
+import Card from '@/components/base/Card'
 import dynamic from 'next/dynamic'
-import IndexGrid from './components/market-overview/IndexGrid'
-import BreadthPanel from './components/market-breadth/BreadthPanel'
-import MarketStatePanel from './components/market-state/MarketStatePanel'
-import CapitalFlowPanel from './components/capital-flow/CapitalFlowPanel'
-import { useMarketStore } from '@/lib/store/marketStore'
-import { useIndices, useBreadth } from '@/lib/hooks/useMarketData'
 
+// MARKET CONTEXT (Top Row)
+const MarketRegimePanel = dynamic(() => import('./components/market-regime/MarketRegimePanel'), { ssr: false })
+const LeaderHealthMap = dynamic(() => import('./components/leader-health/LeaderHealthMap'), { ssr: false })
+
+// LIVE TRANSITIONS (Center Row)
+const LiveTransitionFeed = dynamic(() => import('@/components/dashboard/LiveTransitionFeed'), { ssr: false })
+const TopActionableSetups = dynamic(() => import('@/components/dashboard/TopActionableSetups'), { ssr: false })
+
+// CONTEXTUAL FEED (Bottom Row)
 const SectorHeatmap = dynamic(() => import('@/components/charts/SectorHeatmap'), { ssr: false })
-const LeadersTable = dynamic(() => import('./components/leaders/LeadersTable'), { ssr: false })
-const QuickScanner = dynamic(() => import('./components/quick-scanner/QuickScanner'), { ssr: false })
-const QualityPullbacks = dynamic(() => import('./components/pullbacks/QualityPullbacks'), { ssr: false })
-const LeadersUnderPressure = dynamic(() => import('./components/pullbacks/LeadersUnderPressure'), { ssr: false })
-const EarlyReclaims = dynamic(() => import('./components/pullbacks/EarlyReclaims'), { ssr: false })
-const ControlledPullbacks = dynamic(() => import('./components/pullbacks/ControlledPullbacks'), { ssr: false })
 const WeeklyStructurePanel = dynamic(() => import('./components/weekly-structure/WeeklyStructurePanel'), { ssr: false })
-const MarketEnvironmentPanel = dynamic(() => import('./components/market-environment/MarketEnvironmentPanel'), { ssr: false })
-const QualitySwingScanner = dynamic(() => import('./components/quality-swing-scanner/QualitySwingScanner'), { ssr: false })
-const WeeklyFirstVisuals = dynamic(() => import('./components/weekly-first-visuals/WeeklyFirstVisuals'), { ssr: false })
-const RelativeStrengthVisuals = dynamic(() => import('./components/relative-strength/RelativeStrengthVisuals'), { ssr: false })
 
 export default function DashboardPage() {
-  useIndices()
-  useBreadth()
-  const indices = useMarketStore((state) => state.indices)
-  const indicesLoading = useMarketStore((state) => state.indicesLoading)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Keyboard shortcuts
+      if (e.key === 'r' && !e.ctrlKey && !e.metaKey) {
+        // 'r' to refresh
+        window.location.reload()
+      } else if (e.key === '1') {
+        // '1' to scroll to Live Transitions
+        document.getElementById('live-transitions')?.scrollIntoView({ behavior: 'smooth' })
+      } else if (e.key === '2') {
+        // '2' to scroll to Top Actionable Setups
+        document.getElementById('actionable-setups')?.scrollIntoView({ behavior: 'smooth' })
+      } else if (e.key === '3') {
+        // '3' to scroll to Market Context
+        document.getElementById('market-context')?.scrollIntoView({ behavior: 'smooth' })
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [])
 
   return (
     <DashboardLayout>
-      {/* TOP ROW: Market State + Indices */}
-      <div className="mb-4">
-        <MarketStatePanel />
-      </div>
-
-      <div className="mb-4">
-        <IndexGrid indices={indices} loading={indicesLoading} />
-      </div>
-
-      {/* MARKET ENVIRONMENT ROW */}
-      <div className="mb-4">
-        <MarketEnvironmentPanel />
-      </div>
-
-      {/* PRIMARY ROW: Quality Pullbacks (Most Important - Top Priority) */}
-      <div className="mb-4">
-        <QualityPullbacks />
-      </div>
-
-      {/* SECONDARY ROW: Leaders Under Pressure + Controlled Pullbacks */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
-        <LeadersUnderPressure />
-        <ControlledPullbacks />
-      </div>
-
-      {/* TERTIARY ROW: Early Reclaims + Weekly Structure */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
-        <EarlyReclaims />
-        <WeeklyStructurePanel />
-      </div>
-
-      {/* QUATERNARY ROW: Weekly First Visuals */}
-      <div className="mb-4">
-        <WeeklyFirstVisuals />
-      </div>
-
-      {/* QUINARY ROW: Relative Strength Visuals */}
-      <div className="mb-4">
-        <RelativeStrengthVisuals />
-      </div>
-
-      {/* SENARY ROW: Sector Rotation + Quality Swing Scanner */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
-        <div>
-          <h2 className="text-sm font-semibold text-muted-foreground mb-2 uppercase tracking-wide">Sector Rotation</h2>
-          <SectorHeatmap />
+      {/* TOP ROW: Market Context (3 panels horizontal - compact) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4" id="market-context">
+        <MarketRegimePanel />
+        <LeaderHealthMap />
+        <div className="bg-white/5 border border-white/10 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-2">Market Forgiveness</h3>
+          <p className="text-xs text-muted-foreground">Coming soon</p>
         </div>
-        <QualitySwingScanner />
       </div>
 
-      {/* BOTTOM ROW: Market Breadth + Capital Flow */}
+      {/* CENTER ROW: Live Transitions (left) + Top Actionable Setups (right) */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+        <div id="live-transitions">
+          <LiveTransitionFeed />
+        </div>
+        <div id="actionable-setups">
+          <TopActionableSetups />
+        </div>
+      </div>
+
+      {/* BOTTOM ROW: Sector Leadership + Structure Feed (compact) */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <BreadthPanel />
-        <CapitalFlowPanel />
+        <Card blockType="sector" className="p-4">
+          <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">Sector Leadership</h3>
+          <SectorHeatmap />
+        </Card>
+        <div id="weekly-structure">
+          <WeeklyStructurePanel />
+        </div>
       </div>
     </DashboardLayout>
   )

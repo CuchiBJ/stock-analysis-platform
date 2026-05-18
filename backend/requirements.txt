@@ -10,3 +10,6 @@ httpx>=0.26.0
 apscheduler>=3.10.0
 pandas>=2.1.0
 numpy>=1.26.0
+redis>=5.0.0
+hiredis>=2.3.0
+websockets>=12.0

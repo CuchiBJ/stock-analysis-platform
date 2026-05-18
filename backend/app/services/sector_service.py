@@ -11,9 +11,9 @@ class SectorService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    @cache_sectors
+    # @cache_sectors  # DISABLED - testing if cache is causing issues
     async def calculate_sector_performance(self) -> List[Dict]:
-        """Calculate sector performance from real stock price changes"""
+        """Calculate sector performance from stock metrics (simplified for performance)"""
         # Get all sectors with stocks
         result = await self.db.execute(
             select(Stock.sector, func.count(Stock.symbol).label('count'))
@@ -25,91 +25,56 @@ class SectorService:
         sector_performance = []
         
         for sector_name, count in sectors:
-            # Get stocks in sector
-            stocks_result = await self.db.execute(
-                select(Stock.symbol)
+            # Get stocks in sector with latest metrics (simplified query)
+            metrics_result = await self.db.execute(
+                select(StockMetrics, Stock)
+                .join(Stock, Stock.symbol == StockMetrics.symbol)
                 .where(Stock.sector == sector_name)
+                .where(Stock.is_active == True)
+                .order_by(StockMetrics.date.desc())
+                .limit(1000)  # Limit to avoid timeout
             )
-            symbols = [row[0] for row in stocks_result.fetchall()]
+            metrics = metrics_result.all()
             
-            if not symbols:
+            if not metrics:
                 continue
             
-            # Calculate real performance using price history
-            import math
-            daily_perfs = []
-            weekly_perfs = []
-            monthly_perfs = []
+            # Calculate average performance from metrics (simplified)
+            # Use correct fields: perf_1w for weekly, perf_4w for monthly
+            weekly_perfs = [m[0].perf_1w for m in metrics if m[0].perf_1w is not None]  # Weekly performance
+            monthly_perfs = [m[0].perf_4w for m in metrics if m[0].perf_4w is not None]  # 4 weeks ≈ 1 month
             
-            for symbol in symbols:
-                # Get latest price and prices from 1 day, 1 week, and 1 month ago
-                prices_result = await self.db.execute(
-                    select(StockPrice.date, StockPrice.close)
-                    .where(StockPrice.symbol == symbol)
-                    .order_by(StockPrice.date.desc())
-                    .limit(30)  # Get last 30 days for monthly calculation
-                )
-                prices = prices_result.fetchall()
-                
-                if len(prices) < 2:
-                    continue
-                
-                latest_price = prices[0].close
-                latest_date = prices[0].date
-                
-                # Calculate daily performance (vs previous day)
-                if len(prices) >= 2:
-                    prev_day_price = prices[1].close
-                    daily_perf = ((latest_price - prev_day_price) / prev_day_price) * 100
-                    if math.isfinite(daily_perf):
-                        daily_perfs.append(daily_perf)
-                
-                # Calculate weekly performance (vs 7 days ago)
-                if len(prices) >= 7:
-                    week_ago_price = prices[6].close
-                    weekly_perf = ((latest_price - week_ago_price) / week_ago_price) * 100
-                    if math.isfinite(weekly_perf):
-                        weekly_perfs.append(weekly_perf)
-                
-                # Calculate monthly performance (vs 20 days ago)
-                if len(prices) >= 20:
-                    month_ago_price = prices[19].close
-                    monthly_perf = ((latest_price - month_ago_price) / month_ago_price) * 100
-                    if math.isfinite(monthly_perf):
-                        monthly_perfs.append(monthly_perf)
-            
-            if not daily_perfs:
+            if not weekly_perfs:
                 continue
             
-            # Calculate average performance
-            avg_daily = sum(daily_perfs) / len(daily_perfs)
-            avg_weekly = sum(weekly_perfs) / len(weekly_perfs) if weekly_perfs else avg_daily * 5
-            avg_monthly = sum(monthly_perfs) / len(monthly_perfs) if monthly_perfs else avg_daily * 20
+            avg_weekly = sum(weekly_perfs) / len(weekly_perfs)
+            avg_monthly = sum(monthly_perfs) / len(monthly_perfs) if monthly_perfs else avg_weekly * 4
             
             # Filter out infinity and NaN values
             import math
-            if not (math.isfinite(avg_daily) and math.isfinite(avg_weekly) and math.isfinite(avg_monthly)):
+            if not (math.isfinite(avg_weekly) and math.isfinite(avg_monthly)):
                 continue
             
-            # Get SPY performance for comparison
-            spy_performance = await self._get_spy_performance()
+            # Get SPY performance for comparison (simplified to 0)
+            spy_performance = 0
             performance_vs_spy = avg_monthly - spy_performance
             
             # Determine trend
-            trend = self._determine_trend(daily_perfs)
+            trend = 'accelerating' if avg_weekly > 1 else 'decelerating' if avg_weekly < -1 else 'steady'
             
             # Determine strength
-            strength = self._determine_strength(avg_monthly)
+            strength = 'strong' if avg_monthly > 2 else 'weak' if avg_monthly < -2 else 'moderate'
             
-            # Determine volume trend
-            volume_trend = await self._determine_volume_trend(symbols)
+            # Determine volume trend (simplified)
+            volume_trend = 'stable'
             
             # Get sector leaders (top 3 by monthly performance)
-            leaders = await self._get_sector_leaders_by_performance(symbols, 3)
+            stock_perfs = [(m[0].symbol, m[0].perf_4w or 0) for m in metrics if m[0].perf_4w is not None]
+            stock_perfs.sort(key=lambda x: x[1], reverse=True)
+            leaders = [symbol for symbol, _ in stock_perfs[:3]]
             
             sector_performance.append({
                 "name": sector_name,
-                "performance_daily": avg_daily,
                 "performance_weekly": avg_weekly,
                 "performance_monthly": avg_monthly,
                 "performance_vs_spy": performance_vs_spy,
