@@ -66,29 +66,40 @@ async def get_live_transitions(
         
         transitions = []
         for symbol, metrics_list in symbol_metrics.items():
+            current = metrics_list[0]
+            
             if len(metrics_list) >= 2:
-                current = metrics_list[0]
                 previous = metrics_list[1]
                 
                 # Calculate operational transition
                 op_transition = await transition_engine.calculate_operational_transition(
                     symbol, current, previous
                 )
-                
-                # Determine severity
-                severity = _determine_severity(op_transition.transition)
-                
-                transitions.append({
-                    "symbol": symbol,
-                    "transition": op_transition.transition.value,
-                    "direction": _get_transition_direction(op_transition.transition),
-                    "strength": op_transition.strength,
-                    "timestamp": op_transition.timestamp.isoformat(),
-                    "narrative": op_transition.narrative,
-                    "severity": severity,
-                    "rs_change": op_transition.rs_change,
-                    "volume_change_pct": op_transition.volume_change_pct
-                })
+            else:
+                # No previous data, assume stable
+                op_transition = type('obj', (object,), {
+                    'transition': OperationalTransition.STABLE,
+                    'strength': 0.5,
+                    'rs_change': 0.0,
+                    'volume_change_pct': 0.0,
+                    'narrative': 'No previous data for comparison.',
+                    'timestamp': datetime.utcnow()
+                })()
+            
+            # Determine severity
+            severity = _determine_severity(op_transition.transition)
+            
+            transitions.append({
+                "symbol": symbol,
+                "transition": op_transition.transition.value,
+                "direction": _get_transition_direction(op_transition.transition),
+                "strength": op_transition.strength,
+                "timestamp": op_transition.timestamp.isoformat(),
+                "narrative": op_transition.narrative,
+                "severity": severity,
+                "rs_change": op_transition.rs_change if hasattr(op_transition, 'rs_change') else 0.0,
+                "volume_change_pct": op_transition.volume_change_pct if hasattr(op_transition, 'volume_change_pct') else 0.0
+            })
         
         # Sort by strength and severity
         transitions.sort(key=lambda x: (x["strength"], _severity_score(x["severity"])), reverse=True)
