@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 from app.core.deps import get_db
@@ -216,9 +217,20 @@ async def get_actionable_setups(
         # Get market regime
         regime = await regime_engine.detect_regime()
         
-        # Get active setups with high pullback quality
+        # Get active setups with high pullback quality (latest date per symbol)
+        # Use subquery to filter to latest date per symbol
+        subquery = (
+            select(StockMetrics.symbol, func.max(StockMetrics.date).label('max_date'))
+            .group_by(StockMetrics.symbol)
+            .subquery()
+        )
+        
         result = await db.execute(
             select(StockMetrics)
+            .join(subquery, and_(
+                StockMetrics.symbol == subquery.c.symbol,
+                StockMetrics.date == subquery.c.max_date
+            ))
             .where(
                 and_(
                     StockMetrics.pullback_quality_score >= 55,

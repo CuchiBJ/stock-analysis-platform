@@ -53,7 +53,7 @@ class DataScheduler:
         
         # Trigger initial metrics update immediately
         logger.info("Triggering initial metrics update")
-        await self.trigger_metrics_update(limit=100)
+        await self.trigger_metrics_update(limit=1000)
         last_metrics_update = datetime.now(et_tz)
         
         while self._running:
@@ -72,7 +72,7 @@ class DataScheduler:
                 # Metrics update every 30 minutes
                 if last_metrics_update is None or (now - last_metrics_update).total_seconds() >= 1800:
                     logger.info(f"Triggering metrics update (current time: {current_time})")
-                    await self.trigger_metrics_update(limit=100)
+                    await self.trigger_metrics_update(limit=1000)
                     last_metrics_update = now
             else:
                 logger.info(f"Outside market hours (current time: {current_time})")
