@@ -6,6 +6,7 @@ from app.data.sources.polygon_client import PolygonClient
 from app.models.stock import Stock, StockPrice
 from app.data.processors.momentum import calculate_ema, calculate_rsi
 import logging
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -126,10 +127,14 @@ class PriceIngestor:
             ingestor = StockIngestor(self.db)
             symbols = await ingestor.get_active_symbols(limit=None)  # All active stocks
         
-        for symbol in symbols:
+        for i, symbol in enumerate(symbols):
             try:
                 count = await self._ingest_intraday_single(symbol)
                 total_count += count
+                
+                # Add delay between requests to avoid rate limiting (0.1s = 10 requests/sec)
+                if i < len(symbols) - 1:  # Don't delay after last symbol
+                    await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"Failed to ingest intraday prices for {symbol}: {e}")
                 continue
