@@ -40,7 +40,15 @@ async def get_live_transitions(
         
         result = await db.execute(
             select(StockMetrics)
-            .where(StockMetrics.date >= cutoff_date)
+            .where(
+                and_(
+                    StockMetrics.date >= cutoff_date,
+                    StockMetrics.pullback_quality_score >= 55,
+                    StockMetrics.distance_to_ema21 >= -5,
+                    StockMetrics.avg_volume_10d >= 700000,
+                    StockMetrics.adr_percent >= 3
+                )
+            )
             .order_by(StockMetrics.date.desc())
             .limit(500)  # Get more records to ensure we have enough per symbol
         )
