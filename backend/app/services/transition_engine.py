@@ -152,7 +152,12 @@ class TransitionEngine:
                 timestamp=datetime.utcnow()
             )
         
-        # Calculate changes
+        # Calculate changes including EMA21 distance change
+        ema21_distance_change = 0.0
+        if (current_metrics.distance_to_ema21 is not None and 
+            previous_metrics.distance_to_ema21 is not None):
+            ema21_distance_change = current_metrics.distance_to_ema21 - previous_metrics.distance_to_ema21
+        
         rs_change = 0.0
         if current_metrics.relative_strength_spy and previous_metrics.relative_strength_spy:
             rs_change = current_metrics.relative_strength_spy - previous_metrics.relative_strength_spy
@@ -169,7 +174,7 @@ class TransitionEngine:
         
         # Determine transition type
         transition = self._determine_operational_transition(
-            rs_change, volume_change_pct, structure_change, current_metrics
+            rs_change, volume_change_pct, structure_change, ema21_distance_change, current_metrics
         )
         
         # Calculate strength
@@ -578,23 +583,27 @@ class TransitionEngine:
         rs_change: float,
         volume_change_pct: float,
         structure_change: float,
+        ema21_distance_change: float,
         current_metrics: StockMetrics
     ) -> OperationalTransition:
         """
         Determine operational transition type based on metrics changes.
         """
         # Check for failing conditions first (highest priority)
+        # Failing if below EMA21 and moving further away
         if (current_metrics.distance_to_ema21 is not None and 
-            current_metrics.distance_to_ema21 < -10):
+            current_metrics.distance_to_ema21 < -5 and 
+            ema21_distance_change < -2):
             return OperationalTransition.FAILING
         if (current_metrics.distance_to_ema50 is not None and 
             current_metrics.distance_to_ema50 < -10):
             return OperationalTransition.FAILING
         
-        # Check for reclaiming
+        # Check for reclaiming (moving toward EMA21 from below with significant change)
         if (current_metrics.distance_to_ema21 is not None and 
-            current_metrics.distance_to_ema21 >= -2 and 
-            current_metrics.distance_to_ema21 <= 2):
+            current_metrics.distance_to_ema21 >= -5 and 
+            current_metrics.distance_to_ema21 <= 2 and
+            ema21_distance_change > 1.0):
             return OperationalTransition.RECLAIMING
         
         # Check for improving (RS up + volume contracting + structure tightening)
