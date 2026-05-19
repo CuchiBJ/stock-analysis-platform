@@ -27,7 +27,7 @@ export default function LiveTransitionFeed() {
       try {
         setLoading(true)
         setError(null)
-        const response = await fetch('http://localhost:8000/api/v1/transitions/live?limit=10')
+        const response = await fetch('http://localhost:8000/api/v1/transitions/live?limit=20')
         if (!response.ok) throw new Error('Failed to load transitions')
         const data = await response.json()
         setTransitions(data)
