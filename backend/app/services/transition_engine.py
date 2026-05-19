@@ -599,11 +599,11 @@ class TransitionEngine:
             current_metrics.distance_to_ema50 < -10):
             return OperationalTransition.FAILING
         
-        # Check for reclaiming (moving toward EMA21 from below with significant change)
+        # Check for reclaiming (close to EMA21 from below and moving up)
         if (current_metrics.distance_to_ema21 is not None and 
-            current_metrics.distance_to_ema21 >= -5 and 
-            current_metrics.distance_to_ema21 <= 2 and
-            ema21_distance_change > 1.0):
+            current_metrics.distance_to_ema21 >= -2 and 
+            current_metrics.distance_to_ema21 <= 0 and
+            ema21_distance_change > 0.5):
             return OperationalTransition.RECLAIMING
         
         # Check for improving (RS up + volume contracting + structure tightening)
