@@ -60,6 +60,7 @@ class StockMetrics(Base):
     distance_to_ema9: Mapped[float] = mapped_column(Float, nullable=True)
     distance_to_ema21: Mapped[float] = mapped_column(Float, nullable=True)
     distance_to_high_52w: Mapped[float] = mapped_column(Float, nullable=True)
+    high_52w: Mapped[float] = mapped_column(Float, nullable=True)
     avg_volume_20d: Mapped[int] = mapped_column(Integer, nullable=True)
     relative_volume: Mapped[float] = mapped_column(Float, nullable=True)
     # Additional indicators for custom screener

@@ -132,6 +132,7 @@ class MetricsCalculator:
                 existing_metrics.distance_to_ema20 = dist_ema20
                 existing_metrics.distance_to_ema50 = dist_ema50
                 existing_metrics.distance_to_high_52w = dist_high_52w
+                existing_metrics.high_52w = float(high_52w)
                 existing_metrics.avg_volume_20d = int(avg_vol_20d)
                 existing_metrics.relative_volume = rel_vol
                 # New indicators

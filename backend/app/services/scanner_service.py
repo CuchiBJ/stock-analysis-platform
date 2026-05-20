@@ -338,7 +338,7 @@ class ScannerService:
                 above_low_52w = 0
             
             # Filter by 52W range > 60% and price > 52W low by 70%
-            if range_52w > 0.6 and above_low_52w > 0.7:
+            if range_52w > 0.6 and above_low_52w > 0.7 and metrics.high_52w >= metrics.low_52w * 1.6:
                 results.append({
                     "symbol": stock.symbol,
                     "name": stock.name,

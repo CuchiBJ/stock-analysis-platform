@@ -57,6 +57,7 @@ class StockMetricsBase(BaseModel):
     distance_to_ema20: Optional[float] = None
     distance_to_ema50: Optional[float] = None
     distance_to_high_52w: Optional[float] = None
+    high_52w: Optional[float] = None
     avg_volume_20d: Optional[int] = None
     relative_volume: Optional[float] = None
 
