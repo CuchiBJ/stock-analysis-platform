@@ -43,13 +43,14 @@ async def get_live_transitions(
             .where(
                 and_(
                     StockMetrics.date >= cutoff_date,
-                    StockMetrics.pullback_quality_score >= 55,
-                    StockMetrics.distance_to_ema21 >= -5,
+                    StockMetrics.pullback_quality_score >= 55,  # Institutional quality
+                    StockMetrics.distance_to_ema21_atr >= -0.8,  # ATR-normalized: near EMA21 (pullback or extended)
+                    StockMetrics.distance_to_ema21_atr <= 0.5,  # ATR-normalized: not too extended above
+                    StockMetrics.distance_to_high_52w_atr >= -3.0,  # ATR-normalized: within 3 ATRs of high
                     StockMetrics.avg_volume_10d >= 700000,
                     StockMetrics.adr_percent >= 3,
                     StockMetrics.current_price >= StockMetrics.low_52w * 1.7,
-                    StockMetrics.current_price > StockMetrics.ema50,
-                    StockMetrics.distance_to_high_52w >= -40
+                    StockMetrics.current_price > StockMetrics.ema50
                 )
             )
             .order_by(StockMetrics.date.desc())
@@ -255,8 +256,10 @@ async def get_actionable_setups(
             ))
             .where(
                 and_(
-                    StockMetrics.pullback_quality_score >= 55,
-                    StockMetrics.distance_to_ema21 >= -5,
+                    StockMetrics.pullback_quality_score >= 55,  # Institutional quality
+                    StockMetrics.distance_to_ema21_atr >= -0.8,  # ATR-normalized: near EMA21 (pullback or extended)
+                    StockMetrics.distance_to_ema21_atr <= 0.5,  # ATR-normalized: not too extended above
+                    StockMetrics.distance_to_high_52w_atr >= -3.0,  # ATR-normalized: within 3 ATRs of high
                     StockMetrics.avg_volume_10d >= 700000,
                     StockMetrics.adr_percent >= 3
                 )

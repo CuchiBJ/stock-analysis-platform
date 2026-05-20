@@ -99,11 +99,26 @@ class MetricsCalculator:
             weekly_trend_quality = self._calculate_weekly_trend_quality(df)
             weeks_in_base = self._calculate_weeks_in_base(df)
             
-            # Pullback quality metrics
+            # Volatility metrics (calculate before pullback quality for ATR-normalized)
+            atr = self._calculate_atr(df)
+            current_price = close_prices.iloc[-1]
+            atr_percent = (atr / current_price * 100) if current_price > 0 else 0.0
+            
+            # ATR-normalized positioning (contextual, volatility-aware)
+            # distance_to_ema_atr = (price - ema) / atr
+            # Positive = above EMA, Negative = below EMA
+            # Values in ATR units (e.g., -2.5 = 2.5 ATRs below EMA)
+            dist_ema9_atr = (current_price - ema9) / atr if atr > 0 else 0.0
+            dist_ema21_atr = (current_price - ema21) / atr if atr > 0 else 0.0
+            dist_ema50_atr = (current_price - ema50) / atr if atr > 0 else 0.0
+            dist_high_52w_atr = (current_price - high_52w) / atr if atr > 0 and high_52w else 0.0
+            
+            # Pullback quality metrics (now can use ATR-normalized)
             volume_contraction = self._calculate_volume_contraction(volumes)
             pullback_quality_score = self._calculate_pullback_quality_score(
                 dist_ema9, dist_ema21, dist_high_52w, weekly_tightness, 
-                volume_contraction, weekly_trend_quality
+                volume_contraction, weekly_trend_quality,
+                dist_ema9_atr, dist_ema21_atr, dist_high_52w_atr
             )
             setup_quality = self._determine_setup_quality(pullback_quality_score, dist_ema9, dist_ema21)
             
@@ -156,6 +171,14 @@ class MetricsCalculator:
                 existing_metrics.volume_contraction = volume_contraction
                 existing_metrics.pullback_quality_score = pullback_quality_score
                 existing_metrics.setup_quality = setup_quality
+                # Volatility metrics
+                existing_metrics.atr = atr
+                existing_metrics.atr_percent = atr_percent
+                # ATR-normalized positioning
+                existing_metrics.distance_to_ema9_atr = dist_ema9_atr
+                existing_metrics.distance_to_ema21_atr = dist_ema21_atr
+                existing_metrics.distance_to_ema50_atr = dist_ema50_atr
+                existing_metrics.distance_to_high_52w_atr = dist_high_52w_atr
                 self.db.add(existing_metrics)
             else:
                 # Create new
@@ -195,7 +218,15 @@ class MetricsCalculator:
                     # Pullback quality metrics
                     volume_contraction=volume_contraction,
                     pullback_quality_score=pullback_quality_score,
-                    setup_quality=setup_quality
+                    setup_quality=setup_quality,
+                    # Volatility metrics
+                    atr=atr,
+                    atr_percent=atr_percent,
+                    # ATR-normalized positioning
+                    distance_to_ema9_atr=dist_ema9_atr,
+                    distance_to_ema21_atr=dist_ema21_atr,
+                    distance_to_ema50_atr=dist_ema50_atr,
+                    distance_to_high_52w_atr=dist_high_52w_atr
                 )
                 self.db.add(metrics)
             
@@ -364,6 +395,27 @@ class MetricsCalculator:
         
         # Contraction ratio
         return float(1.0 - (recent_vol / avg_vol))
+    
+    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calculate Average True Range (ATR)"""
+        if len(df) < period + 1:
+            return 0.0
+        
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        prev_close = close.shift(1)
+        
+        # Calculate True Range (TR)
+        tr1 = high - low
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
+        # Calculate ATR (simple moving average of TR)
+        atr = tr.rolling(window=period).mean().iloc[-1]
+        
+        return float(atr) if not pd.isna(atr) else 0.0
 
     def _calculate_pullback_quality_score(
         self,
@@ -372,36 +424,55 @@ class MetricsCalculator:
         dist_high_52w: float,
         weekly_tightness: float,
         volume_contraction: float,
-        weekly_trend_quality: float
+        weekly_trend_quality: float,
+        dist_ema9_atr: float = None,
+        dist_ema21_atr: float = None,
+        dist_high_52w_atr: float = None
     ) -> float:
-        """Calculate overall pullback quality score (0-100)"""
+        """Calculate overall pullback quality score (0-100) - ATR-normalized"""
         score = 0.0
         
-        # Distance to fast EMAs (closer is better for pullback entry)
-        # Ideal: -5% to +5% from EMA9/21 (expanded from -2% to +2% for stocks with higher ADR)
-        if -5 <= dist_ema9 <= 5:
-            score += 20
-        elif -10 <= dist_ema9 <= 10:
-            score += 10
+        # Distance to fast EMAs using ATR-normalized positioning (contextual)
+        # Ideal: close to EMA9/21 (within 1.5 ATRs, regardless of sign)
+        if dist_ema9_atr is not None:
+            if abs(dist_ema9_atr) <= 0.5:
+                score += 25
+            elif abs(dist_ema9_atr) <= 1.0:
+                score += 20
+            elif abs(dist_ema9_atr) <= 1.5:
+                score += 15
+            elif abs(dist_ema9_atr) <= 2.0:
+                score += 10
         
-        if -5 <= dist_ema21 <= 5:
-            score += 15
-        elif -10 <= dist_ema21 <= 10:
-            score += 5
+        if dist_ema21_atr is not None:
+            if abs(dist_ema21_atr) <= 0.5:
+                score += 20
+            elif abs(dist_ema21_atr) <= 1.0:
+                score += 15
+            elif abs(dist_ema21_atr) <= 1.5:
+                score += 10
+            elif abs(dist_ema21_atr) <= 2.0:
+                score += 5
         
-        # Near 52-week high (indicates strong stock)
-        if dist_high_52w > -10:  # Within 10% of ATH
-            score += 15
-        elif dist_high_52w > -20:
-            score += 8
+        # Near 52-week high using ATR-normalized positioning (contextual)
+        # Ideal: within 2.0 ATRs of high (volatility-aware)
+        if dist_high_52w_atr is not None:
+            if dist_high_52w_atr >= -1.0:  # Within 1 ATR of high
+                score += 20
+            elif dist_high_52w_atr >= -2.0:  # Within 2 ATRs of high
+                score += 15
+            elif dist_high_52w_atr >= -3.0:  # Within 3 ATRs of high
+                score += 10
+            elif dist_high_52w_atr >= -4.0:  # Within 4 ATRs of high
+                score += 5
         
         # Weekly tightness
-        score += weekly_tightness * 15
+        score += weekly_tightness * 10
         
         # Volume contraction (drying up on pullback)
         score += max(0, volume_contraction) * 10
         
-        # Weekly trend quality
+        # Weekly trend quality (most important factor)
         score += weekly_trend_quality * 25
         
         return min(100.0, max(0.0, score))

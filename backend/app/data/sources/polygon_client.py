@@ -4,6 +4,9 @@ from app.core.config import settings
 from datetime import datetime, timedelta
 import yfinance as yf
 import logging
+import asyncio
+import random
+from app.data.sources.multi_api_client import MultiAPIClient
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +17,17 @@ class PolygonClient:
         self.base_url_v2 = "https://api.polygon.io/v2"
         self.base_url_v3 = "https://api.polygon.io/v3"
         self.client = httpx.AsyncClient(timeout=30.0)
+        # Use multi-API client for intraday data to distribute load
+        self.multi_api = MultiAPIClient()
+        # Rate limiting for yfinance calls
+        self._last_yfinance_call = None
+        self._yfinance_min_interval = 1.0  # Minimum 1 second between yfinance calls
+        # Tickers that don't have intraday data available (ETFs, preferred stocks, etc.)
+        self._intraday_excluded = {
+            'AGMpF', 'AGMpG', 'AGMpH', 'FMCKM', 'FNMAS',  # Preferred stocks
+            'PFF', 'PGX', 'PGF', 'PGJ', 'PGZ',  # Preferred ETFs
+            'BND', 'BNDX', 'BSV', 'VCIT', 'VCSH',  # Bond ETFs
+        }
 
     async def close(self):
         await self.client.aclose()
@@ -49,32 +63,24 @@ class PolygonClient:
         multiplier: int = 1,
         minutes: int = 60
     ) -> Dict[str, Any]:
-        """Get intraday OHLCV data for a symbol (real-time using yfinance)"""
+        """Get intraday OHLCV data using multi-API client with fallback"""
         try:
-            # Use yfinance for real-time intraday data (free)
-            ticker = yf.Ticker(symbol)
-            data = ticker.history(period="1d", interval="1m")
-            
-            if data.empty:
-                logger.warning(f"No intraday data for {symbol}")
+            # Skip tickers that don't have intraday data
+            if symbol.upper() in self._intraday_excluded:
+                logger.debug(f"Skipping intraday fetch for excluded ticker {symbol}")
                 return {"results": []}
-            
-            # Get the most recent data point
-            latest = data.iloc[-1]
-            
-            return {
-                "results": [{
-                    "t": int(latest.name.timestamp() * 1000),
-                    "o": float(latest['Open']),
-                    "h": float(latest['High']),
-                    "l": float(latest['Low']),
-                    "c": float(latest['Close']),
-                    "v": int(latest['Volume']),
-                    "vw": float(latest['Close'])  # Use close as VWAP approximation
-                }]
-            }
+
+            # Use multi-API client with fallback to distribute load
+            data = await self.multi_api.get_intraday_bars(symbol, timespan, multiplier, minutes)
+
+            if data and data.get("results"):
+                return data
+            else:
+                logger.warning(f"No intraday data for {symbol} from any API")
+                return {"results": []}
+
         except Exception as e:
-            logger.error(f"Error fetching intraday data for {symbol} from yfinance: {e}")
+            logger.error(f"Error fetching intraday data for {symbol}: {e}")
             return {"results": []}
 
     async def get_stock_details(self, symbol: str) -> Dict[str, Any]:

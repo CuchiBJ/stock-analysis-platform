@@ -75,7 +75,7 @@ class PullbackService:
                         StockMetrics.current_price >= StockMetrics.low_52w * 1.7,  # At least 70% above 52-week low
                         StockMetrics.distance_to_ema50 >= 0,  # Price above EMA50 - strong daily trend
                         StockMetrics.low_52w > 0,  # Ensure low_52w exists
-                        StockMetrics.high_52w >= StockMetrics.low_52w * 1.6,  # 52-week high >= 60% above low
+                        or_(StockMetrics.high_52w.is_(None), StockMetrics.high_52w >= StockMetrics.low_52w * 1.6),  # 52-week high >= 60% above low (or NULL if not yet calculated)
                         StockMetrics.adr_percent > 3,  # ADR% > 3%
                         StockMetrics.avg_volume_10d >= 700000  # Liquidity filter: avg volume > 700k
                     )
@@ -150,7 +150,7 @@ class PullbackService:
                         StockMetrics.current_price >= StockMetrics.low_52w * 1.7,  # At least 70% above 52-week low
                         StockMetrics.distance_to_ema50 >= 0,  # Price above EMA50 - strong daily trend
                         StockMetrics.low_52w > 0,  # Ensure low_52w exists
-                        StockMetrics.high_52w >= StockMetrics.low_52w * 1.6,  # 52-week high >= 60% above low
+                        or_(StockMetrics.high_52w.is_(None), StockMetrics.high_52w >= StockMetrics.low_52w * 1.6),  # 52-week high >= 60% above low (or NULL if not yet calculated)
                         StockMetrics.adr_percent > 3,  # ADR% > 3%
                         StockMetrics.avg_volume_10d >= 700000  # Liquidity filter: avg volume > 700k
                     )
@@ -215,7 +215,7 @@ class PullbackService:
                         StockMetrics.current_price >= StockMetrics.low_52w * 1.7,  # At least 70% above 52-week low
                         StockMetrics.distance_to_ema50 >= 0,  # Price above EMA50 - strong daily trend
                         StockMetrics.low_52w > 0,  # Ensure low_52w exists
-                        StockMetrics.high_52w >= StockMetrics.low_52w * 1.6,  # 52-week high >= 60% above low
+                        or_(StockMetrics.high_52w.is_(None), StockMetrics.high_52w >= StockMetrics.low_52w * 1.6),  # 52-week high >= 60% above low (or NULL if not yet calculated)
                         StockMetrics.adr_percent > 3,  # ADR% > 3%
                         StockMetrics.avg_volume_10d >= 700000  # Liquidity filter: avg volume > 700k
                     )
@@ -286,7 +286,7 @@ class PullbackService:
                         StockMetrics.current_price >= StockMetrics.low_52w * 1.7,  # At least 70% above 52-week low
                         StockMetrics.distance_to_ema50 >= 0,  # Price above EMA50 - strong daily trend
                         StockMetrics.low_52w > 0,  # Ensure low_52w exists
-                        StockMetrics.high_52w >= StockMetrics.low_52w * 1.6,  # 52-week high >= 60% above low
+                        or_(StockMetrics.high_52w.is_(None), StockMetrics.high_52w >= StockMetrics.low_52w * 1.6),  # 52-week high >= 60% above low (or NULL if not yet calculated)
                         StockMetrics.adr_percent > 3,  # ADR% > 3%
                         StockMetrics.avg_volume_10d >= 700000  # Liquidity filter: avg volume > 700k
                     )

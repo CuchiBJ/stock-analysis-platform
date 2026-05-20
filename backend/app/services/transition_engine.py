@@ -152,11 +152,11 @@ class TransitionEngine:
                 timestamp=datetime.utcnow()
             )
         
-        # Calculate changes including EMA21 distance change
+        # Calculate changes including EMA21 distance change (ATR-normalized)
         ema21_distance_change = 0.0
-        if (current_metrics.distance_to_ema21 is not None and 
-            previous_metrics.distance_to_ema21 is not None):
-            ema21_distance_change = current_metrics.distance_to_ema21 - previous_metrics.distance_to_ema21
+        if (current_metrics.distance_to_ema21_atr is not None and 
+            previous_metrics.distance_to_ema21_atr is not None):
+            ema21_distance_change = current_metrics.distance_to_ema21_atr - previous_metrics.distance_to_ema21_atr
         
         rs_change = 0.0
         if current_metrics.relative_strength_spy and previous_metrics.relative_strength_spy:
@@ -590,20 +590,20 @@ class TransitionEngine:
         Determine operational transition type based on metrics changes.
         """
         # Check for failing conditions first (highest priority)
-        # Failing if below EMA21 and moving further away
-        if (current_metrics.distance_to_ema21 is not None and 
-            current_metrics.distance_to_ema21 < -5 and 
-            ema21_distance_change < -2):
+        # Failing if below EMA21 and moving further away (ATR-normalized)
+        if (current_metrics.distance_to_ema21_atr is not None and 
+            current_metrics.distance_to_ema21_atr < -2.0 and 
+            ema21_distance_change < -0.5):
             return OperationalTransition.FAILING
         if (current_metrics.distance_to_ema50 is not None and 
             current_metrics.distance_to_ema50 < -10):
             return OperationalTransition.FAILING
         
-        # Check for reclaiming (close to EMA21 from below and moving up)
-        if (current_metrics.distance_to_ema21 is not None and 
-            current_metrics.distance_to_ema21 >= -2 and 
-            current_metrics.distance_to_ema21 <= 0 and
-            ema21_distance_change > 0.5):
+        # Check for reclaiming (close to EMA21 from below and moving up) - ATR-normalized
+        if (current_metrics.distance_to_ema21_atr is not None and 
+            current_metrics.distance_to_ema21_atr >= -1.0 and 
+            current_metrics.distance_to_ema21_atr <= 0.2 and
+            ema21_distance_change > 0.2):
             return OperationalTransition.RECLAIMING
         
         # Check for improving (RS up + volume contracting + structure tightening)

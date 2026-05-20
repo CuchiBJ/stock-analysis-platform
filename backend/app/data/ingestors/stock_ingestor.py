@@ -5,6 +5,7 @@ from app.data.sources.polygon_client import PolygonClient
 from app.data.sources.yahoo_client import YahooFinanceClient
 from app.data.sources.ticker_list_source import TickerListSource
 from app.data.sources.tradingview_client import TradingViewClient
+from app.data.ingestors.price_ingestor import PriceIngestor
 from app.models.stock import Stock
 from app.repositories.stock_repository import StockRepository
 import logging
@@ -20,6 +21,7 @@ class StockIngestor:
         self.ticker_source = TickerListSource()
         self.tradingview = TradingViewClient()
         self.repo = StockRepository(db)
+        self.price_ingestor = PriceIngestor(db)
 
     async def ingest_stock_list(
         self,
@@ -58,6 +60,13 @@ class StockIngestor:
                 
                 await self.repo.create(stock)
                 count += 1
+                
+                # Automatically ingest historical prices for new stocks
+                try:
+                    await self.price_ingestor.ingest_historical_prices(ticker["ticker"], days=365)
+                    logger.info(f"Ingested historical prices for {ticker['ticker']}")
+                except Exception as e:
+                    logger.warning(f"Failed to ingest historical prices for {ticker['ticker']}: {e}")
                 
                 if count % 100 == 0:
                     logger.info(f"Ingested {count} stocks")

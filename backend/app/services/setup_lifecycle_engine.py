@@ -66,31 +66,37 @@ class SetupLifecycleEngine:
     
     def detect_current_state(self, metrics: StockMetrics) -> SetupState:
         """
-        Detect current state based on technical structure (simplified to 7 states).
+        Detect current state using ATR-normalized positioning (contextual, volatility-aware).
         
-        Rule-based detection (no ML) for interpretability and rapid iteration.
-        Simplified logic to reduce false positives and improve selectivity.
+        This method provides a more sophisticated state detection that considers
+        each stock's individual volatility profile instead of using universal
+        percentage thresholds.
+        
+        Philosophy:
+        - Structure > Distance
+        - Volatility-aware positioning
+        - Contextual thresholds
         """
-        # Check for breakdown/failure states first
-        if self._is_broken(metrics):
+        # Check for breakdown/failure states first (ATR-normalized)
+        if self._is_broken_atr(metrics):
             return SetupState.BROKEN
         
-        if self._is_weakening(metrics):
+        if self._is_weakening_atr(metrics):
             return SetupState.WEAKENING
         
-        # Check for continuation states
-        if self._is_continuation(metrics):
+        # Check for continuation states (ATR-normalized)
+        if self._is_continuation_atr(metrics):
             return SetupState.CONTINUATION
         
-        # Check for trigger/entry state (conservative)
-        if self._is_trigger_ready(metrics):
+        # Check for trigger/entry state (ATR-normalized)
+        if self._is_trigger_ready_atr(metrics):
             return SetupState.TRIGGER_READY
         
-        # Check for pullback state
-        if self._is_constructive_pullback(metrics):
+        # Check for pullback state (ATR-normalized)
+        if self._is_constructive_pullback_atr(metrics):
             return SetupState.CONSTRUCTIVE_PULLBACK
         
-        # Check for early states
+        # Check for early states (use existing methods)
         if self._is_tightening(metrics):
             return SetupState.TIGHTENING
         
@@ -184,46 +190,7 @@ class SetupLifecycleEngine:
         
         return narratives.get(state, "State not recognized")
     
-    # --- Helper methods for state detection (simplified for 7 states) ---
-    
-    def _is_broken(self, metrics: StockMetrics) -> bool:
-        """Setup is broken - structure failed (conservative threshold)"""
-        if metrics.distance_to_ema50 is None:
-            return False
-        return metrics.distance_to_ema50 < -12  # More than 12% below EMA50 (raised from -10%)
-    
-    def _is_weakening(self, metrics: StockMetrics) -> bool:
-        """Setup is weakening - early signs of failure (conservative threshold)"""
-        if metrics.distance_to_ema21 is None:
-            return False
-        return metrics.distance_to_ema21 < -5  # More than 5% below EMA21 (raised from -3%)
-    
-    def _is_continuation(self, metrics: StockMetrics) -> bool:
-        """Trend continuation confirmed (conservative threshold)"""
-        if metrics.distance_to_ema21 is None:
-            return False
-        return (metrics.distance_to_ema21 >= 0 and 
-                metrics.distance_to_ema21 <= 5 and
-                metrics.weekly_trend_quality and 
-                metrics.weekly_trend_quality > 0.7)  # Raised from 0.6
-    
-    def _is_trigger_ready(self, metrics: StockMetrics) -> bool:
-        """Setup ready for trigger - all criteria met (conservative threshold)"""
-        if not metrics.pullback_quality_score:
-            return False
-        return (metrics.pullback_quality_score >= 75 and  # Raised from 60
-                metrics.distance_to_ema21 is not None and
-                metrics.distance_to_ema21 >= 0 and
-                metrics.distance_to_ema21 <= 2)  # Tighter range (raised from 3%)
-    
-    def _is_constructive_pullback(self, metrics: StockMetrics) -> bool:
-        """Orderly constructive pullback (conservative threshold)"""
-        if not metrics.pullback_quality_score:
-            return False
-        return (metrics.pullback_quality_score >= 60 and  # Raised from 50
-                metrics.distance_to_ema21 is not None and
-                metrics.distance_to_ema21 < -5 and
-                metrics.distance_to_ema21 >= -15)  # Deeper pullback allowed
+    # --- Helper methods for state detection (ATR-normalized, volatility-aware) ---
     
     def _is_tightening(self, metrics: StockMetrics) -> bool:
         """Tightening after initial move (conservative threshold)"""
@@ -236,3 +203,46 @@ class SetupLifecycleEngine:
         if metrics.weeks_in_base is None:
             return False
         return metrics.weeks_in_base < 3
+    
+    # --- ATR-Aware Helper Methods (volatility-normalized, contextual) ---
+    
+    def _is_broken_atr(self, metrics: StockMetrics) -> bool:
+        """Setup is broken - structure failed (ATR-normalized threshold)"""
+        if metrics.distance_to_ema50_atr is None:
+            return False
+        # More than 2.5 ATRs below EMA50 (contextual to volatility)
+        return metrics.distance_to_ema50_atr < -2.5
+    
+    def _is_weakening_atr(self, metrics: StockMetrics) -> bool:
+        """Setup is weakening - early signs of failure (ATR-normalized threshold)"""
+        if metrics.distance_to_ema21_atr is None:
+            return False
+        # More than 1.0 ATR below EMA21 (contextual to volatility)
+        return metrics.distance_to_ema21_atr < -1.0
+    
+    def _is_continuation_atr(self, metrics: StockMetrics) -> bool:
+        """Trend continuation confirmed (ATR-normalized threshold)"""
+        if metrics.distance_to_ema21_atr is None:
+            return False
+        return (metrics.distance_to_ema21_atr >= 0 and 
+                metrics.distance_to_ema21_atr <= 1.0 and
+                metrics.weekly_trend_quality and 
+                metrics.weekly_trend_quality > 0.7)
+    
+    def _is_trigger_ready_atr(self, metrics: StockMetrics) -> bool:
+        """Setup ready for trigger - all criteria met (ATR-normalized threshold)"""
+        if not metrics.pullback_quality_score:
+            return False
+        return (metrics.pullback_quality_score >= 70 and  # Lowered from 75
+                metrics.distance_to_ema21_atr is not None and
+                metrics.distance_to_ema21_atr >= -0.5 and  # Allow slightly below EMA21
+                metrics.distance_to_ema21_atr <= 1.0)  # Wider range
+    
+    def _is_constructive_pullback_atr(self, metrics: StockMetrics) -> bool:
+        """Orderly constructive pullback (ATR-normalized threshold)"""
+        if not metrics.pullback_quality_score:
+            return False
+        return (metrics.pullback_quality_score >= 55 and  # Lowered from 60
+                metrics.distance_to_ema21_atr is not None and
+                metrics.distance_to_ema21_atr < -0.5 and
+                metrics.distance_to_ema21_atr >= -4.0)  # Wider range (0.5-4 ATRs below EMA21)

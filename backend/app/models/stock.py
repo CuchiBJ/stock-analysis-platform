@@ -55,10 +55,10 @@ class StockMetrics(Base):
     rsi: Mapped[float] = mapped_column(Float, nullable=True)
     relative_strength_spy: Mapped[float] = mapped_column(Float, nullable=True)
     relative_strength_qqq: Mapped[float] = mapped_column(Float, nullable=True)
-    distance_to_ema20: Mapped[float] = mapped_column(Float, nullable=True)
-    distance_to_ema50: Mapped[float] = mapped_column(Float, nullable=True)
     distance_to_ema9: Mapped[float] = mapped_column(Float, nullable=True)
     distance_to_ema21: Mapped[float] = mapped_column(Float, nullable=True)
+    distance_to_ema20: Mapped[float] = mapped_column(Float, nullable=True)
+    distance_to_ema50: Mapped[float] = mapped_column(Float, nullable=True)
     distance_to_high_52w: Mapped[float] = mapped_column(Float, nullable=True)
     high_52w: Mapped[float] = mapped_column(Float, nullable=True)
     avg_volume_20d: Mapped[int] = mapped_column(Integer, nullable=True)
@@ -85,6 +85,14 @@ class StockMetrics(Base):
     pullback_quality_score: Mapped[float] = mapped_column(Float, nullable=True)
     volume_contraction: Mapped[float] = mapped_column(Float, nullable=True)
     setup_quality: Mapped[str] = mapped_column(String(50), nullable=True)
+    # Volatility metrics
+    atr: Mapped[float] = mapped_column(Float, nullable=True)
+    atr_percent: Mapped[float] = mapped_column(Float, nullable=True)
+    # ATR-normalized positioning (contextual, volatility-aware)
+    distance_to_ema9_atr: Mapped[float] = mapped_column(Float, nullable=True)
+    distance_to_ema21_atr: Mapped[float] = mapped_column(Float, nullable=True)
+    distance_to_ema50_atr: Mapped[float] = mapped_column(Float, nullable=True)
+    distance_to_high_52w_atr: Mapped[float] = mapped_column(Float, nullable=True)
 
     __table_args__ = (
         Index('ix_stock_metrics_symbol_date', 'symbol', 'date', unique=True),

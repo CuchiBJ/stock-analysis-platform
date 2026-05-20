@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 from app.models.stock import StockMetrics
 from app.services.setup_lifecycle_engine import SetupState
+from app.services.contextual_setup_engine import ContextualSetupEngine
 import logging
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ class SetupPriorityEngine:
     """
     
     def __init__(self):
-        pass
+        self.contextual_engine = ContextualSetupEngine()
     
     def calculate_priority_score(
         self,
@@ -71,7 +72,7 @@ class SetupPriorityEngine:
         Returns SetupPriority with detailed breakdown.
         """
         # Calculate individual components
-        state_quality = self._calculate_state_quality(current_state)
+        state_quality = self._calculate_state_quality(current_state, metrics)
         transition_strength = self._calculate_transition_strength(metrics)
         weekly_structure = self._calculate_weekly_structure(metrics)
         rs_stability = self._calculate_rs_stability(metrics)
@@ -126,23 +127,40 @@ class SetupPriorityEngine:
         # Return top N
         return valid_setups[:limit]
     
-    def _calculate_state_quality(self, state: SetupState) -> float:
+    def _calculate_state_quality(self, state: SetupState, metrics: StockMetrics) -> float:
         """
-        Calculate state quality score (0-100).
+        Calculate state quality score (0-100) using contextual scoring.
         
-        State quality reflects the operational value of the current state.
+        State quality reflects the operational value of the current state,
+        but now uses ContextualSetupEngine for sophisticated, volatility-aware
+        scoring instead of simple state mapping.
+        
+        Philosophy:
+        - Structure > Distance
+        - Volatility-aware positioning
+        - Contextual thresholds
         """
-        state_quality_map = {
-            SetupState.TRIGGER_READY: 100.0,
-            SetupState.CONTINUATION: 90.0,
-            SetupState.CONSTRUCTIVE_PULLBACK: 80.0,
-            SetupState.TIGHTENING: 60.0,
-            SetupState.EMERGING: 40.0,
-            SetupState.WEAKENING: 20.0,
-            SetupState.BROKEN: 0.0
+        # Use ContextualSetupEngine for sophisticated scoring
+        readiness_score = self.contextual_engine.calculate_readiness_score(metrics)
+        
+        # Adjust score based on state operational priority
+        # This is a multiplier that reflects the operational urgency of the state
+        state_priority_multiplier = {
+            SetupState.TRIGGER_READY: 1.2,  # 20% boost - highest urgency
+            SetupState.CONTINUATION: 1.1,  # 10% boost - high urgency
+            SetupState.CONSTRUCTIVE_PULLBACK: 1.05,  # 5% boost - medium-high urgency
+            SetupState.TIGHTENING: 1.0,  # neutral
+            SetupState.EMERGING: 0.95,  # 5% penalty - lower urgency
+            SetupState.WEAKENING: 0.8,  # 20% penalty - low urgency
+            SetupState.BROKEN: 0.5  # 50% penalty - very low urgency
         }
         
-        return state_quality_map.get(state, 0.0)
+        multiplier = state_priority_multiplier.get(state, 1.0)
+        
+        # Apply multiplier to contextual readiness score
+        contextual_state_quality = readiness_score.total_score * multiplier
+        
+        return min(100.0, max(0.0, contextual_state_quality))
     
     def _calculate_transition_strength(self, metrics: StockMetrics) -> float:
         """

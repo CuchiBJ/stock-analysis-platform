@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import stocks, scanners, sectors, watchlists, data, relative_strength, indices, breadth, leaders, themes, calendar, scoring, capital_flow, pullbacks, quality_swing_scanner, setup_lifecycle, market_regime, leader_health, websocket, transitions, metrics
+from app.api.v1.endpoints import stocks, scanners, sectors, watchlists, data, relative_strength, indices, breadth, leaders, themes, calendar, scoring, capital_flow, pullbacks, quality_swing_scanner, setup_lifecycle, market_regime, leader_health, websocket, transitions, metrics, universe, realtime
 
 api_router = APIRouter()
 
@@ -24,3 +24,5 @@ api_router.include_router(leader_health.router, tags=["leader-health"])
 api_router.include_router(websocket.router, tags=["websocket"])
 api_router.include_router(transitions.router, prefix="/transitions", tags=["transitions"])
 api_router.include_router(metrics.router, prefix="/metrics", tags=["metrics"])
+api_router.include_router(universe.router, prefix="/universe", tags=["universe"])
+api_router.include_router(realtime.router, prefix="/realtime", tags=["realtime"])

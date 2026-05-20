@@ -4,7 +4,9 @@ from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.core.deps import AsyncSessionLocal
 from app.api.v1.api import api_router
+from app.services.realtime_price_service import get_realtime_price_service
 import logging
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -14,6 +16,10 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Application started")
+    
+    # DatabasePollingDataSource disabled due to connection pool issues
+    # Frontend uses REST API polling directly to backend endpoints
+    # Backend endpoints query database with proper connection management
     
     yield
     
@@ -28,11 +34,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS configuration
-origins = settings.cors_origins.split(",") if settings.cors_origins else ["http://localhost:3000"]
+# CORS configuration - allow all origins for development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],  # Allow all origins for development
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
