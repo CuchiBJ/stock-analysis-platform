@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db
+from app.core.cache import cache_manager
 from app.services.market_regime_engine import MarketRegimeEngine
 import logging
 
@@ -10,20 +11,22 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/market-regime", tags=["market-regime"])
 
+_CACHE_KEY = "market_regime_current"
+_CACHE_TTL = 120  # 2 minutes
+
 
 @router.get("/current")
 async def get_current_market_regime(db: AsyncSession = Depends(get_db)):
-    """
-    Get current market regime analysis.
-    
-    Returns comprehensive analysis including regime state, breadth quality,
-    leadership health, speculative appetite, and confidence.
-    """
+    """Get current market regime analysis (cached 2 min)."""
+    cached = cache_manager.get(_CACHE_KEY)
+    if cached is not None:
+        return cached
+
     try:
         regime_engine = MarketRegimeEngine(db)
         analysis = await regime_engine.detect_regime()
-        
-        return {
+
+        result = {
             "regime": analysis.regime.value,
             "breadth_quality": analysis.breadth_quality,
             "leadership_health": analysis.leadership_health,
@@ -33,7 +36,10 @@ async def get_current_market_regime(db: AsyncSession = Depends(get_db)):
             "confidence": analysis.confidence,
             "summary": analysis.get_summary()
         }
-        
+
+        cache_manager.set(_CACHE_KEY, result, _CACHE_TTL)
+        return result
+
     except Exception as e:
         logger.error(f"Error getting current market regime: {e}")
         raise HTTPException(status_code=500, detail=str(e))

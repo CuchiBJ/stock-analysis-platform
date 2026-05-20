@@ -264,3 +264,36 @@ async def ingest_small_mid_caps_tradingview(
     
     background_tasks.add_task(task)
     return {"message": "Small/mid cap ingestion started from TradingView"}
+
+
+@router.get("/top-symbols")
+async def get_top_symbols(
+    limit: int = 10,
+    db: AsyncSession = Depends(get_db)
+):
+    """Return top symbols by pullback quality score for price monitoring."""
+    from sqlalchemy import text
+    result = await db.execute(
+        text("""
+            SELECT DISTINCT ON (sm.symbol) sm.symbol
+            FROM stock_metrics sm
+            WHERE sm.pullback_quality_score IS NOT NULL
+              AND sm.avg_volume_10d >= 500000
+              AND sm.current_price >= 5.0
+            ORDER BY sm.symbol, sm.pullback_quality_score DESC
+            LIMIT :limit
+        """),
+        {"limit": limit}
+    )
+    symbols = [row[0] for row in result.fetchall()]
+    if not symbols:
+        # Fallback to most active stocks when no metrics yet
+        result = await db.execute(
+            text("""
+                SELECT DISTINCT symbol FROM stock_prices
+                ORDER BY symbol LIMIT :limit
+            """),
+            {"limit": limit}
+        )
+        symbols = [row[0] for row in result.fetchall()]
+    return {"symbols": symbols}

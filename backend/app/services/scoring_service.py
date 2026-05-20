@@ -106,9 +106,21 @@ class ScoringService:
         return ema_score
     
     def _score_sector(self, metrics: StockMetrics) -> float:
-        """Score based on sector strength (0-100)"""
-        # Placeholder - would use sector performance data
-        return 50
+        """Score based on sector momentum proxy (0-100).
+        Uses 4-week performance as sector participation indicator."""
+        if metrics.perf_4w is None:
+            return 50
+        # +10% monthly = strong sector, -10% = weak sector
+        if metrics.perf_4w >= 10:
+            return 100
+        elif metrics.perf_4w >= 5:
+            return 80
+        elif metrics.perf_4w >= 0:
+            return 60
+        elif metrics.perf_4w >= -5:
+            return 35
+        else:
+            return 15
     
     def _score_trend(self, metrics: StockMetrics) -> float:
         """Score based on trend quality (0-100)"""
@@ -138,6 +150,21 @@ class ScoringService:
             return 10
     
     def _score_breakout(self, metrics: StockMetrics) -> float:
-        """Score based on breakout potential (0-100)"""
-        # Placeholder - would check for consolidation patterns
-        return 50
+        """Score based on breakout proximity and compression (0-100).
+        Combines ATH proximity with weekly volatility contraction."""
+        proximity_score = 0.0
+        if metrics.distance_to_high_52w is not None:
+            if metrics.distance_to_high_52w >= -3:
+                proximity_score = 60
+            elif metrics.distance_to_high_52w >= -8:
+                proximity_score = 40
+            elif metrics.distance_to_high_52w >= -15:
+                proximity_score = 20
+            else:
+                proximity_score = 5
+
+        compression_score = 0.0
+        if metrics.weekly_volatility_contraction is not None:
+            compression_score = max(0.0, min(40.0, metrics.weekly_volatility_contraction * 40))
+
+        return min(100.0, proximity_score + compression_score)

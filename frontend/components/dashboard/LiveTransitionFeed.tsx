@@ -1,9 +1,11 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import { TrendingUp, TrendingDown, Activity, Clock } from 'lucide-react'
+import { useWebSocket } from '@/hooks/useWebSocket'
+import { API_URL, getTimeAgo, getSeverityColor, getSeverityText } from '@/lib/utils'
 
 interface TransitionEvent {
   symbol: string
@@ -22,12 +24,24 @@ export default function LiveTransitionFeed() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  // WebSocket for real-time pushes
+  const { data: wsEvent, isConnected } = useWebSocket<TransitionEvent>({ channel: 'transitions' })
+
+  // When a new event arrives via WebSocket, prepend it
+  useEffect(() => {
+    if (!wsEvent) return
+    setTransitions(prev => {
+      const next = [wsEvent, ...prev.filter(t => t.symbol !== wsEvent.symbol)]
+      return next.slice(0, 50)
+    })
+  }, [wsEvent])
+
+  // REST polling — only when WebSocket is not connected (fallback)
   useEffect(() => {
     const fetchTransitions = async () => {
       try {
-        setLoading(true)
         setError(null)
-        const response = await fetch('http://localhost:8000/api/v1/transitions/live?limit=20')
+        const response = await fetch(`${API_URL}/api/v1/transitions/live?limit=20`)
         if (!response.ok) throw new Error('Failed to load transitions')
         const data = await response.json()
         setTransitions(data)
@@ -39,31 +53,11 @@ export default function LiveTransitionFeed() {
       }
     }
 
-    fetchTransitions()
-    // Refresh every 30 seconds for live feel
+    fetchTransitions() // always fetch once on mount for initial data
+    if (isConnected) return // WS active — no polling needed
     const interval = setInterval(fetchTransitions, 30000)
     return () => clearInterval(interval)
-  }, [])
-
-  const getSeverityColor = (severity: string) => {
-    switch (severity) {
-      case 'positive': return 'bg-green-500/20 border-green-500/30'
-      case 'neutral': return 'bg-blue-500/20 border-blue-500/30'
-      case 'negative': return 'bg-orange-500/20 border-orange-500/30'
-      case 'critical': return 'bg-red-500/20 border-red-500/30'
-      default: return 'bg-slate-500/20 border-slate-500/30'
-    }
-  }
-
-  const getSeverityText = (severity: string) => {
-    switch (severity) {
-      case 'positive': return 'text-green-400'
-      case 'neutral': return 'text-blue-400'
-      case 'negative': return 'text-orange-400'
-      case 'critical': return 'text-red-400'
-      default: return 'text-slate-400'
-    }
-  }
+  }, [isConnected])
 
   const getTransitionIcon = (transition: string) => {
     if (transition === 'improving' || transition === 'tightening' || transition === 'reclaiming') {
@@ -73,19 +67,6 @@ export default function LiveTransitionFeed() {
     } else {
       return <Activity className="w-3 h-3" />
     }
-  }
-
-  const getTimeAgo = (timestamp: string) => {
-    const now = new Date()
-    const then = new Date(timestamp)
-    const diffMs = now.getTime() - then.getTime()
-    const diffMins = Math.floor(diffMs / 60000)
-
-    if (diffMins < 1) return 'Just now'
-    if (diffMins < 60) return `${diffMins}m ago`
-    const diffHours = Math.floor(diffMins / 60)
-    if (diffHours < 24) return `${diffHours}h ago`
-    return `${Math.floor(diffHours / 24)}d ago`
   }
 
   if (loading) {
@@ -126,8 +107,8 @@ export default function LiveTransitionFeed() {
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Live Transitions</h3>
         <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-          <span className="text-xs text-muted-foreground">Live</span>
+          <div className={`w-2 h-2 rounded-full animate-pulse ${isConnected ? 'bg-green-500' : 'bg-yellow-500'}`} />
+          <span className="text-xs text-muted-foreground">{isConnected ? 'WS Live' : 'Polling'}</span>
         </div>
       </div>
 

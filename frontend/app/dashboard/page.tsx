@@ -1,11 +1,12 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import DashboardLayout from '@/components/layout/DashboardLayout'
 import Card from '@/components/base/Card'
 import dynamic from 'next/dynamic';
 
 import { usePricePolling } from '@/hooks/usePricePolling';
+import { API_URL } from '@/lib/utils';
 
 // Dynamic imports with SSR disabled
 const MarketRegimePanel = dynamic(() => import('@/components/dashboard/MarketRegimePanel'), { ssr: false });
@@ -16,11 +17,20 @@ const SectorHeatmap = dynamic(() => import('@/components/charts/SectorHeatmap'),
 const WeeklyStructurePanel = dynamic(() => import('./components/weekly-structure/WeeklyStructurePanel'), { ssr: false });
 
 export default function DashboardPage() {
-  // Use price polling instead of WebSocket
+  const [monitoredSymbols, setMonitoredSymbols] = useState<string[]>([]);
+
+  // Load top symbols dynamically from the universe
+  useEffect(() => {
+    fetch(`${API_URL}/api/v1/data/top-symbols?limit=10`)
+      .then(r => r.json())
+      .then(data => { if (data.symbols?.length) setMonitoredSymbols(data.symbols) })
+      .catch(err => console.warn('top-symbols unavailable:', err));
+  }, []);
+
   const { prices, lastUpdate, isLoading, error } = usePricePolling({
-    symbols: ['NVDA', 'AMD', 'INTC'], // Symbols with data in database
-    pollInterval: 30000, // 30 seconds
-    enabled: true,
+    symbols: monitoredSymbols,
+    pollInterval: 30000,
+    enabled: monitoredSymbols.length > 0,
   });
 
   const connectionStatus = isLoading ? 'loading' : (error ? 'error' : 'connected');

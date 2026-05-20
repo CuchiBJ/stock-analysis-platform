@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { API_URL, getHealthColor, getHealthBarColor } from '@/lib/utils';
 
 interface LeaderHealthData {
   leaders_above_ema21: number;
@@ -23,8 +24,7 @@ export default function LeaderHealthMap() {
   useEffect(() => {
     const fetchHealthData = async () => {
       try {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-        const response = await fetch(`${apiUrl}/api/v1/leader-health/current`);
+        const response = await fetch(`${API_URL}/api/v1/leader-health/current`);
         if (!response.ok) {
           throw new Error('Failed to fetch leader health data');
         }
@@ -39,6 +39,8 @@ export default function LeaderHealthMap() {
     };
 
     fetchHealthData();
+    const interval = setInterval(fetchHealthData, 60000);
+    return () => clearInterval(interval);
   }, []);
 
   if (isLoading) {
@@ -66,13 +68,13 @@ export default function LeaderHealthMap() {
         <div>
           <div className="flex justify-between text-xs mb-1">
             <span className="text-muted-foreground">Overall Health Score</span>
-            <span className={`font-semibold ${healthData.overall_health_score >= 0.6 ? 'text-green-400' : healthData.overall_health_score >= 0.4 ? 'text-yellow-400' : 'text-red-400'}`}>
+            <span className={`font-semibold ${getHealthColor(healthData.overall_health_score)}`}>
               {(healthData.overall_health_score * 100).toFixed(0)}%
             </span>
           </div>
           <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
             <div
-              className={`h-full transition-all ${healthData.overall_health_score >= 0.6 ? 'bg-green-500' : healthData.overall_health_score >= 0.4 ? 'bg-yellow-500' : 'bg-red-500'}`}
+              className={`h-full transition-all ${getHealthBarColor(healthData.overall_health_score)}`}
               style={{ width: `${healthData.overall_health_score * 100}%` }}
             />
           </div>

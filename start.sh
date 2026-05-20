@@ -10,9 +10,19 @@ pkill -f "uvicorn app.main:app" 2>/dev/null
 pkill -f "next dev" 2>/dev/null
 sleep 2
 
+# Iniciar base de datos PostgreSQL
+echo "Iniciando PostgreSQL con Docker..."
+cd /Users/fernandocucchiarelli/CascadeProjects/windsurf-project/stock-analysis-platform
+docker-compose up -d postgres
+echo "Esperando que PostgreSQL esté listo..."
+until docker-compose exec -T postgres pg_isready -U postgres > /dev/null 2>&1; do
+  sleep 1
+done
+echo "PostgreSQL listo!"
+
 # Iniciar backend
 echo "Iniciando backend en http://localhost:8000..."
-cd /home/fernando/repositorios/stock-analysis-platform/backend
+cd /Users/fernandocucchiarelli/CascadeProjects/windsurf-project/stock-analysis-platform/backend
 source venv/bin/activate
 nohup python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 > /tmp/backend.log 2>&1 &
 BACKEND_PID=$!
@@ -23,7 +33,9 @@ sleep 3
 
 # Iniciar frontend
 echo "Iniciando frontend en http://localhost:3000..."
-cd /home/fernando/repositorios/stock-analysis-platform/frontend
+cd /Users/fernandocucchiarelli/CascadeProjects/windsurf-project/stock-analysis-platform/frontend
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 nohup npm run dev > /tmp/frontend.log 2>&1 &
 FRONTEND_PID=$!
 echo "Frontend iniciado (PID: $FRONTEND_PID)"
@@ -33,9 +45,9 @@ sleep 5
 
 # Iniciar scheduler
 echo "Iniciando scheduler automático..."
-cd /home/fernando/repositorios/stock-analysis-platform/backend
+cd /Users/fernandocucchiarelli/CascadeProjects/windsurf-project/stock-analysis-platform/backend
 source venv/bin/activate
-PYTHONPATH=/home/fernando/repositorios/stock-analysis-platform/backend nohup python app/data/scheduler.py > /tmp/scheduler.log 2>&1 &
+PYTHONPATH=/Users/fernandocucchiarelli/CascadeProjects/windsurf-project/stock-analysis-platform/backend nohup python app/data/scheduler.py > /tmp/scheduler.log 2>&1 &
 SCHEDULER_PID=$!
 echo "Scheduler iniciado (PID: $SCHEDULER_PID)"
 

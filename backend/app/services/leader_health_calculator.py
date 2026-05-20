@@ -1,10 +1,12 @@
 """Leader Health Calculator - Measure institutional leader health"""
 
+import asyncio
 from dataclasses import dataclass
 from typing import Dict, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, or_
 from app.models.stock import StockMetrics
+from app.services.universe_filters import QUALITY_FILTERS
 import logging
 
 logger = logging.getLogger(__name__)
@@ -31,10 +33,10 @@ class LeaderHealthMetrics:
 class LeaderHealthCalculator:
     """
     Leader Health Calculator - Measure institutional leader health.
-    
+
     Core philosophy: Measure the health of institutional leadership to
     determine continuation setup viability.
-    
+
     Key indicators:
     - Leaders above EMA21 (%)
     - Failed breakouts (count)
@@ -44,8 +46,13 @@ class LeaderHealthCalculator:
     - Reclaim quality
     - Continuation quality
     - RS deterioration
+
+    Quality universe filter applied to all calculations — only stocks with
+    sufficient liquidity and price count toward leader health metrics.
     """
-    
+
+    _QUALITY_FILTERS = QUALITY_FILTERS
+
     def __init__(self, db: AsyncSession):
         self.db = db
     
@@ -55,14 +62,18 @@ class LeaderHealthCalculator:
         
         Returns LeaderHealthMetrics with all indicators.
         """
-        leaders_above_ema21 = await self._calculate_leaders_above_ema21()
-        failed_breakouts = await self._calculate_failed_breakouts()
-        distribution_count = await self._calculate_distribution_count()
-        pullback_quality_index = await self._calculate_pullback_quality_index()
-        breakdown_count = await self._calculate_breakdown_count()
-        reclaim_quality = await self._calculate_reclaim_quality()
-        continuation_quality = await self._calculate_continuation_quality()
-        rs_deterioration = await self._calculate_rs_deterioration()
+        (leaders_above_ema21, failed_breakouts, distribution_count,
+         pullback_quality_index, breakdown_count, reclaim_quality,
+         continuation_quality, rs_deterioration) = await asyncio.gather(
+            self._calculate_leaders_above_ema21(),
+            self._calculate_failed_breakouts(),
+            self._calculate_distribution_count(),
+            self._calculate_pullback_quality_index(),
+            self._calculate_breakdown_count(),
+            self._calculate_reclaim_quality(),
+            self._calculate_continuation_quality(),
+            self._calculate_rs_deterioration(),
+        )
         
         # Calculate overall health score
         overall_health_score = self._calculate_overall_health_score(
@@ -94,28 +105,26 @@ class LeaderHealthCalculator:
         Leaders = stocks with pullback_quality_score >= 60
         """
         try:
-            # Get total leaders
+            qf = self._QUALITY_FILTERS
+
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(StockMetrics.pullback_quality_score >= 60)
+                .where(*qf, StockMetrics.pullback_quality_score >= 60)
             )
             total_leaders = result.scalar() or 0
-            
+
             if total_leaders == 0:
                 return 0.0
-            
-            # Get leaders above EMA21
+
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(
-                    StockMetrics.pullback_quality_score >= 60,
-                    StockMetrics.distance_to_ema21 >= 0
-                )
+                .where(*qf, StockMetrics.pullback_quality_score >= 60,
+                       StockMetrics.distance_to_ema21 >= 0)
             )
             leaders_above = result.scalar() or 0
-            
+
             return leaders_above / total_leaders
             
         except Exception as e:
@@ -130,13 +139,13 @@ class LeaderHealthCalculator:
         Proxy: distance_to_high_52w < -20% with poor pullback quality.
         """
         try:
+            qf = self._QUALITY_FILTERS
+
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(
-                    StockMetrics.distance_to_high_52w < -20,
-                    StockMetrics.pullback_quality_score < 50
-                )
+                .where(*qf, StockMetrics.distance_to_high_52w < -20,
+                       StockMetrics.pullback_quality_score < 50)
             )
             return result.scalar() or 0
             
@@ -152,15 +161,14 @@ class LeaderHealthCalculator:
         Proxy: distance_to_ema21 < -5% OR distance_to_ema50 < -10%
         """
         try:
+            qf = self._QUALITY_FILTERS
+
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(
-                    or_(
-                        StockMetrics.distance_to_ema21 < -5,
-                        StockMetrics.distance_to_ema50 < -10
-                    )
-                )
+                .where(*qf,
+                       or_(StockMetrics.distance_to_ema21 < -5,
+                           StockMetrics.distance_to_ema50 < -10))
             )
             return result.scalar() or 0
             
@@ -175,16 +183,18 @@ class LeaderHealthCalculator:
         Leaders = stocks with pullback_quality_score >= 60
         """
         try:
+            qf = self._QUALITY_FILTERS
+
             result = await self.db.execute(
                 select(func.avg(StockMetrics.pullback_quality_score))
                 .select_from(StockMetrics)
-                .where(StockMetrics.pullback_quality_score >= 60)
+                .where(*qf, StockMetrics.pullback_quality_score >= 60)
             )
             avg_quality = result.scalar()
-            
+
             if avg_quality is None:
-                return 50.0  # Default neutral
-            
+                return 50.0
+
             return avg_quality
             
         except Exception as e:
@@ -198,10 +208,12 @@ class LeaderHealthCalculator:
         Breakdown = distance_to_ema50 < -10%
         """
         try:
+            qf = self._QUALITY_FILTERS
+
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(StockMetrics.distance_to_ema50 < -10)
+                .where(*qf, StockMetrics.distance_to_ema50 < -10)
             )
             return result.scalar() or 0
             
@@ -216,34 +228,29 @@ class LeaderHealthCalculator:
         Proxy: % of leaders near EMA21 with good pullback quality.
         """
         try:
-            # Get leaders near EMA21
+            qf = self._QUALITY_FILTERS
+
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(
-                    StockMetrics.pullback_quality_score >= 60,
-                    StockMetrics.distance_to_ema21 >= -5,
-                    StockMetrics.distance_to_ema21 <= 5
-                )
+                .where(*qf, StockMetrics.pullback_quality_score >= 60,
+                       StockMetrics.distance_to_ema21 >= -5,
+                       StockMetrics.distance_to_ema21 <= 5)
             )
             near_ema21 = result.scalar() or 0
-            
+
             if near_ema21 == 0:
-                return 0.5  # Default neutral
-            
-            # Get leaders near EMA21 with good quality
+                return 0.5
+
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(
-                    StockMetrics.pullback_quality_score >= 60,
-                    StockMetrics.distance_to_ema21 >= -5,
-                    StockMetrics.distance_to_ema21 <= 5,
-                    StockMetrics.pullback_quality_score >= 70
-                )
+                .where(*qf, StockMetrics.pullback_quality_score >= 70,
+                       StockMetrics.distance_to_ema21 >= -5,
+                       StockMetrics.distance_to_ema21 <= 5)
             )
             good_quality = result.scalar() or 0
-            
+
             return good_quality / near_ema21
             
         except Exception as e:
@@ -257,30 +264,28 @@ class LeaderHealthCalculator:
         Proxy: % of leaders holding EMA21 with strong weekly structure.
         """
         try:
-            # Get total leaders
+            qf = self._QUALITY_FILTERS
+
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(StockMetrics.pullback_quality_score >= 60)
+                .where(*qf, StockMetrics.pullback_quality_score >= 60)
             )
             total_leaders = result.scalar() or 0
-            
+
             if total_leaders == 0:
-                return 0.5  # Default neutral
-            
-            # Get leaders in continuation (holding EMA21 with strong structure)
+                return 0.5
+
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(
-                    StockMetrics.pullback_quality_score >= 60,
-                    StockMetrics.distance_to_ema21 >= 0,
-                    StockMetrics.distance_to_ema21 <= 5,
-                    StockMetrics.weekly_trend_quality >= 0.7
-                )
+                .where(*qf, StockMetrics.pullback_quality_score >= 60,
+                       StockMetrics.distance_to_ema21 >= 0,
+                       StockMetrics.distance_to_ema21 <= 5,
+                       StockMetrics.weekly_trend_quality >= 0.7)
             )
             continuing = result.scalar() or 0
-            
+
             return continuing / total_leaders
             
         except Exception as e:
@@ -294,13 +299,13 @@ class LeaderHealthCalculator:
         Proxy: Leaders with RS < 95
         """
         try:
+            qf = self._QUALITY_FILTERS
+
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(
-                    StockMetrics.pullback_quality_score >= 60,
-                    StockMetrics.relative_strength_spy < 95
-                )
+                .where(*qf, StockMetrics.pullback_quality_score >= 60,
+                       StockMetrics.relative_strength_spy < 95)
             )
             return result.scalar() or 0
             
@@ -361,6 +366,3 @@ class LeaderHealthCalculator:
         
         return max(0.0, min(1.0, overall_health))
 
-
-# Import needed for the _calculate_distribution_count method
-from sqlalchemy import or_

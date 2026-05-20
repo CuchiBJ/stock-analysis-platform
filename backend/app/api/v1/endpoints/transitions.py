@@ -1,6 +1,6 @@
 """Operational Transitions API - Live transition feed and actionable setups"""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func
 from typing import List, Dict, Optional
@@ -13,6 +13,7 @@ from app.services.transition_engine import (
 )
 from app.services.setup_lifecycle_engine import SetupLifecycleEngine
 from app.services.market_regime_engine import MarketRegimeEngine
+from app.services.websocket_manager import websocket_manager
 from app.models.stock import StockMetrics
 from sqlalchemy import select, and_, func
 import logging
@@ -25,6 +26,7 @@ router = APIRouter()
 @router.get("/live")
 async def get_live_transitions(
     limit: int = Query(10, ge=1, le=20),
+    background_tasks: BackgroundTasks = None,
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -104,8 +106,17 @@ async def get_live_transitions(
         
         # Sort by strength and severity
         transitions.sort(key=lambda x: (x["strength"], _severity_score(x["severity"])), reverse=True)
-        
-        return transitions[:limit]
+        result_transitions = transitions[:limit]
+
+        # Broadcast top transition to WebSocket subscribers (non-blocking)
+        if result_transitions and websocket_manager.get_connection_count() > 0:
+            top = result_transitions[0]
+            async def _broadcast():
+                await websocket_manager.broadcast('transitions', {'channel': 'transitions', 'data': top})
+            if background_tasks:
+                background_tasks.add_task(_broadcast)
+
+        return result_transitions
         
     except Exception as e:
         logger.error(f"Error getting live transitions: {e}")

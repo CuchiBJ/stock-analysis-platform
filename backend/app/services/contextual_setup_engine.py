@@ -74,15 +74,25 @@ class ContextualSetupEngine:
         ma_context = self._calculate_ma_context(metrics)
         market_alignment = self._calculate_market_alignment(metrics, market_regime)
         
-        # Weighted composite score
-        total_score = (
+        # Base score (structure-first, without regime)
+        base_score = (
             structure_quality * 0.30 +
             volatility_compression * 0.20 +
             rs_quality * 0.20 +
             pullback_character * 0.15 +
-            ma_context * 0.10 +
-            market_alignment * 0.05
+            ma_context * 0.10
         )
+
+        # Regime as multiplier — makes market context genuinely impactful
+        # A 90-pt setup in RISK_OFF becomes 58.5; in RISK_ON stays 90
+        _REGIME_MULTIPLIERS = {
+            'risk_on': 1.00,
+            'transition': 0.80,
+            'choppy': 0.85,
+            'risk_off': 0.65,
+        }
+        regime_mult = _REGIME_MULTIPLIERS.get(market_regime or '', 0.85)
+        total_score = base_score * regime_mult
         
         components = {
             "structure_quality": structure_quality,

@@ -88,15 +88,7 @@ export default function TopActionableSetups() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-        {setups.map((setup, index) => {
-          // Generate simulated sparkline data (in production, fetch from API)
-          const sparklineData = Array.from({ length: 20 }, (_, i) => {
-            const base = setup.pullback_quality || 60
-            const trend = setup.priority_score > 0.7 ? 0.5 : setup.priority_score > 0.5 ? 0.2 : -0.1
-            return base + (Math.random() - 0.3) * 10 + (i * trend)
-          })
-
-          return (
+        {setups.map((setup, index) => (
             <CompactSetupCard
               key={setup.symbol}
               symbol={setup.symbol}
@@ -114,10 +106,8 @@ export default function TopActionableSetups() {
                 base: '8-week'
               }}
               isPriority={index === 0}
-              sparklineData={sparklineData}
             />
-          )
-        })}
+          ))}
       </div>
     </Card>
   )

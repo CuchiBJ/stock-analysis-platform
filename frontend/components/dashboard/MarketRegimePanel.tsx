@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { API_URL } from '@/lib/utils';
 
 interface MarketRegimeData {
   regime: string;
@@ -21,8 +22,7 @@ export default function MarketRegimePanel() {
   useEffect(() => {
     const fetchRegimeData = async () => {
       try {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-        const response = await fetch(`${apiUrl}/api/v1/market-regime/current`);
+        const response = await fetch(`${API_URL}/api/v1/market-regime/current`);
         if (!response.ok) {
           throw new Error('Failed to fetch market regime data');
         }
@@ -37,6 +37,8 @@ export default function MarketRegimePanel() {
     };
 
     fetchRegimeData();
+    const interval = setInterval(fetchRegimeData, 60000);
+    return () => clearInterval(interval);
   }, []);
 
   if (isLoading) {

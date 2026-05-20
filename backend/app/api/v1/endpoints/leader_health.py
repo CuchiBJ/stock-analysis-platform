@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db
+from app.core.cache import cache_manager
 from app.services.leader_health_calculator import LeaderHealthCalculator
 import logging
 
@@ -10,21 +11,22 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/leader-health", tags=["leader-health"])
 
+_CACHE_KEY = "leader_health_current"
+_CACHE_TTL = 120  # 2 minutes
+
 
 @router.get("/current")
 async def get_current_leader_health(db: AsyncSession = Depends(get_db)):
-    """
-    Get current leader health analysis.
-    
-    Returns comprehensive analysis including leaders above EMA21,
-    failed breakouts, distribution count, pullback quality index,
-    and overall health score.
-    """
+    """Get current leader health analysis (cached 2 min)."""
+    cached = cache_manager.get(_CACHE_KEY)
+    if cached is not None:
+        return cached
+
     try:
         health_calculator = LeaderHealthCalculator(db)
         health_metrics = await health_calculator.calculate_leader_health()
-        
-        return {
+
+        result = {
             "leaders_above_ema21": health_metrics.leaders_above_ema21,
             "failed_breakouts": health_metrics.failed_breakouts,
             "distribution_count": health_metrics.distribution_count,
@@ -36,7 +38,10 @@ async def get_current_leader_health(db: AsyncSession = Depends(get_db)):
             "overall_health_score": health_metrics.overall_health_score,
             "summary": health_metrics.get_summary()
         }
-        
+
+        cache_manager.set(_CACHE_KEY, result, _CACHE_TTL)
+        return result
+
     except Exception as e:
         logger.error(f"Error getting current leader health: {e}")
         raise HTTPException(status_code=500, detail=str(e))
