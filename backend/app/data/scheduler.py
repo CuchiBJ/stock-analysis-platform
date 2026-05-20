@@ -10,6 +10,8 @@ import pytz
 import logging
 import asyncio
 import uuid
+import pandas as pd
+import yfinance as yf
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -174,14 +176,88 @@ class DataScheduler:
             await asyncio.sleep(30)
 
     async def _update_prices(self):
-        """Update prices"""
-        async with self._get_db() as db:
-            ingestor = PriceIngestor(db)
+        """Update prices for all active stocks using yfinance bulk download.
+
+        Downloads the last 5 days in batches of 200 tickers (~3-5 min for 7k stocks).
+        Runs in a thread pool to avoid blocking the event loop.
+        """
+        try:
+            async with self._get_db() as db:
+                ingestor = StockIngestor(db)
+                symbols = await ingestor.get_active_symbols(limit=None)
+
+            logger.info(f"Starting yfinance price update for {len(symbols)} symbols")
+            count = await asyncio.get_event_loop().run_in_executor(
+                None, self._bulk_download_prices_sync, symbols
+            )
+            logger.info(f"Price update complete: {count} symbols updated")
+        except Exception as e:
+            logger.error(f"Price update failed: {e}")
+
+    def _bulk_download_prices_sync(self, symbols: list) -> int:
+        """Synchronous yfinance bulk download — runs in thread pool."""
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from app.models.stock import StockPrice
+
+        sync_url = settings.database_url.replace("postgresql+asyncpg", "postgresql+psycopg2")
+        engine = create_engine(sync_url, pool_size=5, echo=False)
+        Session = sessionmaker(engine)
+
+        BATCH = 200
+        ok = 0
+
+        for i in range(0, len(symbols), BATCH):
+            batch = symbols[i:i + BATCH]
             try:
-                count = await ingestor.ingest_intraday_prices()
-                logger.info(f"Price update complete: {count} symbols")
+                data = yf.download(
+                    batch, period="5d", auto_adjust=True,
+                    progress=False, threads=True
+                )
+                if data.empty:
+                    continue
+
+                multi = isinstance(data.columns, pd.MultiIndex)
+
+                with Session() as session:
+                    for symbol in batch:
+                        try:
+                            hist = data.xs(symbol, axis=1, level=1) if multi else data
+                            hist = hist.dropna(subset=["Close"])
+                            if hist.empty:
+                                continue
+
+                            for date, row in hist.iterrows():
+                                date_str = date.strftime("%Y-%m-%d")
+                                existing = session.query(StockPrice).filter_by(
+                                    symbol=symbol, date=date_str
+                                ).first()
+                                if existing:
+                                    existing.open   = float(row["Open"])   if pd.notna(row["Open"])   else existing.open
+                                    existing.high   = float(row["High"])   if pd.notna(row["High"])   else existing.high
+                                    existing.low    = float(row["Low"])    if pd.notna(row["Low"])    else existing.low
+                                    existing.close  = float(row["Close"])  if pd.notna(row["Close"])  else existing.close
+                                    existing.volume = int(row["Volume"])   if pd.notna(row["Volume"]) else existing.volume
+                                else:
+                                    session.add(StockPrice(
+                                        symbol=symbol,
+                                        date=date_str,
+                                        open=float(row["Open"])   if pd.notna(row["Open"])   else None,
+                                        high=float(row["High"])   if pd.notna(row["High"])   else None,
+                                        low=float(row["Low"])     if pd.notna(row["Low"])    else None,
+                                        close=float(row["Close"]) if pd.notna(row["Close"])  else None,
+                                        volume=int(row["Volume"]) if pd.notna(row["Volume"]) else None,
+                                    ))
+                            ok += 1
+                        except Exception:
+                            continue
+                    session.commit()
+
             except Exception as e:
-                logger.error(f"Price update failed: {e}")
+                logger.error(f"Batch {i//BATCH + 1} failed: {e}")
+
+        engine.dispose()
+        return ok
 
     async def _run_discovery_scans(self):
         """Run nightly discovery scans to detect new leaders"""
