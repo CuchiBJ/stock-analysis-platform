@@ -1,5 +1,7 @@
+import math
+from collections import defaultdict
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, text
 from typing import List, Dict
 from app.models.stock import Stock, StockMetrics, StockPrice
 from app.models.sector import Sector
@@ -14,40 +16,37 @@ class SectorService:
     @cache_sectors
     async def calculate_sector_performance(self) -> List[Dict]:
         """Calculate sector performance using latest metrics per symbol, quality universe only."""
-        import math
-        from sqlalchemy import text
-
-        # One query: latest metric per symbol, quality-filtered, with sector
+        # Window function avoids a second GROUP BY aggregation pass
         result = await self.db.execute(text("""
+            WITH latest AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) AS rn
+                FROM stock_metrics
+            )
             SELECT
                 s.sector,
-                sm.symbol,
-                sm.perf_1w,
-                sm.perf_4w,
-                sm.relative_volume,
-                sm.pullback_quality_score,
-                sm.relative_strength_spy
-            FROM stock_metrics sm
-            JOIN stocks s ON s.symbol = sm.symbol
-            JOIN (
-                SELECT symbol, MAX(date) AS max_date
-                FROM stock_metrics
-                GROUP BY symbol
-            ) latest ON sm.symbol = latest.symbol AND sm.date = latest.max_date
-            WHERE s.sector IS NOT NULL
-              AND sm.avg_volume_10d  >= 500000
-              AND sm.current_price   >= 5.0
-              AND sm.adr_percent     >= 2.0
-              AND sm.perf_1w         IS NOT NULL
+                l.symbol,
+                l.perf_1w,
+                l.perf_4w,
+                l.relative_volume,
+                l.pullback_quality_score,
+                l.relative_strength_spy
+            FROM latest l
+            JOIN stocks s ON s.symbol = l.symbol
+            WHERE l.rn = 1
+              AND s.sector IS NOT NULL
+              AND l.avg_volume_10d  >= 500000
+              AND l.current_price   >= 5.0
+              AND l.adr_percent     >= 2.0
+              AND l.perf_1w         IS NOT NULL
         """))
         rows = result.fetchall()
 
-        # Group by sector
-        from collections import defaultdict
         sectors: dict = defaultdict(list)
         for row in rows:
             sectors[row.sector].append(row)
 
+        spy_perf = await self._get_spy_performance()
         sector_performance = []
 
         for sector_name, stocks in sectors.items():
@@ -63,21 +62,19 @@ class SectorService:
             if not (math.isfinite(avg_weekly) and math.isfinite(avg_monthly)):
                 continue
 
-            # Leaders: best pullback quality + RS (institutional, not price spikes)
             leaders_sorted = sorted(
                 [r for r in stocks if r.pullback_quality_score is not None],
                 key=lambda r: (r.pullback_quality_score or 0) * 0.6 + (r.relative_strength_spy or 100) * 0.4,
                 reverse=True
             )
             leaders = [r.symbol for r in leaders_sorted[:3]]
-
             avg_rvol = sum(r.relative_volume for r in stocks if r.relative_volume) / max(len(stocks), 1)
 
             sector_performance.append({
                 "name":                sector_name,
                 "performance_weekly":  round(avg_weekly,  2),
                 "performance_monthly": round(avg_monthly, 2),
-                "performance_vs_spy":  round(avg_monthly, 2),  # SPY benchmark TBD
+                "performance_vs_spy":  round(avg_monthly - spy_perf, 2),
                 "trend":     "accelerating" if avg_weekly > 1 else "decelerating" if avg_weekly < -1 else "steady",
                 "strength":  "strong" if avg_monthly > 2 else "weak" if avg_monthly < -2 else "moderate",
                 "volume_trend": "increasing" if avg_rvol > 1.5 else "decreasing" if avg_rvol < 0.8 else "stable",

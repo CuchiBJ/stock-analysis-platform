@@ -7,6 +7,11 @@ export function cn(...inputs: ClassValue[]) {
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
+export function formatPctChange(value: number | null | undefined, decimals = 1): string {
+  if (value == null) return 'N/A'
+  return (value >= 0 ? '+' : '') + value.toFixed(decimals) + '%'
+}
+
 export const WS_URL = API_URL.replace(/^http/, 'ws')
 
 export function getTimeAgo(timestamp: string): string {

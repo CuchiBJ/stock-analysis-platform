@@ -5,6 +5,7 @@ import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import CompactSetupCard from './CompactSetupCard'
 import { Flame } from 'lucide-react'
+import { formatPctChange } from '@/lib/utils'
 
 interface ActionableSetup {
   symbol: string
@@ -94,9 +95,7 @@ export default function TopActionableSetups() {
           const isEma9 = setup.setup_type === 'ema9_pullback'
           const emaDist = isEma9 ? setup.distance_to_ema9 : setup.distance_to_ema21
           const emaLabel = isEma9 ? 'EMA9' : 'EMA21'
-          const emaValue = emaDist != null
-            ? (emaDist >= 0 ? `+${emaDist.toFixed(1)}%` : `${emaDist.toFixed(1)}%`)
-            : 'N/A'
+          const emaValue = formatPctChange(emaDist)
 
           return (
             <CompactSetupCard

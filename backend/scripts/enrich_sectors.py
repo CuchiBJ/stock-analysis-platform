@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """
 Enrich stocks with sector/industry/market_cap from Yahoo Finance.
-Uses ThreadPoolExecutor for parallel fetching (~10 min for 7k stocks).
+
+Modes:
+  --all      All stocks without sector (default, 30 workers)
+  --quality  Only quality-universe stocks (vol>=500K, price>=5, ADR>=2), 10 workers
+
+Uses ThreadPoolExecutor + batch UPDATE for performance.
 """
+import argparse
 import asyncio
 import sys
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import yfinance as yf
@@ -20,44 +27,55 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/stock_analysis"
-WORKERS = 30  # concurrent yfinance requests
+
+_ALL_QUERY = "SELECT symbol FROM stocks WHERE sector IS NULL ORDER BY symbol"
+_QUALITY_QUERY = """
+    SELECT sm.symbol
+    FROM stock_metrics sm
+    JOIN stocks s ON s.symbol = sm.symbol
+    WHERE s.sector IS NULL
+      AND sm.avg_volume_10d >= 500000
+      AND sm.current_price  >= 5.0
+      AND sm.adr_percent    >= 2.0
+    ORDER BY sm.avg_volume_10d DESC
+"""
 
 
-def fetch_info(symbol: str):
+def fetch_info(args: tuple):
+    symbol, throttle_ms = args
+    if throttle_ms:
+        time.sleep(throttle_ms / 1000)
     try:
         info = yf.Ticker(symbol).info
         sector = info.get("sector")
         if not sector:
             return None
         return {
-            "symbol": symbol,
-            "sector": sector,
-            "industry": info.get("industry"),
+            "symbol":     symbol,
+            "sector":     sector,
+            "industry":   info.get("industry"),
             "market_cap": info.get("marketCap"),
-            "name": info.get("longName") or info.get("shortName"),
+            "name":       info.get("longName") or info.get("shortName"),
         }
     except Exception:
         return None
 
 
-async def main():
+async def run(query: str, workers: int, throttle_ms: int, batch_log: int):
     engine = create_async_engine(DATABASE_URL, echo=False)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with async_session() as db:
-        result = await db.execute(text(
-            "SELECT symbol FROM stocks WHERE sector IS NULL ORDER BY symbol"
-        ))
+        result = await db.execute(text(query))
         symbols = [row[0] for row in result.fetchall()]
 
-    logger.info(f"Fetching sectors for {len(symbols)} stocks ({WORKERS} workers)...")
+    logger.info(f"Fetching sectors for {len(symbols)} stocks ({workers} workers)...")
 
     ok = fail = 0
     results = []
 
-    loop = asyncio.get_event_loop()
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futures = {pool.submit(fetch_info, s): s for s in symbols}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(fetch_info, (s, throttle_ms)): s for s in symbols}
         for i, future in enumerate(as_completed(futures)):
             info = future.result()
             if info:
@@ -65,28 +83,42 @@ async def main():
                 ok += 1
             else:
                 fail += 1
+            if (i + 1) % batch_log == 0:
+                logger.info(f"  [{i+1}/{len(symbols)}] {ok} with sector, {fail} not found")
 
-            if (i + 1) % 500 == 0:
-                logger.info(f"  [{i+1}/{len(symbols)}] {ok} ok, {fail} no sector")
+    if not results:
+        logger.info("No sectors fetched.")
+        return
 
     logger.info(f"Fetched {ok} sectors. Writing to DB...")
 
-    # Bulk update
+    # executemany — one round-trip for all rows via UPSERT
     async with async_session() as db:
-        for item in results:
-            await db.execute(text("""
-                UPDATE stocks SET
-                    sector = :sector,
-                    industry = :industry,
-                    market_cap = :market_cap,
-                    name = COALESCE(NULLIF(:name, ''), name)
-                WHERE symbol = :symbol
-            """), item)
+        await db.execute(
+            text("""
+                INSERT INTO stocks (symbol, sector, industry, market_cap, name)
+                VALUES (:symbol, :sector, :industry, :market_cap, :name)
+                ON CONFLICT (symbol) DO UPDATE SET
+                    sector     = EXCLUDED.sector,
+                    industry   = EXCLUDED.industry,
+                    market_cap = EXCLUDED.market_cap,
+                    name       = COALESCE(EXCLUDED.name, stocks.name)
+            """),
+            results,
+        )
         await db.commit()
 
     await engine.dispose()
-    logger.info(f"Done: {ok} sectors updated, {fail} stocks without sector data.")
+    logger.info(f"Done: {ok} sectors updated, {fail} not found in Yahoo.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--quality", action="store_true",
+                        help="Only enrich quality-universe stocks")
+    args = parser.parse_args()
+
+    if args.quality:
+        asyncio.run(run(_QUALITY_QUERY, workers=10, throttle_ms=50, batch_log=100))
+    else:
+        asyncio.run(run(_ALL_QUERY, workers=30, throttle_ms=0, batch_log=500))

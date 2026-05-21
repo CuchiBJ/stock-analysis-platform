@@ -22,6 +22,24 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Shared pullback filter — reused in /live and /actionable.
+# Identifies stocks testing EMA9 or EMA21 as support FROM above (not crossing upward).
+# ATR-normalized distances only; perf_13w confirms prior uptrend direction.
+_EMA_PULLBACK_FILTER = or_(
+    and_(  # EMA21 pullback: above EMA50, established 13w uptrend
+        StockMetrics.distance_to_ema21_atr >= -0.8,
+        StockMetrics.distance_to_ema21_atr <= 0.5,
+        StockMetrics.distance_to_ema50_atr > 0,
+        StockMetrics.perf_13w > 3,
+    ),
+    and_(  # EMA9 pullback: >0.3 ATR above EMA21, stronger prior trend required
+        StockMetrics.distance_to_ema9_atr >= -0.5,
+        StockMetrics.distance_to_ema9_atr <= 0.3,
+        StockMetrics.distance_to_ema21_atr > 0.3,
+        StockMetrics.perf_13w > 5,
+    ),
+)
+
 
 @router.get("/live")
 async def get_live_transitions(
@@ -51,26 +69,7 @@ async def get_live_transitions(
                     StockMetrics.adr_percent >= 3,
                     StockMetrics.current_price >= StockMetrics.low_52w * 1.7,
                     StockMetrics.current_price > StockMetrics.ema50,
-                    or_(
-                        # EMA21 pullback — stock testing EMA21 as support from above
-                        # distance_to_ema50_atr > 0: above EMA50 (medium-term trend intact)
-                        # perf_13w > 3: established uptrend confirms stock came FROM above
-                        and_(
-                            StockMetrics.distance_to_ema21_atr >= -0.8,
-                            StockMetrics.distance_to_ema21_atr <= 0.5,
-                            StockMetrics.distance_to_ema50_atr > 0,
-                            StockMetrics.perf_13w > 3,
-                        ),
-                        # EMA9 pullback — fast setup, stock pulling back to EMA9 while above EMA21
-                        # distance_to_ema21_atr > 0.3: meaningfully above EMA21 (not simultaneously testing it)
-                        # perf_13w > 5: prior uptrend confirms stock descended to EMA9, not ascended to it
-                        and_(
-                            StockMetrics.distance_to_ema9_atr >= -0.5,
-                            StockMetrics.distance_to_ema9_atr <= 0.3,
-                            StockMetrics.distance_to_ema21_atr > 0.3,
-                            StockMetrics.perf_13w > 5,
-                        ),
-                    )
+                    _EMA_PULLBACK_FILTER,
                 )
             )
             .order_by(StockMetrics.date.desc())
@@ -289,22 +288,7 @@ async def get_actionable_setups(
                     StockMetrics.distance_to_high_52w_atr >= -3.0,
                     StockMetrics.avg_volume_10d >= 700000,
                     StockMetrics.adr_percent >= 3,
-                    or_(
-                        # EMA21 pullback — testing EMA21 as support, above EMA50
-                        and_(
-                            StockMetrics.distance_to_ema21_atr >= -0.8,
-                            StockMetrics.distance_to_ema21_atr <= 0.5,
-                            StockMetrics.distance_to_ema50_atr > 0,
-                            StockMetrics.perf_13w > 3,
-                        ),
-                        # EMA9 pullback — testing EMA9, well above EMA21 (>0.3 ATR)
-                        and_(
-                            StockMetrics.distance_to_ema9_atr >= -0.5,
-                            StockMetrics.distance_to_ema9_atr <= 0.3,
-                            StockMetrics.distance_to_ema21_atr > 0.3,
-                            StockMetrics.perf_13w > 5,
-                        ),
-                    )
+                    _EMA_PULLBACK_FILTER,
                 )
             )
             .order_by(StockMetrics.pullback_quality_score.desc())
@@ -419,17 +403,11 @@ def _generate_priority_narrative(setup: StockMetrics, priority_score: float, set
     components = []
 
     if setup_type == "ema9_pullback":
-        ema_dist = setup.distance_to_ema9 or 0
-        if ema_dist >= 0:
-            components.append("EMA9 held")
-        else:
-            components.append(f"EMA9 pullback ({ema_dist:.1f}%)")
+        atr = setup.distance_to_ema9_atr or 0
+        components.append("EMA9 held" if atr >= 0 else f"EMA9 pullback ({atr:.2f} ATR)")
     else:
-        ema_dist = setup.distance_to_ema21 or 0
-        if ema_dist >= 0:
-            components.append("EMA21 held")
-        else:
-            components.append(f"Near EMA21 ({ema_dist:.1f}%)")
+        atr = setup.distance_to_ema21_atr or 0
+        components.append("EMA21 held" if atr >= 0 else f"Near EMA21 ({atr:.2f} ATR)")
 
     if setup.volume_contraction and setup.volume_contraction > 20:
         components.append(f"Vol -{setup.volume_contraction:.0f}%")
