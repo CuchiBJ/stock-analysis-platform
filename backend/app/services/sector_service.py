@@ -11,80 +11,81 @@ class SectorService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    # @cache_sectors  # DISABLED - testing if cache is causing issues
+    @cache_sectors
     async def calculate_sector_performance(self) -> List[Dict]:
-        """Calculate sector performance from stock metrics (simplified for performance)"""
-        # Get all sectors with stocks
-        result = await self.db.execute(
-            select(Stock.sector, func.count(Stock.symbol).label('count'))
-            .where(Stock.sector.isnot(None))
-            .group_by(Stock.sector)
-        )
-        sectors = result.all()
-        
+        """Calculate sector performance using latest metrics per symbol, quality universe only."""
+        import math
+        from sqlalchemy import text
+
+        # One query: latest metric per symbol, quality-filtered, with sector
+        result = await self.db.execute(text("""
+            SELECT
+                s.sector,
+                sm.symbol,
+                sm.perf_1w,
+                sm.perf_4w,
+                sm.relative_volume,
+                sm.pullback_quality_score,
+                sm.relative_strength_spy
+            FROM stock_metrics sm
+            JOIN stocks s ON s.symbol = sm.symbol
+            JOIN (
+                SELECT symbol, MAX(date) AS max_date
+                FROM stock_metrics
+                GROUP BY symbol
+            ) latest ON sm.symbol = latest.symbol AND sm.date = latest.max_date
+            WHERE s.sector IS NOT NULL
+              AND sm.avg_volume_10d  >= 500000
+              AND sm.current_price   >= 5.0
+              AND sm.adr_percent     >= 2.0
+              AND sm.perf_1w         IS NOT NULL
+        """))
+        rows = result.fetchall()
+
+        # Group by sector
+        from collections import defaultdict
+        sectors: dict = defaultdict(list)
+        for row in rows:
+            sectors[row.sector].append(row)
+
         sector_performance = []
-        
-        for sector_name, count in sectors:
-            # Get stocks in sector with latest metrics (simplified query)
-            metrics_result = await self.db.execute(
-                select(StockMetrics, Stock)
-                .join(Stock, Stock.symbol == StockMetrics.symbol)
-                .where(Stock.sector == sector_name)
-                .where(Stock.is_active == True)
-                .order_by(StockMetrics.date.desc())
-                .limit(1000)  # Limit to avoid timeout
-            )
-            metrics = metrics_result.all()
-            
-            if not metrics:
-                continue
-            
-            # Calculate average performance from metrics (simplified)
-            # Use correct fields: perf_1w for weekly, perf_4w for monthly
-            weekly_perfs = [m[0].perf_1w for m in metrics if m[0].perf_1w is not None]  # Weekly performance
-            monthly_perfs = [m[0].perf_4w for m in metrics if m[0].perf_4w is not None]  # 4 weeks ≈ 1 month
-            
+
+        for sector_name, stocks in sectors.items():
+            weekly_perfs  = [r.perf_1w for r in stocks if r.perf_1w  is not None]
+            monthly_perfs = [r.perf_4w for r in stocks if r.perf_4w  is not None]
+
             if not weekly_perfs:
                 continue
-            
-            avg_weekly = sum(weekly_perfs) / len(weekly_perfs)
+
+            avg_weekly  = sum(weekly_perfs)  / len(weekly_perfs)
             avg_monthly = sum(monthly_perfs) / len(monthly_perfs) if monthly_perfs else avg_weekly * 4
-            
-            # Filter out infinity and NaN values
-            import math
+
             if not (math.isfinite(avg_weekly) and math.isfinite(avg_monthly)):
                 continue
-            
-            # Get SPY performance for comparison (simplified to 0)
-            spy_performance = 0
-            performance_vs_spy = avg_monthly - spy_performance
-            
-            # Determine trend
-            trend = 'accelerating' if avg_weekly > 1 else 'decelerating' if avg_weekly < -1 else 'steady'
-            
-            # Determine strength
-            strength = 'strong' if avg_monthly > 2 else 'weak' if avg_monthly < -2 else 'moderate'
-            
-            # Determine volume trend (simplified)
-            volume_trend = 'stable'
-            
-            # Get sector leaders (top 3 by monthly performance)
-            stock_perfs = [(m[0].symbol, m[0].perf_4w or 0) for m in metrics if m[0].perf_4w is not None]
-            stock_perfs.sort(key=lambda x: x[1], reverse=True)
-            leaders = [symbol for symbol, _ in stock_perfs[:3]]
-            
+
+            # Leaders: best pullback quality + RS (institutional, not price spikes)
+            leaders_sorted = sorted(
+                [r for r in stocks if r.pullback_quality_score is not None],
+                key=lambda r: (r.pullback_quality_score or 0) * 0.6 + (r.relative_strength_spy or 100) * 0.4,
+                reverse=True
+            )
+            leaders = [r.symbol for r in leaders_sorted[:3]]
+
+            avg_rvol = sum(r.relative_volume for r in stocks if r.relative_volume) / max(len(stocks), 1)
+
             sector_performance.append({
-                "name": sector_name,
-                "performance_weekly": avg_weekly,
-                "performance_monthly": avg_monthly,
-                "performance_vs_spy": performance_vs_spy,
-                "trend": trend,
-                "strength": strength,
-                "volume_trend": volume_trend,
-                "stock_count": count,
-                "leaders": leaders
+                "name":                sector_name,
+                "performance_weekly":  round(avg_weekly,  2),
+                "performance_monthly": round(avg_monthly, 2),
+                "performance_vs_spy":  round(avg_monthly, 2),  # SPY benchmark TBD
+                "trend":     "accelerating" if avg_weekly > 1 else "decelerating" if avg_weekly < -1 else "steady",
+                "strength":  "strong" if avg_monthly > 2 else "weak" if avg_monthly < -2 else "moderate",
+                "volume_trend": "increasing" if avg_rvol > 1.5 else "decreasing" if avg_rvol < 0.8 else "stable",
+                "stock_count": len(stocks),
+                "leaders":   leaders,
             })
-        
+
+        sector_performance.sort(key=lambda x: x["performance_monthly"], reverse=True)
         return sector_performance
     
     async def _get_spy_performance(self) -> float:
