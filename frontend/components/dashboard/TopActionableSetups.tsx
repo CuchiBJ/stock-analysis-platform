@@ -10,8 +10,10 @@ interface ActionableSetup {
   symbol: string
   priority_score: number
   narrative: string
+  setup_type: 'ema9_pullback' | 'ema21_pullback'
   pullback_quality: number
   distance_to_ema21: number
+  distance_to_ema9: number
   rs_spy: number
   volume_contraction: number
 }
@@ -88,11 +90,19 @@ export default function TopActionableSetups() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-        {setups.map((setup, index) => (
+        {setups.map((setup, index) => {
+          const isEma9 = setup.setup_type === 'ema9_pullback'
+          const emaDist = isEma9 ? setup.distance_to_ema9 : setup.distance_to_ema21
+          const emaLabel = isEma9 ? 'EMA9' : 'EMA21'
+          const emaValue = emaDist != null
+            ? (emaDist >= 0 ? `+${emaDist.toFixed(1)}%` : `${emaDist.toFixed(1)}%`)
+            : 'N/A'
+
+          return (
             <CompactSetupCard
               key={setup.symbol}
               symbol={setup.symbol}
-              state="Constructive Pullback"
+              state={isEma9 ? 'EMA9 Pullback' : 'Constructive Pullback'}
               transition="stable"
               transitionStrength={setup.priority_score}
               narrative={setup.narrative}
@@ -100,14 +110,15 @@ export default function TopActionableSetups() {
               freshness="fresh"
               daysInState={1}
               keyMetrics={{
-                ema21: setup.distance_to_ema21 >= 0 ? `+${setup.distance_to_ema21.toFixed(1)}%` : `${setup.distance_to_ema21.toFixed(1)}%`,
+                [emaLabel]: emaValue,
                 rs: setup.rs_spy || 100,
                 volume: setup.volume_contraction ? `-${setup.volume_contraction.toFixed(0)}%` : 'N/A',
-                base: '8-week'
+                base: isEma9 ? 'fast' : '8-week',
               }}
               isPriority={index === 0}
             />
-          ))}
+          )
+        })}
       </div>
     </Card>
   )

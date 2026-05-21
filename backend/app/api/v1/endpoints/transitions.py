@@ -15,7 +15,7 @@ from app.services.setup_lifecycle_engine import SetupLifecycleEngine
 from app.services.market_regime_engine import MarketRegimeEngine
 from app.services.websocket_manager import websocket_manager
 from app.models.stock import StockMetrics
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, or_, func
 import logging
 
 logger = logging.getLogger(__name__)
@@ -45,18 +45,29 @@ async def get_live_transitions(
             .where(
                 and_(
                     StockMetrics.date >= cutoff_date,
-                    StockMetrics.pullback_quality_score >= 55,  # Institutional quality
-                    StockMetrics.distance_to_ema21_atr >= -0.8,  # ATR-normalized: near EMA21 (pullback or extended)
-                    StockMetrics.distance_to_ema21_atr <= 0.5,  # ATR-normalized: not too extended above
-                    StockMetrics.distance_to_high_52w_atr >= -3.0,  # ATR-normalized: within 3 ATRs of high
+                    StockMetrics.pullback_quality_score >= 55,
+                    StockMetrics.distance_to_high_52w_atr >= -3.0,
                     StockMetrics.avg_volume_10d >= 700000,
                     StockMetrics.adr_percent >= 3,
                     StockMetrics.current_price >= StockMetrics.low_52w * 1.7,
-                    StockMetrics.current_price > StockMetrics.ema50
+                    StockMetrics.current_price > StockMetrics.ema50,
+                    or_(
+                        # EMA21 pullback — standard setup
+                        and_(
+                            StockMetrics.distance_to_ema21_atr >= -0.8,
+                            StockMetrics.distance_to_ema21_atr <= 0.5,
+                        ),
+                        # EMA9 pullback — faster setup, stock must be above EMA21
+                        and_(
+                            StockMetrics.distance_to_ema9_atr >= -0.5,
+                            StockMetrics.distance_to_ema9_atr <= 0.3,
+                            StockMetrics.distance_to_ema21 > 0,
+                        ),
+                    )
                 )
             )
             .order_by(StockMetrics.date.desc())
-            .limit(500)  # Get more records to ensure we have enough per symbol
+            .limit(500)
         )
         recent_metrics = result.scalars().all()
         
@@ -267,37 +278,48 @@ async def get_actionable_setups(
             ))
             .where(
                 and_(
-                    StockMetrics.pullback_quality_score >= 55,  # Institutional quality
-                    StockMetrics.distance_to_ema21_atr >= -0.8,  # ATR-normalized: near EMA21 (pullback or extended)
-                    StockMetrics.distance_to_ema21_atr <= 0.5,  # ATR-normalized: not too extended above
-                    StockMetrics.distance_to_high_52w_atr >= -3.0,  # ATR-normalized: within 3 ATRs of high
+                    StockMetrics.pullback_quality_score >= 55,
+                    StockMetrics.distance_to_high_52w_atr >= -3.0,
                     StockMetrics.avg_volume_10d >= 700000,
-                    StockMetrics.adr_percent >= 3
+                    StockMetrics.adr_percent >= 3,
+                    or_(
+                        # EMA21 pullback
+                        and_(
+                            StockMetrics.distance_to_ema21_atr >= -0.8,
+                            StockMetrics.distance_to_ema21_atr <= 0.5,
+                        ),
+                        # EMA9 pullback (stock above EMA21)
+                        and_(
+                            StockMetrics.distance_to_ema9_atr >= -0.5,
+                            StockMetrics.distance_to_ema9_atr <= 0.3,
+                            StockMetrics.distance_to_ema21 > 0,
+                        ),
+                    )
                 )
             )
             .order_by(StockMetrics.pullback_quality_score.desc())
             .limit(50)
         )
         setups = result.scalars().all()
-        
+
         actionable = []
         for setup in setups:
-            # Calculate priority score
             priority_score = await _calculate_priority_score(
                 setup, regime, transition_engine, db
             )
-            
-            # Generate narrative
-            narrative = _generate_priority_narrative(setup, priority_score)
-            
+            setup_type = _classify_setup_type(setup)
+            narrative = _generate_priority_narrative(setup, priority_score, setup_type)
+
             actionable.append({
-                "symbol": setup.symbol,
-                "priority_score": priority_score,
-                "narrative": narrative,
-                "pullback_quality": setup.pullback_quality_score,
+                "symbol":            setup.symbol,
+                "priority_score":    priority_score,
+                "narrative":         narrative,
+                "setup_type":        setup_type,
+                "pullback_quality":  setup.pullback_quality_score,
                 "distance_to_ema21": setup.distance_to_ema21,
-                "rs_spy": setup.relative_strength_spy,
-                "volume_contraction": setup.volume_contraction
+                "distance_to_ema9":  setup.distance_to_ema9,
+                "rs_spy":            setup.relative_strength_spy,
+                "volume_contraction": setup.volume_contraction,
             })
         
         # Sort by priority score
@@ -368,22 +390,46 @@ async def _calculate_priority_score(
     return score
 
 
-def _generate_priority_narrative(setup: StockMetrics, priority_score: float) -> str:
+def _classify_setup_type(setup: StockMetrics) -> str:
+    """Determine whether setup is an EMA9 or EMA21 pullback."""
+    ema9_atr  = setup.distance_to_ema9_atr
+    ema21_atr = setup.distance_to_ema21_atr
+    above_ema21 = setup.distance_to_ema21 is not None and setup.distance_to_ema21 > 0
+
+    is_ema9 = (
+        ema9_atr is not None and
+        -0.5 <= ema9_atr <= 0.3 and
+        above_ema21
+    )
+    if is_ema9:
+        return "ema9_pullback"
+    return "ema21_pullback"
+
+
+def _generate_priority_narrative(setup: StockMetrics, priority_score: float, setup_type: str = "ema21_pullback") -> str:
     """Generate short narrative for actionable setup."""
     components = []
-    
-    if setup.distance_to_ema21 >= 0:
-        components.append("EMA21 held")
+
+    if setup_type == "ema9_pullback":
+        ema_dist = setup.distance_to_ema9 or 0
+        if ema_dist >= 0:
+            components.append("EMA9 held")
+        else:
+            components.append(f"EMA9 pullback ({ema_dist:.1f}%)")
     else:
-        components.append("Near EMA21")
-    
+        ema_dist = setup.distance_to_ema21 or 0
+        if ema_dist >= 0:
+            components.append("EMA21 held")
+        else:
+            components.append(f"Near EMA21 ({ema_dist:.1f}%)")
+
     if setup.volume_contraction and setup.volume_contraction > 20:
         components.append(f"Vol -{setup.volume_contraction:.0f}%")
-    
+
     if setup.relative_strength_spy and setup.relative_strength_spy > 105:
         components.append("RS strong")
-    
+
     if priority_score > 0.8:
         components.append("High priority")
-    
+
     return ". ".join(components) + "."
