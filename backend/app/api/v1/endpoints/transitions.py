@@ -52,16 +52,23 @@ async def get_live_transitions(
                     StockMetrics.current_price >= StockMetrics.low_52w * 1.7,
                     StockMetrics.current_price > StockMetrics.ema50,
                     or_(
-                        # EMA21 pullback — standard setup
+                        # EMA21 pullback — stock testing EMA21 as support from above
+                        # distance_to_ema50_atr > 0: above EMA50 (medium-term trend intact)
+                        # perf_13w > 3: established uptrend confirms stock came FROM above
                         and_(
                             StockMetrics.distance_to_ema21_atr >= -0.8,
                             StockMetrics.distance_to_ema21_atr <= 0.5,
+                            StockMetrics.distance_to_ema50_atr > 0,
+                            StockMetrics.perf_13w > 3,
                         ),
-                        # EMA9 pullback — faster setup, stock must be above EMA21
+                        # EMA9 pullback — fast setup, stock pulling back to EMA9 while above EMA21
+                        # distance_to_ema21_atr > 0.3: meaningfully above EMA21 (not simultaneously testing it)
+                        # perf_13w > 5: prior uptrend confirms stock descended to EMA9, not ascended to it
                         and_(
                             StockMetrics.distance_to_ema9_atr >= -0.5,
                             StockMetrics.distance_to_ema9_atr <= 0.3,
-                            StockMetrics.distance_to_ema21 > 0,
+                            StockMetrics.distance_to_ema21_atr > 0.3,
+                            StockMetrics.perf_13w > 5,
                         ),
                     )
                 )
@@ -283,16 +290,19 @@ async def get_actionable_setups(
                     StockMetrics.avg_volume_10d >= 700000,
                     StockMetrics.adr_percent >= 3,
                     or_(
-                        # EMA21 pullback
+                        # EMA21 pullback — testing EMA21 as support, above EMA50
                         and_(
                             StockMetrics.distance_to_ema21_atr >= -0.8,
                             StockMetrics.distance_to_ema21_atr <= 0.5,
+                            StockMetrics.distance_to_ema50_atr > 0,
+                            StockMetrics.perf_13w > 3,
                         ),
-                        # EMA9 pullback (stock above EMA21)
+                        # EMA9 pullback — testing EMA9, well above EMA21 (>0.3 ATR)
                         and_(
                             StockMetrics.distance_to_ema9_atr >= -0.5,
                             StockMetrics.distance_to_ema9_atr <= 0.3,
-                            StockMetrics.distance_to_ema21 > 0,
+                            StockMetrics.distance_to_ema21_atr > 0.3,
+                            StockMetrics.perf_13w > 5,
                         ),
                     )
                 )
@@ -391,15 +401,13 @@ async def _calculate_priority_score(
 
 
 def _classify_setup_type(setup: StockMetrics) -> str:
-    """Determine whether setup is an EMA9 or EMA21 pullback."""
+    """Determine whether setup is an EMA9 or EMA21 pullback using ATR-normalized distances."""
     ema9_atr  = setup.distance_to_ema9_atr
     ema21_atr = setup.distance_to_ema21_atr
-    above_ema21 = setup.distance_to_ema21 is not None and setup.distance_to_ema21 > 0
 
     is_ema9 = (
-        ema9_atr is not None and
-        -0.5 <= ema9_atr <= 0.3 and
-        above_ema21
+        ema9_atr  is not None and -0.5 <= ema9_atr  <= 0.3 and
+        ema21_atr is not None and ema21_atr > 0.3
     )
     if is_ema9:
         return "ema9_pullback"
