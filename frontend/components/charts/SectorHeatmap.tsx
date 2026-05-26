@@ -3,9 +3,54 @@
 import { useEffect, useState } from 'react'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
-import { TrendingUp, TrendingDown, Activity, Flame, ArrowUp, ArrowDown } from 'lucide-react'
+import { TrendingUp, TrendingDown, Activity, Flame, ArrowDown } from 'lucide-react'
+import { API_URL } from '@/lib/utils'
 
 type ViewMode = 'daily' | 'weekly' | 'monthly' | 'rs_spy' | 'momentum' | 'rvol'
+
+// Mirror of MARKET_GROUP_TO_FAMILY in market_group_mapping.py — update both when taxonomy changes.
+const MARKET_GROUP_TO_FAMILY: Record<string, string> = {
+  'Electronic Technology': 'tech',
+  'Technology Services': 'tech',
+  'Health Technology': 'healthcare',
+  'Health Services': 'healthcare',
+  'Finance': 'financial',
+  'Banks': 'financial',
+  'Insurance': 'financial',
+  'Defense': 'industrial',
+  'Industrials': 'industrial',
+  'Commercial Services': 'industrial',
+  'Transportation': 'industrial',
+  'Retail': 'consumer',
+  'Consumer Cyclical': 'consumer',
+  'Auto': 'consumer',
+  'Consumer Staples': 'consumer',
+  'Consumer Products': 'consumer',
+  'Energy': 'energy',
+  'Renewables': 'energy',
+  'Mining & Metals': 'materials',
+  'Chemicals': 'materials',
+  'Building': 'materials',
+  'Real Estate': 'yield',
+  'Utilities': 'yield',
+  'Media & Telecom': 'yield',
+}
+
+const FAMILY_BORDER_COLOR: Record<string, string> = {
+  tech: 'border-l-cyan-500',
+  healthcare: 'border-l-pink-500',
+  financial: 'border-l-blue-500',
+  industrial: 'border-l-amber-500',
+  consumer: 'border-l-orange-500',
+  energy: 'border-l-red-500',
+  materials: 'border-l-stone-500',
+  yield: 'border-l-purple-500',
+}
+
+function familyBorder(name: string): string {
+  const family = MARKET_GROUP_TO_FAMILY[name]
+  return family ? (FAMILY_BORDER_COLOR[family] ?? 'border-l-white/10') : 'border-l-white/10'
+}
 
 export default function SectorHeatmap() {
   const [data, setData] = useState<any[]>([])
@@ -18,7 +63,7 @@ export default function SectorHeatmap() {
       try {
         setLoading(true)
         setError(null)
-        const response = await fetch('http://localhost:8000/api/v1/sectors/performance?timeframe=daily')
+        const response = await fetch(`${API_URL}/api/v1/sectors/performance?timeframe=daily`)
         if (!response.ok) throw new Error('Failed to load sector data')
         const data = await response.json()
         setData(data)
@@ -31,18 +76,17 @@ export default function SectorHeatmap() {
     }
 
     fetchData()
-    // Refresh every 60 seconds
     const interval = setInterval(fetchData, 60000)
     return () => clearInterval(interval)
   }, [])
 
   const getValueByMode = (sector: any) => {
     switch (viewMode) {
-      case 'daily': return sector.performance_weekly || 0  // Use weekly since daily no longer available
+      case 'daily': return sector.performance_weekly || 0
       case 'weekly': return sector.performance_weekly || 0
       case 'monthly': return sector.performance_monthly || 0
       case 'rs_spy': return sector.performance_vs_spy || 0
-      case 'momentum': return sector.performance_weekly || 0 // Simplified
+      case 'momentum': return sector.performance_weekly || 0
       case 'rvol': return sector.volume_trend === 'increasing' ? 2 : sector.volume_trend === 'decreasing' ? -1 : 0
       default: return sector.performance_weekly || 0
     }
@@ -92,8 +136,8 @@ export default function SectorHeatmap() {
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Sector Rotation</h3>
         </div>
-        <div className="grid grid-cols-4 gap-2">
-          {[...Array(12)].map((_, i) => (
+        <div className="grid grid-cols-5 gap-2">
+          {[...Array(25)].map((_, i) => (
             <LoadingSkeleton key={i} variant="card" />
           ))}
         </div>
@@ -141,17 +185,17 @@ export default function SectorHeatmap() {
             ))}
           </div>
         </div>
-        <span className="text-xs text-muted-foreground">{data.length} sectors</span>
+        <span className="text-xs text-muted-foreground">{data.length} groups</span>
       </div>
 
-      <div className="grid grid-cols-4 gap-2">
+      <div className="grid grid-cols-5 gap-2">
         {sortedData.map((sector) => {
           const value = getValueByMode(sector)
           const colors = getColor(value)
           return (
             <div
               key={sector.name}
-              className={`${colors.bg} p-3 rounded cursor-pointer hover:opacity-80 transition-opacity relative group`}
+              className={`${colors.bg} border-l-2 ${familyBorder(sector.name)} p-3 rounded cursor-pointer hover:opacity-80 transition-opacity relative group`}
               title={`${sector.name}: ${viewModeLabels[viewMode]} = ${value.toFixed(2)}% | Trend: ${sector.trend} | Strength: ${sector.strength}`}
             >
               <div className="flex items-start justify-between mb-1">

@@ -8,6 +8,7 @@ from app.data.sources.tradingview_client import TradingViewClient
 from app.data.ingestors.price_ingestor import PriceIngestor
 from app.models.stock import Stock
 from app.repositories.stock_repository import StockRepository
+from app.services.market_group_mapping import map_industry_to_market_group
 import logging
 
 logger = logging.getLogger(__name__)
@@ -47,11 +48,14 @@ class StockIngestor:
                 if existing:
                     continue
                 
+                _industry = ticker.get("industry")
+                _sector = ticker.get("sector")
                 stock = Stock(
                     symbol=ticker["ticker"],
                     name=ticker["name"] or ticker["ticker"],
-                    sector=ticker.get("sector"),
-                    industry=ticker.get("industry"),
+                    sector=_sector,
+                    industry=_industry,
+                    market_group=map_industry_to_market_group(_industry, _sector),
                     market_cap=ticker.get("market_cap"),
                     float_shares=ticker.get("share_class_shares_outstanding"),
                     is_adr=ticker.get("primary_exchange") == "XNYS",  # Simplified ADR detection
@@ -98,9 +102,10 @@ class StockIngestor:
             stock.name = ticker.get("name", symbol)
             stock.sector = ticker.get("sector")
             stock.industry = ticker.get("industry")
+            stock.market_group = map_industry_to_market_group(stock.industry, stock.sector)
             stock.market_cap = ticker.get("market_cap")
             stock.float_shares = ticker.get("share_class_shares_outstanding")
-            
+
             self.db.add(stock)
             await self.db.commit()
             await self.db.refresh(stock)
@@ -140,13 +145,14 @@ class StockIngestor:
                 stock.sector = info['sector']
             if info.get('industry'):
                 stock.industry = info['industry']
+            stock.market_group = map_industry_to_market_group(stock.industry, stock.sector)
             if info.get('market_cap') and not stock.market_cap:
                 stock.market_cap = info['market_cap']
-            
+
             self.db.add(stock)
             await self.db.commit()
             await self.db.refresh(stock)
-            
+
             logger.info(f"Updated sector for {symbol}: {stock.sector}")
             return stock
             
@@ -224,9 +230,10 @@ class StockIngestor:
                             stock.sector = info['sector']
                         if info.get('industry'):
                             stock.industry = info['industry']
+                        stock.market_group = map_industry_to_market_group(stock.industry, stock.sector)
                         if info.get('market_cap') and not stock.market_cap:
                             stock.market_cap = info['market_cap']
-                        
+
                         self.db.add(stock)
                         await self.db.commit()
                         count += 1

@@ -15,7 +15,9 @@ class SectorService:
 
     @cache_sectors
     async def calculate_sector_performance(self) -> List[Dict]:
-        """Calculate sector performance using latest metrics per symbol, quality universe only."""
+        """Groups by market_group (~25 momentum-trading groups) — see market_group_mapping.py.
+        The endpoint path /sectors/performance is preserved for compat but the unit of grouping
+        changed from GICS L1 to market_group in 2026-05."""
         # Window function avoids a second GROUP BY aggregation pass
         result = await self.db.execute(text("""
             WITH latest AS (
@@ -24,7 +26,7 @@ class SectorService:
                 FROM stock_metrics
             )
             SELECT
-                s.sector,
+                s.market_group,
                 l.symbol,
                 l.perf_1w,
                 l.perf_4w,
@@ -34,7 +36,7 @@ class SectorService:
             FROM latest l
             JOIN stocks s ON s.symbol = l.symbol
             WHERE l.rn = 1
-              AND s.sector IS NOT NULL
+              AND s.market_group IS NOT NULL
               AND l.avg_volume_10d  >= 500000
               AND l.current_price   >= 5.0
               AND l.adr_percent     >= 2.0
@@ -42,14 +44,14 @@ class SectorService:
         """))
         rows = result.fetchall()
 
-        sectors: dict = defaultdict(list)
+        groups: dict = defaultdict(list)
         for row in rows:
-            sectors[row.sector].append(row)
+            groups[row.market_group].append(row)
 
         spy_perf = await self._get_spy_performance()
         sector_performance = []
 
-        for sector_name, stocks in sectors.items():
+        for group_name, stocks in groups.items():
             weekly_perfs  = [r.perf_1w for r in stocks if r.perf_1w  is not None]
             monthly_perfs = [r.perf_4w for r in stocks if r.perf_4w  is not None]
 
@@ -71,7 +73,7 @@ class SectorService:
             avg_rvol = sum(r.relative_volume for r in stocks if r.relative_volume) / max(len(stocks), 1)
 
             sector_performance.append({
-                "name":                sector_name,
+                "name":                group_name,
                 "performance_weekly":  round(avg_weekly,  2),
                 "performance_monthly": round(avg_monthly, 2),
                 "performance_vs_spy":  round(avg_monthly - spy_perf, 2),

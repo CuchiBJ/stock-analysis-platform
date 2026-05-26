@@ -29,14 +29,41 @@ class TransitionDirection(Enum):
 
 
 class OperationalTransition(Enum):
-    """Operational transition within a state"""
-    IMPROVING = "improving"      # Setup is improving (RS up, volume contracting, structure tightening)
-    TIGHTENING = "tightening"    # Setup is compacting (range narrowing, volume drying)
-    STABLE = "stable"           # Setup is stable (no significant change)
-    WEAKENING = "weakening"    # Setup is deteriorating (RS down, volume expanding, structure weakening)
-    FAILING = "failing"         # Setup is failing (EMA21 lost, breakdown, distribution)
-    RECLAIMING = "reclaiming"  # Setup is reclaiming EMA21
-    STABILIZING = "stabilizing"  # Setup is stabilizing after volatility
+    """
+    Operational transition within a state.
+
+    Pre-reclaim signals (primary focus — highest priority in feed):
+      ENTERING_PULLBACK, VOLUME_DRY_UP, COMPRESSING,
+      FLUSH_AND_RECOVER, SUPPORT_HOLDING
+
+    Reclaim/continuation (exist, not the focus):
+      RECLAIMING, CONTINUATION_HOLDING
+
+    Deterioration:
+      WEAKENING, DISTRIBUTION, FAILING
+
+    Neutral:
+      STABLE, STABILIZING
+    """
+    # Pre-reclaim (foco — aparecen primero en el feed)
+    ENTERING_PULLBACK   = "entering_pullback"   # Primera pérdida EMA9/21, estructura intacta
+    VOLUME_DRY_UP       = "volume_dry_up"       # Volume contrayendo debajo de EMAs — señal clave
+    COMPRESSING         = "compressing"          # ATR contrayendo debajo de EMAs
+    FLUSH_AND_RECOVER   = "flush_and_recover"   # Spike bajo + recovery — undercut constructivo
+    SUPPORT_HOLDING     = "support_holding"      # Bounces en zona soporte, institucional defendiendo
+
+    # Reclaim / continuation (existen, no dominan)
+    RECLAIMING          = "reclaiming"           # Recuperando EMA21 — señal tardía
+    CONTINUATION_HOLDING = "continuation_holding" # Holding EMA21 con estructura
+
+    # Deterioration
+    WEAKENING           = "weakening"            # RS baja, estructura se deteriora
+    DISTRIBUTION        = "distribution"         # Volume expansion en baja, RS colapsa
+    FAILING             = "failing"              # EMA50 perdida con volumen
+
+    # Neutral
+    STABLE              = "stable"
+    STABILIZING         = "stabilizing"
 
 
 class FreshnessState(Enum):
@@ -116,13 +143,17 @@ class TransitionEngine:
     
     # State progression order (from worst to best)
     STATE_HIERARCHY = {
-        SetupState.BROKEN: 0,
-        SetupState.WEAKENING: 1,
-        SetupState.EMERGING: 2,
-        SetupState.CONSTRUCTIVE_PULLBACK: 3,
-        SetupState.TIGHTENING: 4,
-        SetupState.TRIGGER_READY: 5,
-        SetupState.CONTINUATION: 6
+        SetupState.BROKEN:                 0,
+        SetupState.DISTRIBUTION:           1,
+        SetupState.EARLY_PULLBACK:         2,
+        SetupState.CONTROLLED_PULLBACK:    3,
+        SetupState.VOLATILITY_CONTRACTION: 4,
+        SetupState.SUPPORT_TESTING:        4,
+        SetupState.UNDERCUT:               4,
+        SetupState.TIGHTENING:             5,
+        SetupState.RECLAIM_PREPARATION:    6,
+        SetupState.RECLAIM_IN_PROGRESS:    7,
+        SetupState.CONTINUATION:           8,
     }
     
     def __init__(self, db: AsyncSession):
@@ -152,12 +183,17 @@ class TransitionEngine:
                 timestamp=datetime.utcnow()
             )
         
-        # Calculate changes including EMA21 distance change (ATR-normalized)
+        # Calculate changes including EMA distance changes (ATR-normalized)
         ema21_distance_change = 0.0
-        if (current_metrics.distance_to_ema21_atr is not None and 
+        if (current_metrics.distance_to_ema21_atr is not None and
             previous_metrics.distance_to_ema21_atr is not None):
             ema21_distance_change = current_metrics.distance_to_ema21_atr - previous_metrics.distance_to_ema21_atr
-        
+
+        ema9_distance_change = 0.0
+        if (current_metrics.distance_to_ema9_atr is not None and
+            previous_metrics.distance_to_ema9_atr is not None):
+            ema9_distance_change = current_metrics.distance_to_ema9_atr - previous_metrics.distance_to_ema9_atr
+
         rs_change = 0.0
         if current_metrics.relative_strength_spy and previous_metrics.relative_strength_spy:
             rs_change = current_metrics.relative_strength_spy - previous_metrics.relative_strength_spy
@@ -173,8 +209,10 @@ class TransitionEngine:
             structure_change = current_metrics.weekly_tightness - previous_metrics.weekly_tightness
         
         # Determine transition type
+        prev_ema21_atr = previous_metrics.distance_to_ema21_atr
         transition = self._determine_operational_transition(
-            rs_change, volume_change_pct, structure_change, ema21_distance_change, current_metrics
+            rs_change, volume_change_pct, structure_change, ema21_distance_change,
+            current_metrics, prev_ema21_atr, ema9_distance_change
         )
         
         # Calculate strength
@@ -186,7 +224,25 @@ class TransitionEngine:
         narrative = self._generate_operational_narrative(
             transition, rs_change, volume_change_pct, structure_change, current_metrics
         )
-        
+
+        # Persist observation for every non-STABLE detection (idempotent)
+        if transition != OperationalTransition.STABLE:
+            from app.services.outcome_tracker import OutcomeTracker, get_current_regime
+            from datetime import date as date_cls
+            try:
+                today = date_cls.today()
+                regime = await get_current_regime(self.db, today)
+                tracker = OutcomeTracker(self.db)
+                await tracker.record_observation(
+                    symbol=symbol,
+                    transition_value=transition.value,
+                    current_metrics=current_metrics,
+                    regime=regime,
+                    date_detected=today,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to record observation for {symbol}: {e}")
+
         return OperationalTransitionMetrics(
             transition=transition,
             strength=strength,
@@ -578,51 +634,109 @@ class TransitionEngine:
     
     # --- Operational transition helper methods ---
     
+    def _is_quality_leader(self, m: StockMetrics) -> bool:
+        """Delegates to shared `quality_leader_gate.is_quality_leader`.
+
+        Kept as instance method for call-site compatibility within the engine.
+        """
+        from app.services.quality_leader_gate import is_quality_leader
+        return is_quality_leader(m)
+
     def _determine_operational_transition(
         self,
         rs_change: float,
         volume_change_pct: float,
         structure_change: float,
         ema21_distance_change: float,
-        current_metrics: StockMetrics
+        current_metrics: StockMetrics,
+        prev_ema21_atr: Optional[float] = None,
+        ema9_distance_change: float = 0.0,
     ) -> OperationalTransition:
         """
-        Determine operational transition type based on metrics changes.
+        Determine operational transition. PRE-RECLAIM signals have priority.
+        Reclaiming is detected last — it is the consequence, not the setup.
         """
-        # Check for failing conditions first (highest priority)
-        # Failing if below EMA21 and moving further away (ATR-normalized)
-        if (current_metrics.distance_to_ema21_atr is not None and 
-            current_metrics.distance_to_ema21_atr < -2.0 and 
-            ema21_distance_change < -0.5):
+        ema21 = current_metrics.distance_to_ema21_atr or 0.0
+        ema9  = current_metrics.distance_to_ema9_atr or 0.0
+        ema50 = current_metrics.distance_to_ema50_atr or 0.0
+        rvol  = current_metrics.relative_volume or 1.0
+        rs    = current_metrics.relative_strength_spy or 100.0
+
+        # 1. Failing — highest priority, always detect first
+        if ema50 < -2.5 or (ema21 < -2.0 and ema21_distance_change < -0.5):
             return OperationalTransition.FAILING
-        if (current_metrics.distance_to_ema50 is not None and 
-            current_metrics.distance_to_ema50 < -10):
-            return OperationalTransition.FAILING
-        
-        # Check for reclaiming (close to EMA21 from below and moving up) - ATR-normalized
-        if (current_metrics.distance_to_ema21_atr is not None and 
-            current_metrics.distance_to_ema21_atr >= -1.0 and 
-            current_metrics.distance_to_ema21_atr <= 0.2 and
-            ema21_distance_change > 0.2):
-            return OperationalTransition.RECLAIMING
-        
-        # Check for improving (RS up + volume contracting + structure tightening)
-        if rs_change > 2 and volume_change_pct < -20 and structure_change > 0.1:
-            return OperationalTransition.IMPROVING
-        
-        # Check for tightening (volume contracting + structure improving)
-        if volume_change_pct < -30 and structure_change > 0.05:
-            return OperationalTransition.TIGHTENING
-        
-        # Check for weakening (RS down + volume expanding + structure deteriorating)
-        if rs_change < -2 and volume_change_pct > 20 and structure_change < -0.1:
+
+        # 2. Distribution — volume expansion + RS collapse while below EMA21
+        if (ema21 < -0.8 and volume_change_pct > 25 and
+                rs < 95 and rs_change < -3):
+            return OperationalTransition.DISTRIBUTION
+
+        # 3. Weakening — moderate deterioration
+        if rs_change < -2 and volume_change_pct > 15 and structure_change < -0.1:
             return OperationalTransition.WEAKENING
-        
-        # Check for stabilizing (low volatility, moderate changes)
-        if abs(rs_change) < 1 and abs(volume_change_pct) < 15 and abs(structure_change) < 0.05:
+
+        # 4. Flush and recover — quality leader: volume spike + bounce from below EMA21
+        if (self._is_quality_leader(current_metrics) and
+                rvol > 1.5 and ema21_distance_change > 0.3 and
+                -2.5 <= ema21 <= -0.5):
+            return OperationalTransition.FLUSH_AND_RECOVER
+
+        # 5. Volume dry-up — quality leader: volume drying below EMA21, RS holding.
+        # Bounded to -2 ATR — deeper means structural break, not operable pullback.
+        if (self._is_quality_leader(current_metrics) and
+                volume_change_pct < -25 and
+                -2.0 <= ema21 < -0.3 and
+                rs_change >= -1):
+            return OperationalTransition.VOLUME_DRY_UP
+
+        # 6. Compressing — quality leader: structure tightening below EMA21.
+        # Bounded to -2 ATR same as volume_dry_up.
+        if (self._is_quality_leader(current_metrics) and
+                structure_change > 0.08 and
+                -2.0 <= ema21 < -0.3 and
+                volume_change_pct < 0):
+            return OperationalTransition.COMPRESSING
+
+        # 7. Entering pullback — quality leader approaching EMA9 or EMA21 from above.
+        # Requires: all 7 Minervini SEPA quality gates AND proximity with decreasing distance.
+        # EMA9 has priority over EMA21 when both conditions are met.
+        if self._is_quality_leader(current_metrics):
+            approaching_ema9 = (0 < ema9 <= 0.5 and ema9_distance_change < 0)
+            approaching_ema21 = (0 < ema21 <= 1.0 and ema21_distance_change < 0)
+            if approaching_ema9 or approaching_ema21:
+                return OperationalTransition.ENTERING_PULLBACK
+
+        # 8. Support holding — quality leader below EMA21, bouncing at EMA50 zone.
+        if (self._is_quality_leader(current_metrics) and
+                ema21 < 0 and
+                -0.5 <= ema50 <= 0.2 and
+                ema21_distance_change > 0.1):
+            return OperationalTransition.SUPPORT_HOLDING
+
+        # 9. Reclaiming — detected last, it is not the focus.
+        # Requires: was below EMA21 last period (prev_ema21_atr < 0)
+        #           and now is near/above (ema21 >= -1.0 and moving up).
+        if (-1.0 <= ema21 <= 0.2 and ema21_distance_change > 0.2 and
+                (prev_ema21_atr is None or prev_ema21_atr < 0)):
+            return OperationalTransition.RECLAIMING
+
+        # 10. Stabilizing — quality leader with structure tightening and volume
+        # contracting above EMA21. Pre-breakout uptrend complement of COMPRESSING.
+        tightness = current_metrics.weekly_tightness or 0
+        if (self._is_quality_leader(current_metrics) and
+                0 <= ema21 <= 2.0 and
+                tightness >= 0.3 and
+                volume_change_pct < 0):
             return OperationalTransition.STABILIZING
-        
-        # Default to stable
+
+        # 11. Continuation holding — quality leader holding above EMA9 and EMA21,
+        # stable or rising distance (not approaching EMA21).
+        if (self._is_quality_leader(current_metrics) and
+                ema9 >= 0 and
+                0 <= ema21 <= 1.5 and
+                ema21_distance_change >= 0):
+            return OperationalTransition.CONTINUATION_HOLDING
+
         return OperationalTransition.STABLE
     
     def _calculate_operational_transition_strength(
@@ -633,28 +747,37 @@ class TransitionEngine:
         transition: OperationalTransition
     ) -> float:
         """
-        Calculate strength of operational transition (0-1).
+        Strength (0-1) per transition type.
+        Pre-reclaim signals have higher base strength than RECLAIMING.
         """
-        strength = 0.5  # Base strength
-        
-        # Adjust based on transition type and magnitude of changes
-        if transition == OperationalTransition.IMPROVING:
-            # Stronger if RS up significantly and volume contracting strongly
-            strength = min(1.0, 0.5 + (rs_change / 10.0) + (abs(volume_change_pct) / 100.0))
-        elif transition == OperationalTransition.TIGHTENING:
-            # Stronger if volume contracting strongly
-            strength = min(1.0, 0.5 + (abs(volume_change_pct) / 80.0))
-        elif transition == OperationalTransition.WEAKENING:
-            # Stronger if RS down significantly and volume expanding
-            strength = min(1.0, 0.5 + (abs(rs_change) / 10.0) + (volume_change_pct / 100.0))
-        elif transition == OperationalTransition.FAILING:
-            # Stronger if EMA21/EMA50 significantly lost
-            strength = 0.9  # Failing is inherently strong
-        elif transition == OperationalTransition.RECLAIMING:
-            # Stronger if reclaim is recent and clean
-            strength = 0.8
-        
-        return max(0.0, min(1.0, strength))
+        base = {
+            # Pre-reclaim (high priority)
+            OperationalTransition.VOLUME_DRY_UP:        0.85,
+            OperationalTransition.COMPRESSING:          0.80,
+            OperationalTransition.FLUSH_AND_RECOVER:    0.80,
+            OperationalTransition.SUPPORT_HOLDING:      0.75,
+            OperationalTransition.ENTERING_PULLBACK:    0.70,
+            # Reclaim / continuation (lowered from 0.80)
+            OperationalTransition.RECLAIMING:           0.65,
+            OperationalTransition.CONTINUATION_HOLDING: 0.60,
+            # Deterioration
+            OperationalTransition.FAILING:              0.95,
+            OperationalTransition.DISTRIBUTION:         0.90,
+            OperationalTransition.WEAKENING:            0.75,
+            # Neutral
+            OperationalTransition.STABILIZING:          0.50,
+            OperationalTransition.STABLE:               0.40,
+        }.get(transition, 0.50)
+
+        # Magnitude adjustments
+        if transition == OperationalTransition.VOLUME_DRY_UP:
+            base += min(0.15, abs(volume_change_pct) / 200.0)
+        elif transition == OperationalTransition.COMPRESSING:
+            base += min(0.15, structure_change * 1.5)
+        elif transition == OperationalTransition.ENTERING_PULLBACK:
+            base -= min(0.20, abs(rs_change) / 10.0)  # RS drop reduces quality
+
+        return max(0.0, min(1.0, base))
     
     def _generate_operational_narrative(
         self,
@@ -664,50 +787,31 @@ class TransitionEngine:
         structure_change: float,
         current_metrics: StockMetrics
     ) -> str:
-        """
-        Generate short operational narrative (10-15 words).
-        """
-        components = []
-        
-        # Add transition action
-        if transition == OperationalTransition.IMPROVING:
-            components.append("Setup improving")
-        elif transition == OperationalTransition.TIGHTENING:
-            components.append("Tightening constructively")
-        elif transition == OperationalTransition.WEAKENING:
-            components.append("Setup weakening")
-        elif transition == OperationalTransition.FAILING:
-            components.append("Setup failing")
-        elif transition == OperationalTransition.RECLAIMING:
-            components.append("Reclaiming EMA21")
-        elif transition == OperationalTransition.STABILIZING:
-            components.append("Stabilizing")
-        else:
-            components.append("Stable")
-        
-        # Add RS detail
-        if abs(rs_change) > 2:
-            if rs_change > 0:
-                components.append(f"RS +{rs_change:.0f}")
-            else:
-                components.append(f"RS {rs_change:.0f}")
-        
-        # Add volume detail
-        if abs(volume_change_pct) > 20:
-            if volume_change_pct < 0:
-                components.append(f"Vol {volume_change_pct:.0f}%")
-            else:
-                components.append(f"Vol +{volume_change_pct:.0f}%")
-        
-        # Add structure detail
-        if abs(structure_change) > 0.1:
-            if structure_change > 0:
-                components.append("structure tightening")
-            else:
-                components.append("structure weakening")
-        
-        # Combine into short narrative
-        if len(components) <= 3:
-            return ". ".join(components) + "."
-        else:
-            return ". ".join(components[:3]) + "."
+        """Short operational narrative focused on pre-reclaim context."""
+        rvol = current_metrics.relative_volume or 1.0
+        rs = current_metrics.relative_strength_spy or 0
+
+        if transition == OperationalTransition.ENTERING_PULLBACK:
+            ema9 = current_metrics.distance_to_ema9_atr or 999.0
+            ema21 = current_metrics.distance_to_ema21_atr or 999.0
+            if 0 < ema9 <= 0.5:
+                return f"Approaching EMA9 — leader pulling back to fast EMA. Watch for support."
+            elif 0 < ema21 <= 1.0:
+                return f"Approaching EMA21 — leader testing key swing support. Controlled pullback."
+            return "Leader approaching key EMA. Quality setup forming."
+
+        narratives = {
+            OperationalTransition.ENTERING_PULLBACK:    "Leader approaching key EMA. Quality setup forming.",
+            OperationalTransition.VOLUME_DRY_UP:        f"Vol dry-up {volume_change_pct:.0f}%. Pre-setup forming.",
+            OperationalTransition.COMPRESSING:          "Compressing. ATR contracting. Setup maturing.",
+            OperationalTransition.FLUSH_AND_RECOVER:    "Undercut + recovery. Institutional level defended.",
+            OperationalTransition.SUPPORT_HOLDING:      "Testing support. Holding. Watch for base.",
+            OperationalTransition.RECLAIMING:           "Reclaiming EMA21. Late-stage signal.",
+            OperationalTransition.CONTINUATION_HOLDING: f"Holding EMA21. RS {rs:.0f}.",
+            OperationalTransition.WEAKENING:            f"Weakening. RS {rs_change:.1f}. Monitor closely.",
+            OperationalTransition.DISTRIBUTION:         "Distribution. Volume expanding. Avoid.",
+            OperationalTransition.FAILING:              "Failing. Structure lost. Exit.",
+            OperationalTransition.STABILIZING:          "Stabilizing. No clear signal.",
+            OperationalTransition.STABLE:               "Stable. Monitoring.",
+        }
+        return narratives.get(transition, "Monitoring.")

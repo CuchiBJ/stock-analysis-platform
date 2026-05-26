@@ -69,14 +69,11 @@ class MarketRegimeEngine:
         Returns comprehensive analysis including regime state and
         contributing factors.
         """
-        (breadth_quality, leadership_health, speculative_appetite,
-         sector_expansion, pullback_env_quality) = await asyncio.gather(
-            self._calculate_breadth_quality(),
-            self._calculate_leadership_health(),
-            self._calculate_speculative_appetite(),
-            self._calculate_sector_expansion(),
-            self._calculate_pullback_environment_quality(),
-        )
+        breadth_quality = await self._calculate_breadth_quality()
+        leadership_health = await self._calculate_leadership_health()
+        speculative_appetite = await self._calculate_speculative_appetite()
+        sector_expansion = await self._calculate_sector_expansion()
+        pullback_env_quality = await self._calculate_pullback_environment_quality()
         
         # Determine regime based on factors
         regime = self._determine_regime(

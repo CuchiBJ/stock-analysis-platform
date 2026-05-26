@@ -1,9 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 from app.core.deps import get_db
 from app.data.ingestors.stock_ingestor import StockIngestor
 from app.data.ingestors.price_ingestor import PriceIngestor
 from app.data.ingestors.metrics_calculator import MetricsCalculator
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -146,26 +150,117 @@ async def calculate_metrics_all(
 ):
     """Calculate metrics for all stocks with prices"""
     calculator = MetricsCalculator(db)
-    
+
     async def task():
         # Get symbols that have prices but no metrics
         result = await db.execute(
             text("""
-                SELECT DISTINCT sp.symbol 
-                FROM stock_prices sp 
-                LEFT JOIN stock_metrics sm ON sp.symbol = sm.symbol 
+                SELECT DISTINCT sp.symbol
+                FROM stock_prices sp
+                LEFT JOIN stock_metrics sm ON sp.symbol = sm.symbol
                 WHERE sm.symbol IS NULL
                 LIMIT 1000
             """)
         )
         symbols = [row[0] for row in result]
-        
+
         logger.info(f"Calculating metrics for {len(symbols)} symbols with prices but no metrics")
         count = await calculator.calculate_metrics_batch(symbols)
         logger.info(f"Metrics calculation complete: {count} symbols")
-    
+
     background_tasks.add_task(task)
     return {"message": "Metrics calculation started for stocks with prices"}
+
+
+@router.post("/recalculate/metrics/missing-rs")
+async def recalculate_metrics_missing_rs(
+    background_tasks: BackgroundTasks,
+    limit: int = 3000,
+    db: AsyncSession = Depends(get_db),
+):
+    """Recalculate metrics for stocks whose relative_strength_spy is NULL.
+
+    Used to backfill RS after fixing the metric calculator. Targets only
+    quality-universe stocks (avg_volume_10d >= 500k, price >= 5) to keep
+    runtime bounded.
+    """
+    calculator = MetricsCalculator(db)
+
+    async def task():
+        result = await db.execute(
+            text("""
+                SELECT DISTINCT ON (sm.symbol) sm.symbol
+                FROM stock_metrics sm
+                WHERE sm.relative_strength_spy IS NULL
+                  AND sm.avg_volume_10d >= 500000
+                  AND sm.current_price >= 5.0
+                ORDER BY sm.symbol, sm.date DESC
+                LIMIT :limit
+            """),
+            {"limit": limit},
+        )
+        symbols = [row[0] for row in result]
+        logger.info(f"Recalculating RS for {len(symbols)} symbols")
+        count = await calculator.calculate_metrics_batch(symbols)
+        logger.info(f"RS recalc complete: {count} symbols")
+
+    background_tasks.add_task(task)
+    return {"message": "RS backfill started"}
+
+
+@router.post("/backfill/rs-fast")
+async def backfill_rs_fast(db: AsyncSession = Depends(get_db)):
+    """Fast RS backfill using stored perf_13w values (completes in seconds).
+
+    Computes RS = ((1 + stock_perf_13w) / (1 + spy_perf_13w)) * 100 using
+    data already in stock_metrics. Does a bulk UPDATE — no per-symbol queries.
+    Returns number of rows updated.
+    """
+    # Get SPY 13w performance from its latest metrics row
+    spy_row = await db.execute(
+        text("""
+            SELECT perf_13w FROM stock_metrics
+            WHERE symbol = 'SPY' AND perf_13w IS NOT NULL
+            ORDER BY date DESC LIMIT 1
+        """)
+    )
+    spy_perf = spy_row.scalar()
+    if spy_perf is None:
+        return {"error": "SPY perf_13w not found — ingest SPY prices first", "updated": 0}
+
+    qqq_row = await db.execute(
+        text("""
+            SELECT perf_13w FROM stock_metrics
+            WHERE symbol = 'QQQ' AND perf_13w IS NOT NULL
+            ORDER BY date DESC LIMIT 1
+        """)
+    )
+    qqq_perf = qqq_row.scalar()
+
+    spy_factor = 1.0 + spy_perf / 100.0
+    qqq_factor = (1.0 + qqq_perf / 100.0) if qqq_perf is not None else None
+
+    # Bulk UPDATE: RS = ((1 + perf_13w/100) / spy_factor) * 100
+    result = await db.execute(
+        text("""
+            UPDATE stock_metrics
+            SET
+                relative_strength_spy = ((1.0 + perf_13w / 100.0) / :spy_factor) * 100.0,
+                relative_strength_qqq = CASE
+                    WHEN :has_qqq THEN ((1.0 + perf_13w / 100.0) / :qqq_factor) * 100.0
+                    ELSE relative_strength_qqq
+                END
+            WHERE perf_13w IS NOT NULL
+              AND symbol NOT IN ('SPY', 'QQQ')
+        """),
+        {
+            "spy_factor": spy_factor,
+            "has_qqq": qqq_factor is not None,
+            "qqq_factor": qqq_factor if qqq_factor is not None else 1.0,
+        },
+    )
+    await db.commit()
+    return {"updated": result.rowcount, "spy_perf_13w": spy_perf, "qqq_perf_13w": qqq_perf}
 
 
 @router.post("/update/stock-details/{symbol}")
@@ -275,12 +370,15 @@ async def get_top_symbols(
     from sqlalchemy import text
     result = await db.execute(
         text("""
-            SELECT DISTINCT ON (sm.symbol) sm.symbol
-            FROM stock_metrics sm
-            WHERE sm.pullback_quality_score IS NOT NULL
-              AND sm.avg_volume_10d >= 500000
-              AND sm.current_price >= 5.0
-            ORDER BY sm.symbol, sm.pullback_quality_score DESC
+            SELECT symbol FROM (
+                SELECT DISTINCT ON (sm.symbol) sm.symbol, sm.pullback_quality_score
+                FROM stock_metrics sm
+                WHERE sm.pullback_quality_score IS NOT NULL
+                  AND sm.avg_volume_10d >= 500000
+                  AND sm.current_price >= 5.0
+                ORDER BY sm.symbol, sm.date DESC
+            ) latest
+            ORDER BY pullback_quality_score DESC
             LIMIT :limit
         """),
         {"limit": limit}

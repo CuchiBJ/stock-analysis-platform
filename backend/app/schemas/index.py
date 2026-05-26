@@ -1,16 +1,17 @@
 from pydantic import BaseModel
 from datetime import datetime
+from typing import Optional
 
 
 class IndexBase(BaseModel):
     name: str
     current_price: float
     daily_change_pct: float
-    gap_pct: float | None = None
-    relative_volume: float | None = None
-    distance_ema20: float | None = None
-    trend_short: str | None = None
-    strength: str | None = None
+    gap_pct: Optional[float] = None
+    relative_volume: Optional[float] = None
+    distance_ema20: Optional[float] = None
+    trend_short: Optional[str] = None
+    strength: Optional[str] = None
 
 
 class Index(IndexBase):

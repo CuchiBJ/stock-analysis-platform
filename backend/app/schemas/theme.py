@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 
 class ThemeBase(BaseModel):
@@ -8,8 +8,8 @@ class ThemeBase(BaseModel):
     status: str
     strength: float
     flow_direction: str
-    momentum: float | None = None
-    correlation: float | None = None
+    momentum: Optional[float] = None
+    correlation: Optional[float] = None
 
 
 class Theme(ThemeBase):

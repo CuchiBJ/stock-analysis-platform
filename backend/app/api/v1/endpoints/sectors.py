@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from typing import List
 from app.core.deps import get_db
 from app.services.sector_service import SectorService
+from app.services.universe_filters import QUALITY_FILTERS
 from app.models.stock import Stock, StockMetrics
 from app.schemas.sector import Sector as SectorSchema
 
@@ -46,11 +48,10 @@ async def get_sector_leaders(
 
 @router.get("/breadth")
 async def get_market_breadth(db: AsyncSession = Depends(get_db)):
-    """Calculate market breadth metrics"""
-    # Get all stocks with metrics
+    """Calculate market breadth metrics over institutional-quality universe."""
     result = await db.execute(
         select(StockMetrics).join(Stock, Stock.symbol == StockMetrics.symbol)
-        .where(Stock.is_active == True)
+        .where(Stock.is_active == True, *QUALITY_FILTERS)
     )
     metrics = result.scalars().all()
     

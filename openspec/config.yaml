@@ -1,0 +1,51 @@
+schema: spec-driven
+
+context: |
+  Product: Stock Analysis Platform — Institutional Momentum Operating System.
+  Not a screener, not an analytics dashboard. An OS for swing momentum trading,
+  continuation setup detection, institutional sponsorship tracking, and
+  regime-aware decision making.
+
+  Stack:
+    - Backend: FastAPI + SQLAlchemy (async) + PostgreSQL + Alembic
+    - Frontend: Next.js 14 App Router + TypeScript + TailwindCSS + TanStack Query
+    - Data: Polygon.io (primary), yfinance (fallback), SEC EDGAR (universe seed)
+    - Infra: Docker for PostgreSQL, local processes for backend/frontend/scheduler
+
+  Non-negotiable principles (all specs must respect these):
+    1. Transitions dominate over static states — change > snapshot
+    2. Scarcity is signal — top 3-6 setups only, "nothing today" is valid
+    3. Context compression mandatory — narratives, not raw tables
+    4. Deterioration is first-class — invalidation runs before scoring
+    5. Regime affects everything — same metric scores differently per regime
+    6. Operational clarity > feature richness
+    7. Interpretability over prediction — rule-based, no opaque ML for core logic
+    8. Visual hierarchy reflects urgency
+    9. Institutional sponsorship is primary signal
+    10. Workflow > analytics
+
+  Conventions:
+    - All quality calculations apply QUALITY_FILTERS: avg_volume_10d >= 500k,
+      current_price >= 5.0, adr_percent >= 2.0
+    - ATR-normalized distances (distance_to_ema21_atr, distance_to_ema50_atr)
+      are the canonical positioning metric — raw percentages are deprecated
+    - Rule-based detection only for core logic (regime, state, invalidation)
+    - Scores are 0-100 unless explicitly 0-1
+    - Lifecycle states are pre-reclaim focused (TIGHTENING, UNDERCUT, etc.),
+      not the generic Emerging/Active/Deteriorating from PRODUCT_BRAIN
+
+rules:
+  proposal:
+    - State the user/operational problem before the solution
+    - Reference the non-negotiable principle(s) the change defends or extends
+    - Include a "Non-goals" section listing what this change deliberately does NOT do
+    - If the change touches a service > 400 LOC, propose decomposition as part of the work
+  tasks:
+    - Break tasks into chunks of max 2 hours
+    - Tag each task with the capability id (e.g. [market-regime], [priority-engine])
+    - Include a "verification" task at the end describing how the change is validated
+  spec:
+    - Each requirement uses SHALL / SHOULD / MAY (RFC 2119 semantics)
+    - Each requirement has at least one Scenario (Given/When/Then)
+    - Reference the implementing file path in a "Implementation" note
+    - Quality thresholds must be explicit numbers, not "high" / "low"

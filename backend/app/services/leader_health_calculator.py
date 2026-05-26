@@ -62,18 +62,14 @@ class LeaderHealthCalculator:
         
         Returns LeaderHealthMetrics with all indicators.
         """
-        (leaders_above_ema21, failed_breakouts, distribution_count,
-         pullback_quality_index, breakdown_count, reclaim_quality,
-         continuation_quality, rs_deterioration) = await asyncio.gather(
-            self._calculate_leaders_above_ema21(),
-            self._calculate_failed_breakouts(),
-            self._calculate_distribution_count(),
-            self._calculate_pullback_quality_index(),
-            self._calculate_breakdown_count(),
-            self._calculate_reclaim_quality(),
-            self._calculate_continuation_quality(),
-            self._calculate_rs_deterioration(),
-        )
+        leaders_above_ema21 = await self._calculate_leaders_above_ema21()
+        failed_breakouts = await self._calculate_failed_breakouts()
+        distribution_count = await self._calculate_distribution_count()
+        pullback_quality_index = await self._calculate_pullback_quality_index()
+        breakdown_count = await self._calculate_breakdown_count()
+        reclaim_quality = await self._calculate_reclaim_quality()
+        continuation_quality = await self._calculate_continuation_quality()
+        rs_deterioration = await self._calculate_rs_deterioration()
         
         # Calculate overall health score
         overall_health_score = self._calculate_overall_health_score(
@@ -134,9 +130,9 @@ class LeaderHealthCalculator:
     async def _calculate_failed_breakouts(self) -> int:
         """
         Count failed breakouts.
-        
-        Failed breakout = stock that broke ATH and failed continuation.
-        Proxy: distance_to_high_52w < -20% with poor pullback quality.
+
+        Failed breakout = stock that is >3 ATRs below 52w high with poor pullback quality.
+        ATR-normalized: distance_to_high_52w_atr < -3.0 (replaces raw -20%)
         """
         try:
             qf = self._QUALITY_FILTERS
@@ -144,7 +140,7 @@ class LeaderHealthCalculator:
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(*qf, StockMetrics.distance_to_high_52w < -20,
+                .where(*qf, StockMetrics.distance_to_high_52w_atr < -3.0,
                        StockMetrics.pullback_quality_score < 50)
             )
             return result.scalar() or 0
@@ -156,9 +152,10 @@ class LeaderHealthCalculator:
     async def _calculate_distribution_count(self) -> int:
         """
         Count stocks in distribution.
-        
+
         Distribution = stocks in WEAKENING/BROKEN state.
-        Proxy: distance_to_ema21 < -5% OR distance_to_ema50 < -10%
+        ATR-normalized: ema21_atr < -1.5 OR ema50_atr < -2.5
+        (replaces raw -5% / -10%)
         """
         try:
             qf = self._QUALITY_FILTERS
@@ -167,8 +164,8 @@ class LeaderHealthCalculator:
                 select(func.count())
                 .select_from(StockMetrics)
                 .where(*qf,
-                       or_(StockMetrics.distance_to_ema21 < -5,
-                           StockMetrics.distance_to_ema50 < -10))
+                       or_(StockMetrics.distance_to_ema21_atr < -1.5,
+                           StockMetrics.distance_to_ema50_atr < -2.5))
             )
             return result.scalar() or 0
             
@@ -204,8 +201,8 @@ class LeaderHealthCalculator:
     async def _calculate_breakdown_count(self) -> int:
         """
         Count EMA50 breakdowns.
-        
-        Breakdown = distance_to_ema50 < -10%
+
+        ATR-normalized: distance_to_ema50_atr < -2.5 (replaces raw -10%)
         """
         try:
             qf = self._QUALITY_FILTERS
@@ -213,7 +210,7 @@ class LeaderHealthCalculator:
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(*qf, StockMetrics.distance_to_ema50 < -10)
+                .where(*qf, StockMetrics.distance_to_ema50_atr < -2.5)
             )
             return result.scalar() or 0
             
@@ -234,8 +231,8 @@ class LeaderHealthCalculator:
                 select(func.count())
                 .select_from(StockMetrics)
                 .where(*qf, StockMetrics.pullback_quality_score >= 60,
-                       StockMetrics.distance_to_ema21 >= -5,
-                       StockMetrics.distance_to_ema21 <= 5)
+                       StockMetrics.distance_to_ema21_atr >= -1.0,
+                       StockMetrics.distance_to_ema21_atr <= 1.0)
             )
             near_ema21 = result.scalar() or 0
 
@@ -246,8 +243,8 @@ class LeaderHealthCalculator:
                 select(func.count())
                 .select_from(StockMetrics)
                 .where(*qf, StockMetrics.pullback_quality_score >= 70,
-                       StockMetrics.distance_to_ema21 >= -5,
-                       StockMetrics.distance_to_ema21 <= 5)
+                       StockMetrics.distance_to_ema21_atr >= -1.0,
+                       StockMetrics.distance_to_ema21_atr <= 1.0)
             )
             good_quality = result.scalar() or 0
 
@@ -280,8 +277,8 @@ class LeaderHealthCalculator:
                 select(func.count())
                 .select_from(StockMetrics)
                 .where(*qf, StockMetrics.pullback_quality_score >= 60,
-                       StockMetrics.distance_to_ema21 >= 0,
-                       StockMetrics.distance_to_ema21 <= 5,
+                       StockMetrics.distance_to_ema21_atr >= 0,
+                       StockMetrics.distance_to_ema21_atr <= 1.0,
                        StockMetrics.weekly_trend_quality >= 0.7)
             )
             continuing = result.scalar() or 0

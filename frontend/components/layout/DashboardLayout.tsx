@@ -9,9 +9,9 @@ interface DashboardLayoutProps {
 }
 
 const navItems = [
-  { href: '/dashboard', label: 'Dashboard' },
-  { href: '/scanner', label: 'Scanner' },
-  { href: '/watchlists', label: 'Watchlists' },
+  { href: '/dashboard',  label: 'Dashboard'  },
+  { href: '/queue',      label: 'Queue'      },
+  { href: '/guide',      label: 'Guide'      },
 ]
 
 export default function DashboardLayout({ children }: DashboardLayoutProps) {

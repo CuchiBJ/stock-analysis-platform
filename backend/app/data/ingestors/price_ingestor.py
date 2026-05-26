@@ -85,7 +85,7 @@ class PriceIngestor:
             # Store prices
             count = 0
             for bar in data["results"]:
-                date = datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d")
+                date = datetime.fromtimestamp(bar["t"] / 1000).date()
                 
                 # Check if already exists
                 existing = await self.db.execute(
@@ -203,7 +203,7 @@ class PriceIngestor:
             # Store/update the most recent price
             latest_bar = data["results"][0]
             timestamp = datetime.fromtimestamp(latest_bar["t"] / 1000)
-            date_str = timestamp.strftime("%Y-%m-%d")
+            date_str = timestamp.date()
 
             # Check if today's record exists
             existing = await self.db.execute(

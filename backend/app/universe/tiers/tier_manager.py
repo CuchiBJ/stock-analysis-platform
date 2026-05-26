@@ -106,11 +106,11 @@ class TierManager:
         return {
             UniverseTier.TIER_1: TierConfig(
                 tier=UniverseTier.TIER_1,
-                min_market_cap=10_000_000_000,  # $10B
-                min_avg_volume=5_000_000,  # 5M shares
-                min_avg_dollar_volume=50_000_000,  # $50M
-                min_rs=1.5,
-                min_institutional_quality=70,
+                min_market_cap=2_000_000_000,   # $2B — captures quality mid-caps (e.g. PWR ~$700)
+                min_avg_volume=1_000_000,        # 1M shares — institutional liquidity threshold
+                min_avg_dollar_volume=10_000_000,  # $10M
+                min_rs=1.2,
+                min_institutional_quality=60,
                 realtime=True,
                 websocket=True,
                 deep_analysis=True,

@@ -3,6 +3,7 @@
 Script to recalculate metrics for all active symbols to include ATR
 """
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -19,7 +20,10 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = "postgresql+asyncpg://postgres:postgres@stock-analysis-db:5432/stock_analysis"
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://postgres:postgres@stock-analysis-db:5432/stock_analysis",
+)
 
 async def main():
     engine = create_async_engine(DATABASE_URL, echo=False)

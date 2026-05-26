@@ -146,13 +146,21 @@ class SetupPriorityEngine:
         # Adjust score based on state operational priority
         # This is a multiplier that reflects the operational urgency of the state
         state_priority_multiplier = {
-            SetupState.TRIGGER_READY: 1.2,  # 20% boost - highest urgency
-            SetupState.CONTINUATION: 1.1,  # 10% boost - high urgency
-            SetupState.CONSTRUCTIVE_PULLBACK: 1.05,  # 5% boost - medium-high urgency
-            SetupState.TIGHTENING: 1.0,  # neutral
-            SetupState.EMERGING: 0.95,  # 5% penalty - lower urgency
-            SetupState.WEAKENING: 0.8,  # 20% penalty - low urgency
-            SetupState.BROKEN: 0.5  # 50% penalty - very low urgency
+            # Pre-reclaim (foco del sistema)
+            SetupState.TIGHTENING:             1.20,  # highest pre-reclaim quality
+            SetupState.VOLATILITY_CONTRACTION: 1.15,
+            SetupState.RECLAIM_PREPARATION:    1.15,
+            SetupState.SUPPORT_TESTING:        1.10,
+            SetupState.UNDERCUT:               1.10,
+            SetupState.CONTROLLED_PULLBACK:    1.05,
+            SetupState.EARLY_PULLBACK:         1.00,
+            # Continuation/reclaim
+            SetupState.CONTINUATION:           1.10,
+            SetupState.RECLAIM_IN_PROGRESS:    1.00,
+            # Deterioration
+            SetupState.DISTRIBUTION:           0.70,
+            SetupState.DISTRIBUTION:           0.70,
+            SetupState.BROKEN:                 0.40,
         }
         
         multiplier = state_priority_multiplier.get(state, 1.0)
@@ -227,47 +235,38 @@ class SetupPriorityEngine:
         # Define alignment matrix
         # Rows: setup states, Columns: market regimes
         alignment_matrix = {
-            SetupState.TRIGGER_READY: {
-                "risk_on": 100.0,
-                "transition": 50.0,
-                "risk_off": 20.0,
-                "choppy": 50.0
+            SetupState.RECLAIM_PREPARATION: {
+                "risk_on": 100.0, "transition": 60.0, "risk_off": 25.0, "choppy": 55.0
             },
             SetupState.CONTINUATION: {
-                "risk_on": 100.0,
-                "transition": 50.0,
-                "risk_off": 20.0,
-                "choppy": 50.0
-            },
-            SetupState.CONSTRUCTIVE_PULLBACK: {
-                "risk_on": 80.0,
-                "transition": 50.0,
-                "risk_off": 20.0,
-                "choppy": 50.0
+                "risk_on": 100.0, "transition": 55.0, "risk_off": 20.0, "choppy": 50.0
             },
             SetupState.TIGHTENING: {
-                "risk_on": 70.0,
-                "transition": 50.0,
-                "risk_off": 30.0,
-                "choppy": 50.0
+                "risk_on": 85.0, "transition": 60.0, "risk_off": 35.0, "choppy": 55.0
             },
-            SetupState.EMERGING: {
-                "risk_on": 60.0,
-                "transition": 40.0,
-                "risk_off": 20.0,
-                "choppy": 40.0
+            SetupState.VOLATILITY_CONTRACTION: {
+                "risk_on": 80.0, "transition": 55.0, "risk_off": 30.0, "choppy": 50.0
             },
-            SetupState.WEAKENING: {
-                "risk_on": 30.0,
-                "transition": 30.0,
-                "risk_off": 10.0,
-                "choppy": 30.0
+            SetupState.CONTROLLED_PULLBACK: {
+                "risk_on": 75.0, "transition": 50.0, "risk_off": 25.0, "choppy": 50.0
+            },
+            SetupState.SUPPORT_TESTING: {
+                "risk_on": 70.0, "transition": 50.0, "risk_off": 35.0, "choppy": 50.0
+            },
+            SetupState.UNDERCUT: {
+                "risk_on": 65.0, "transition": 45.0, "risk_off": 30.0, "choppy": 45.0
+            },
+            SetupState.EARLY_PULLBACK: {
+                "risk_on": 60.0, "transition": 40.0, "risk_off": 20.0, "choppy": 40.0
+            },
+            SetupState.RECLAIM_IN_PROGRESS: {
+                "risk_on": 65.0, "transition": 40.0, "risk_off": 20.0, "choppy": 40.0
+            },
+            SetupState.DISTRIBUTION: {
+                "risk_on": 20.0, "transition": 20.0, "risk_off": 10.0, "choppy": 20.0
             },
             SetupState.BROKEN: {
-                "risk_on": 0.0,
-                "transition": 0.0,
-                "risk_off": 0.0,
-                "choppy": 0.0
+                "risk_on": 0.0,  "transition": 0.0,  "risk_off": 0.0,  "choppy": 0.0
             }
         }
         

@@ -11,11 +11,8 @@ export default function Home() {
               <Link href="/dashboard" className="text-muted-foreground hover:text-foreground">
                 Dashboard
               </Link>
-              <Link href="/scanner" className="text-muted-foreground hover:text-foreground">
-                Scanner
-              </Link>
-              <Link href="/watchlists" className="text-muted-foreground hover:text-foreground">
-                Watchlists
+              <Link href="/queue" className="text-muted-foreground hover:text-foreground">
+                Queue
               </Link>
             </div>
           </div>
@@ -36,10 +33,10 @@ export default function Home() {
               View Dashboard
             </Link>
             <Link
-              href="/scanner"
+              href="/queue"
               className="px-6 py-3 bg-secondary text-secondary-foreground rounded-lg hover:opacity-90"
             >
-              Run Scanner
+              Open Queue
             </Link>
           </div>
         </div>

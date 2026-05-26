@@ -31,6 +31,15 @@ class RegimeAdjustment:
     rationale: str
 
 
+# Maps MarketRegimeEngine output keys → RegimeAwareEngine matrix keys
+_REGIME_ALIAS: dict = {
+    'risk_on':    'bullish',
+    'risk_off':   'bearish',
+    'transition': 'bearish',
+    'choppy':     'choppy',
+}
+
+
 class RegimeAwareEngine:
     """
     Regime-Aware Setup Model - Adjust confidence based on market regime.
@@ -49,54 +58,78 @@ class RegimeAwareEngine:
     
     # Regime definitions and their impact on setup types
     REGIME_SETUP_MATRIX = {
-        # Risk ON regimes - favorable for continuation and breakout setups
+        # Risk ON — pre-reclaim setups in strong market
         "strong_bullish": {
-            SetupState.CONTINUATION: RegimeImpact.STRONGLY_POSITIVE,
-            SetupState.TRIGGER_READY: RegimeImpact.STRONGLY_POSITIVE,
-            SetupState.TIGHTENING: RegimeImpact.POSITIVE,
-            SetupState.CONSTRUCTIVE_PULLBACK: RegimeImpact.POSITIVE,
-            SetupState.EMERGING: RegimeImpact.NEUTRAL,
-            SetupState.WEAKENING: RegimeImpact.NEGATIVE,
-            SetupState.BROKEN: RegimeImpact.STRONGLY_NEGATIVE
+            SetupState.CONTINUATION:           RegimeImpact.STRONGLY_POSITIVE,
+            SetupState.RECLAIM_PREPARATION:    RegimeImpact.STRONGLY_POSITIVE,
+            SetupState.TIGHTENING:             RegimeImpact.POSITIVE,
+            SetupState.VOLATILITY_CONTRACTION: RegimeImpact.POSITIVE,
+            SetupState.CONTROLLED_PULLBACK:    RegimeImpact.POSITIVE,
+            SetupState.EARLY_PULLBACK:         RegimeImpact.NEUTRAL,
+            SetupState.SUPPORT_TESTING:        RegimeImpact.NEUTRAL,
+            SetupState.UNDERCUT:               RegimeImpact.NEUTRAL,
+            SetupState.RECLAIM_IN_PROGRESS:    RegimeImpact.NEUTRAL,
+            SetupState.DISTRIBUTION:           RegimeImpact.NEGATIVE,
+            SetupState.DISTRIBUTION:           RegimeImpact.NEGATIVE,
+            SetupState.BROKEN:                 RegimeImpact.STRONGLY_NEGATIVE,
         },
         "bullish": {
-            SetupState.CONTINUATION: RegimeImpact.POSITIVE,
-            SetupState.TRIGGER_READY: RegimeImpact.POSITIVE,
-            SetupState.TIGHTENING: RegimeImpact.POSITIVE,
-            SetupState.CONSTRUCTIVE_PULLBACK: RegimeImpact.NEUTRAL,
-            SetupState.EMERGING: RegimeImpact.NEUTRAL,
-            SetupState.WEAKENING: RegimeImpact.NEGATIVE,
-            SetupState.BROKEN: RegimeImpact.NEGATIVE
+            SetupState.CONTINUATION:           RegimeImpact.POSITIVE,
+            SetupState.RECLAIM_PREPARATION:    RegimeImpact.POSITIVE,
+            SetupState.TIGHTENING:             RegimeImpact.POSITIVE,
+            SetupState.VOLATILITY_CONTRACTION: RegimeImpact.NEUTRAL,
+            SetupState.CONTROLLED_PULLBACK:    RegimeImpact.NEUTRAL,
+            SetupState.EARLY_PULLBACK:         RegimeImpact.NEUTRAL,
+            SetupState.SUPPORT_TESTING:        RegimeImpact.NEUTRAL,
+            SetupState.UNDERCUT:               RegimeImpact.NEUTRAL,
+            SetupState.RECLAIM_IN_PROGRESS:    RegimeImpact.NEUTRAL,
+            SetupState.DISTRIBUTION:           RegimeImpact.NEGATIVE,
+            SetupState.DISTRIBUTION:           RegimeImpact.NEGATIVE,
+            SetupState.BROKEN:                 RegimeImpact.NEGATIVE,
         },
-        # Risk OFF regimes - favorable for pullback and defensive setups
+        # Risk OFF — pre-reclaim setups can still form, but with lower confidence
         "strong_bearish": {
-            SetupState.CONSTRUCTIVE_PULLBACK: RegimeImpact.POSITIVE,
-            SetupState.EMERGING: RegimeImpact.NEUTRAL,
-            SetupState.TIGHTENING: RegimeImpact.NEGATIVE,
-            SetupState.TRIGGER_READY: RegimeImpact.STRONGLY_NEGATIVE,
-            SetupState.CONTINUATION: RegimeImpact.STRONGLY_NEGATIVE,
-            SetupState.WEAKENING: RegimeImpact.STRONGLY_NEGATIVE,
-            SetupState.BROKEN: RegimeImpact.STRONGLY_NEGATIVE
+            SetupState.CONTROLLED_PULLBACK:    RegimeImpact.NEUTRAL,
+            SetupState.TIGHTENING:             RegimeImpact.NEUTRAL,
+            SetupState.VOLATILITY_CONTRACTION: RegimeImpact.NEUTRAL,
+            SetupState.EARLY_PULLBACK:         RegimeImpact.NEUTRAL,
+            SetupState.SUPPORT_TESTING:        RegimeImpact.NEUTRAL,
+            SetupState.UNDERCUT:               RegimeImpact.NEUTRAL,
+            SetupState.RECLAIM_PREPARATION:    RegimeImpact.NEGATIVE,
+            SetupState.RECLAIM_IN_PROGRESS:    RegimeImpact.NEGATIVE,
+            SetupState.CONTINUATION:           RegimeImpact.STRONGLY_NEGATIVE,
+            SetupState.DISTRIBUTION:           RegimeImpact.STRONGLY_NEGATIVE,
+            SetupState.DISTRIBUTION:           RegimeImpact.STRONGLY_NEGATIVE,
+            SetupState.BROKEN:                 RegimeImpact.STRONGLY_NEGATIVE,
         },
         "bearish": {
-            SetupState.CONSTRUCTIVE_PULLBACK: RegimeImpact.POSITIVE,
-            SetupState.EMERGING: RegimeImpact.NEUTRAL,
-            SetupState.TIGHTENING: RegimeImpact.NEUTRAL,
-            SetupState.TRIGGER_READY: RegimeImpact.NEGATIVE,
-            SetupState.CONTINUATION: RegimeImpact.NEGATIVE,
-            SetupState.WEAKENING: RegimeImpact.NEGATIVE,
-            SetupState.BROKEN: RegimeImpact.NEGATIVE
+            SetupState.CONTROLLED_PULLBACK:    RegimeImpact.NEUTRAL,
+            SetupState.TIGHTENING:             RegimeImpact.NEUTRAL,
+            SetupState.VOLATILITY_CONTRACTION: RegimeImpact.NEUTRAL,
+            SetupState.EARLY_PULLBACK:         RegimeImpact.NEUTRAL,
+            SetupState.SUPPORT_TESTING:        RegimeImpact.NEUTRAL,
+            SetupState.UNDERCUT:               RegimeImpact.NEUTRAL,
+            SetupState.RECLAIM_PREPARATION:    RegimeImpact.NEUTRAL,
+            SetupState.RECLAIM_IN_PROGRESS:    RegimeImpact.NEGATIVE,
+            SetupState.CONTINUATION:           RegimeImpact.NEGATIVE,
+            SetupState.DISTRIBUTION:           RegimeImpact.NEGATIVE,
+            SetupState.DISTRIBUTION:           RegimeImpact.NEGATIVE,
+            SetupState.BROKEN:                 RegimeImpact.NEGATIVE,
         },
-        # Neutral regimes - baseline confidence
+        # Neutral
         "choppy": {
-            SetupState.CONTINUATION: RegimeImpact.NEUTRAL,
-            SetupState.TRIGGER_READY: RegimeImpact.NEUTRAL,
-            SetupState.TIGHTENING: RegimeImpact.NEUTRAL,
-            SetupState.CONSTRUCTIVE_PULLBACK: RegimeImpact.NEUTRAL,
-            SetupState.EMERGING: RegimeImpact.NEUTRAL,
-            SetupState.WEAKENING: RegimeImpact.NEUTRAL,
-            SetupState.BROKEN: RegimeImpact.NEUTRAL
-        }
+            SetupState.CONTINUATION:           RegimeImpact.NEUTRAL,
+            SetupState.RECLAIM_PREPARATION:    RegimeImpact.NEUTRAL,
+            SetupState.TIGHTENING:             RegimeImpact.NEUTRAL,
+            SetupState.VOLATILITY_CONTRACTION: RegimeImpact.NEUTRAL,
+            SetupState.CONTROLLED_PULLBACK:    RegimeImpact.NEUTRAL,
+            SetupState.EARLY_PULLBACK:         RegimeImpact.NEUTRAL,
+            SetupState.SUPPORT_TESTING:        RegimeImpact.NEUTRAL,
+            SetupState.UNDERCUT:               RegimeImpact.NEUTRAL,
+            SetupState.RECLAIM_IN_PROGRESS:    RegimeImpact.NEUTRAL,
+            SetupState.DISTRIBUTION:           RegimeImpact.NEUTRAL,
+            SetupState.BROKEN:                 RegimeImpact.NEUTRAL,
+        },
     }
     
     # Confidence adjustment factors
@@ -235,7 +268,7 @@ class RegimeAwareEngine:
         )
         
         if not sorted_states:
-            return (SetupState.EMERGING, SetupState.BROKEN)
+            return (SetupState.EARLY_PULLBACK, SetupState.BROKEN)
         
         optimal_state = sorted_states[0][0]
         suboptimal_state = sorted_states[-1][0]
@@ -250,7 +283,8 @@ class RegimeAwareEngine:
         regime: str
     ) -> RegimeImpact:
         """Get regime impact for a specific setup state"""
-        setup_matrix = self.REGIME_SETUP_MATRIX.get(regime, self.REGIME_SETUP_MATRIX["choppy"])
+        resolved = _REGIME_ALIAS.get(regime, regime)
+        setup_matrix = self.REGIME_SETUP_MATRIX.get(resolved, self.REGIME_SETUP_MATRIX["choppy"])
         return setup_matrix.get(setup_state, RegimeImpact.NEUTRAL)
     
     def _generate_rationale(

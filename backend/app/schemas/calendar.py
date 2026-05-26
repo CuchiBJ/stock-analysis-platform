@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import date
-from typing import List
+from typing import List, Optional
 
 
 class EventBase(BaseModel):
@@ -8,7 +8,7 @@ class EventBase(BaseModel):
     type: str
     title: str
     importance: str
-    description: str | None = None
+    description: Optional[str] = None
 
 
 class Event(EventBase):

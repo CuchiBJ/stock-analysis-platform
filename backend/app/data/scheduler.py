@@ -5,6 +5,8 @@ from app.data.ingestors.metrics_calculator import MetricsCalculator
 from app.core.config import settings
 from app.universe.universe_engine import UniverseEngine
 from app.universe.tiers.tier_manager import UniverseTier
+from app.services.websocket_manager import websocket_manager
+from sqlalchemy import func
 from datetime import datetime, time, timedelta
 import pytz
 import logging
@@ -28,7 +30,8 @@ class DataScheduler:
             self.engine = None
             self.async_session_maker = None
         self._running = False
-        
+        self._slow_running = False
+
         # Initialize UniverseEngine for discovery and health monitoring
         self.universe_engine = UniverseEngine(polygon_api_key=settings.polygon_api_key)
 
@@ -38,51 +41,246 @@ class DataScheduler:
             return self.async_session_maker()
         raise RuntimeError("Database not initialized")
 
-    async def trigger_metrics_update(self, limit=100):
-        """Manually trigger SLOW metrics calculation (comprehensive metrics for all tiers)"""
-        async with self._get_db() as db:
-            ingestor = StockIngestor(db)
-            symbols = await ingestor.get_active_symbols(limit=limit)
-            logger.info(f"Calculating SLOW metrics for {len(symbols)} symbols...")
-            
-            calculator = MetricsCalculator(db)
-            count = await calculator.calculate_metrics_batch(symbols)
-            logger.info(f"SLOW metrics calculated for {count} symbols")
-            return count
+    async def _get_slow_symbols_and_date(self, db) -> tuple:
+        """All symbols with a stock_price for the latest available date + that date."""
+        from sqlalchemy import select, func
+        from app.models.stock import StockPrice
+        today = (await db.execute(select(func.max(StockPrice.date)))).scalar()
+        if not today:
+            return [], None
+        result = await db.execute(
+            select(StockPrice.symbol).where(StockPrice.date == today).distinct()
+        )
+        symbols = [r[0] for r in result.fetchall()]
+        logger.info(f"SLOW cycle: {len(symbols)} symbols with price for {today}")
+        return symbols, str(today)
 
-    async def trigger_fast_metrics_update(self):
-        """Trigger FAST metrics update for TIER 1 only (operational metrics)"""
+    async def trigger_metrics_update(self, limit=None, symbols=None):
+        """SLOW metrics calculation — covers all symbols with today's price.
+
+        Args:
+            limit: optional cap on number of symbols (backward compat for manual endpoint).
+            symbols: explicit list to process (skips dynamic discovery).
+        """
+        from sqlalchemy import select
+        from app.models.stock import StockMetrics as StockMetricsModel
+
+        if self._slow_running:
+            logger.info("SLOW cycle still running — skipping")
+            return 0
+        self._slow_running = True
+        count = 0
         try:
             async with self._get_db() as db:
-                from sqlalchemy import select
-                from app.models.universe import UniverseTier as UniverseTierModel
-                from app.models.stock import StockMetrics
-                
-                # Get TIER 1 symbols
-                tier_query = select(UniverseTierModel).where(UniverseTierModel.tier == "tier_1")
-                tier_result = await db.execute(tier_query)
-                tier_records = tier_result.scalars().all()
-                
-                tier1_symbols = [record.instrument_id for record in tier_records]
-                logger.info(f"Updating FAST metrics for {len(tier1_symbols)} TIER 1 symbols")
-                
-                # Update only operational metrics for TIER 1
+                snapshot_date = None
+                if symbols is None:
+                    symbols, snapshot_date = await self._get_slow_symbols_and_date(db)
+                if not symbols:
+                    return 0
+                if limit:
+                    symbols = symbols[:limit]
+
+                logger.info(f"Calculating SLOW metrics for {len(symbols)} symbols...")
                 calculator = MetricsCalculator(db)
-                count = 0
-                
-                for symbol in tier1_symbols[:200]:  # Limit to 200 TIER 1 symbols for performance
-                    # Calculate only FAST metrics (distance_to_ema21, reclaim status, deterioration)
-                    # This is a simplified version - in production, you'd have a dedicated fast_metrics method
-                    await calculator.calculate_metrics_for_symbol(symbol, days=10)  # Only need recent data
-                    count += 1
-                
-                logger.info(f"FAST metrics updated for {count} TIER 1 symbols")
-                return count
+                for sym in symbols:
+                    # Write-protection: skip if FAST already wrote a row for snapshot_date
+                    if snapshot_date:
+                        existing = await db.execute(
+                            select(StockMetricsModel.date)
+                            .where(
+                                StockMetricsModel.symbol == sym,
+                                StockMetricsModel.date >= snapshot_date,
+                            )
+                            .limit(1)
+                        )
+                        if existing.scalar():
+                            continue
+                    try:
+                        await calculator.calculate_metrics_for_symbol(sym)
+                        count += 1
+                    except Exception:
+                        continue
+                await db.commit()
+                logger.info(f"SLOW metrics calculated for {count} symbols")
+            asyncio.create_task(self._broadcast_metrics_updated(count, tier='all'))
+            # Evaluate pending outcomes after each successful SLOW cycle
+            asyncio.create_task(self._evaluate_pending_outcomes())
+        finally:
+            self._slow_running = False
+        return count
+
+    async def _evaluate_pending_outcomes(self) -> None:
+        try:
+            from app.services.outcome_tracker import OutcomeTracker
+            from datetime import date
+            async with self._get_db() as session:
+                tracker = OutcomeTracker(session)
+                await tracker.evaluate_pending_outcomes(date.today())
+            logger.info("Evaluated pending outcomes")
+        except Exception as e:
+            logger.error(f"Outcome evaluation failed: {e}")
+
+    async def _broadcast_metrics_updated(self, count: int, tier: str = 'all') -> None:
+        """Broadcast metrics_updated event to all WebSocket subscribers."""
+        if websocket_manager.get_connection_count() == 0:
+            return
+        try:
+            await websocket_manager.broadcast('metrics', {
+                'channel': 'metrics',
+                'event': 'updated',
+                'tier': tier,
+                'count': count,
+                'timestamp': datetime.utcnow().isoformat(),
+            })
+        except Exception as e:
+            logger.debug(f"WebSocket broadcast skipped: {e}")
+
+    async def _get_fast_symbols(self, db) -> list:
+        """TIER 1 base + institutional quality stocks (live transitions candidates)."""
+        from sqlalchemy import select, and_, func
+        from app.models.stock import StockMetrics
+        from app.models.universe import UniverseTier as UniverseTierModel
+
+        latest_date = (await db.execute(select(func.max(StockMetrics.date)))).scalar()
+        if not latest_date:
+            return []
+
+        # TIER 1: resolve instrument_ids to symbols via stock_metrics
+        tier1_result = await db.execute(
+            select(StockMetrics.symbol)
+            .where(StockMetrics.date == latest_date)
+            .where(
+                StockMetrics.symbol.in_(
+                    select(UniverseTierModel.instrument_id)
+                    .where(UniverseTierModel.tier == "tier_1")
+                )
+            )
+            .limit(200)
+        )
+        tier1_symbols = {r[0] for r in tier1_result.fetchall()}
+
+        # Institutional quality stocks — slightly relaxed vs live feed to capture
+        # stocks approaching qualification
+        inst_result = await db.execute(
+            select(StockMetrics.symbol)
+            .where(and_(
+                StockMetrics.date == latest_date,
+                StockMetrics.avg_volume_10d >= 800_000,
+                StockMetrics.adr_percent >= 3.0,
+                StockMetrics.current_price >= 5.0,
+                StockMetrics.perf_1y > 25,
+                StockMetrics.current_price > StockMetrics.ema50,
+                StockMetrics.current_price > StockMetrics.sma150,
+                StockMetrics.sma150 > StockMetrics.sma200,
+            ))
+            .limit(200)
+        )
+        inst_symbols = {r[0] for r in inst_result.fetchall()}
+
+        combined = list(tier1_symbols | inst_symbols)
+        logger.info(
+            f"FAST cycle: {len(tier1_symbols)} TIER 1 + "
+            f"{len(inst_symbols - tier1_symbols)} institutional = {len(combined)} unique symbols"
+        )
+        return combined
+
+    async def trigger_fast_metrics_update(self):
+        """Trigger FAST metrics update for TIER 1 + institutional quality stocks."""
+        try:
+            async with self._get_db() as db:
+                symbols = await self._get_fast_symbols(db)
+                if not symbols:
+                    logger.warning("FAST cycle: no symbols to update")
+                    return 0
+
+                calculator = MetricsCalculator(db)
+                updated_symbols = []
+
+                for symbol in symbols[:300]:
+                    await calculator.calculate_metrics_for_symbol(symbol, days=10)
+                    updated_symbols.append(symbol)
+
+                count = len(updated_symbols)
+                logger.info(f"FAST metrics updated for {count} symbols")
+
+            asyncio.create_task(self._track_state_changes(updated_symbols))
+            asyncio.create_task(self._broadcast_metrics_updated(count, tier='tier_1'))
+            return count
         except Exception as e:
             logger.error(f"FAST metrics update failed: {e}")
             import traceback
             traceback.print_exc()
             return 0
+
+    async def _track_state_changes(self, symbols: list) -> None:
+        """Detect setup state changes for the given symbols and log them."""
+        if not symbols:
+            return
+        try:
+            from sqlalchemy import select, and_, text
+            from app.models.stock import StockMetrics, SetupStateLog
+            from app.services.setup_lifecycle_engine import SetupLifecycleEngine
+            from datetime import timezone
+
+            async with self._get_db() as db:
+                lifecycle = SetupLifecycleEngine(db)
+
+                # Latest metrics for each symbol
+                subq = (
+                    select(StockMetrics.symbol, func.max(StockMetrics.date).label('max_date'))
+                    .where(StockMetrics.symbol.in_(symbols))
+                    .group_by(StockMetrics.symbol)
+                    .subquery()
+                )
+                result = await db.execute(
+                    select(StockMetrics).join(
+                        subq,
+                        and_(StockMetrics.symbol == subq.c.symbol,
+                             StockMetrics.date == subq.c.max_date)
+                    )
+                )
+                metrics_list = result.scalars().all()
+
+                # Latest logged state for each symbol
+                log_result = await db.execute(text("""
+                    SELECT DISTINCT ON (symbol) symbol, state
+                    FROM setup_state_log
+                    WHERE symbol = ANY(:symbols) AND exited_at IS NULL
+                    ORDER BY symbol, entered_at DESC
+                """), {"symbols": symbols})
+                last_states = {row[0]: row[1] for row in log_result.fetchall()}
+
+                now = datetime.now(timezone.utc)
+                changes = 0
+
+                for m in metrics_list:
+                    current_state = lifecycle.detect_current_state(m).value
+                    last_state = last_states.get(m.symbol)
+
+                    if current_state == last_state:
+                        continue
+
+                    # Close the previous open log entry
+                    if last_state:
+                        await db.execute(text("""
+                            UPDATE setup_state_log
+                            SET exited_at = :now, updated_at = :now
+                            WHERE symbol = :symbol AND exited_at IS NULL
+                        """), {"now": now, "symbol": m.symbol})
+
+                    # Open new entry
+                    db.add(SetupStateLog(
+                        symbol=m.symbol,
+                        state=current_state,
+                        entered_at=now,
+                    ))
+                    changes += 1
+
+                if changes:
+                    await db.commit()
+                    logger.info(f"State changes logged: {changes} symbols transitioned")
+        except Exception as e:
+            logger.error(f"State tracking failed: {e}")
 
     async def _scheduler_loop(self):
         """Background scheduler loop that executes jobs based on time"""
@@ -100,15 +298,23 @@ class DataScheduler:
         last_health_check = None
         last_lifecycle_tracking = None
         
-        # Trigger initial metrics update immediately
-        logger.info("Triggering initial metrics update")
-        await self.trigger_metrics_update(limit=3125)
-        last_metrics_update = datetime.now(et_tz)
-        
         # Load tiers from database
         async with self._get_db() as db:
             await self.universe_engine.tier_manager.load_tiers_from_database(db)
             logger.info("Loaded tier assignments from database")
+
+        # Startup: fetch fresh prices first, then kick off SLOW in background
+        # so the loop can start FAST cycles within ~3 min instead of waiting 30+
+        logger.info("Startup: fetching fresh prices first")
+        try:
+            await self._update_prices()
+        except Exception as e:
+            logger.error(f"Startup price update failed: {e}")
+        last_price_update = datetime.now(et_tz)  # prevents double download on first tick
+
+        logger.info("Startup: initial SLOW metrics calculation (background)")
+        asyncio.create_task(self.trigger_metrics_update())
+        last_metrics_update = datetime.now(et_tz)
         
         while self._running:
             now = datetime.now(et_tz)
@@ -116,23 +322,31 @@ class DataScheduler:
             
             # Check if within market hours
             if market_open <= current_time <= market_close:
-                # Price update every 15 minutes
+                # Price update every 15 minutes — awaited so FAST always uses fresh prices
                 if last_price_update is None or (now - last_price_update).total_seconds() >= 900:
                     logger.info(f"Triggering price update (current time: {current_time})")
-                    # Run price update in background to not block metrics
-                    asyncio.create_task(self._update_prices())
+                    try:
+                        await self._update_prices()
+                    except Exception as e:
+                        logger.error(f"Price update failed (continuing): {e}")
                     last_price_update = now
-                
-                # FAST metrics every 5 minutes (TIER 1 only - operational metrics)
-                if last_fast_metrics_update is None or (now - last_fast_metrics_update).total_seconds() >= 300:
-                    logger.info(f"Triggering FAST metrics update for TIER 1 (current time: {current_time})")
+                    # Immediately chain FAST metrics with fresh prices
+                    logger.info("Chaining FAST metrics after price update")
                     await self.trigger_fast_metrics_update()
                     last_fast_metrics_update = now
-                
-                # SLOW metrics every 30 minutes (all tiers - comprehensive metrics)
+                    await asyncio.sleep(30)
+                    continue
+
+                # FAST metrics every 5 minutes (between price updates)
+                if last_fast_metrics_update is None or (now - last_fast_metrics_update).total_seconds() >= 300:
+                    logger.info(f"Triggering FAST metrics update (current time: {current_time})")
+                    await self.trigger_fast_metrics_update()
+                    last_fast_metrics_update = now
+
+                # SLOW metrics every 30 minutes — all symbols with price for today
                 if last_metrics_update is None or (now - last_metrics_update).total_seconds() >= 1800:
-                    logger.info(f"Triggering SLOW metrics update for all tiers (current time: {current_time})")
-                    await self.trigger_metrics_update(limit=3125)
+                    logger.info(f"Triggering SLOW metrics update (current time: {current_time})")
+                    await self.trigger_metrics_update()
                     last_metrics_update = now
                 
                 # Realtime discovery every 10 minutes (detect volume explosion, RS acceleration)
@@ -204,6 +418,15 @@ class DataScheduler:
         engine = create_engine(sync_url, pool_size=5, echo=False)
         Session = sessionmaker(engine)
 
+        # Filter symbols that Yahoo Finance cannot serve: warrants (*W), units (*U),
+        # rights (*R) with 5-char tickers, and $ prefixes. These always fail and
+        # consume rate limit quota.
+        _SKIP_SUFFIXES = frozenset({'W', 'U', 'R'})
+        excluded = [s for s in symbols if s.startswith('$') or (len(s) == 5 and s[-1] in _SKIP_SUFFIXES)]
+        if excluded:
+            logger.info(f"Price download: excluding {len(excluded)} non-downloadable symbols (warrants/units/rights)")
+        symbols = [s for s in symbols if not (s.startswith('$') or (len(s) == 5 and s[-1] in _SKIP_SUFFIXES))]
+
         BATCH = 200
         ok = 0
 
@@ -212,7 +435,7 @@ class DataScheduler:
             try:
                 data = yf.download(
                     batch, period="5d", auto_adjust=True,
-                    progress=False, threads=True
+                    progress=False, threads=False  # threads=False prevents DNS exhaustion
                 )
                 if data.empty:
                     continue
@@ -222,15 +445,21 @@ class DataScheduler:
                 with Session() as session:
                     for symbol in batch:
                         try:
-                            hist = data.xs(symbol, axis=1, level=1) if multi else data
+                            if multi:
+                                if symbol not in data.columns.get_level_values(1):
+                                    logger.debug(f"Symbol {symbol} not in yfinance response — skipping")
+                                    continue
+                                hist = data.xs(symbol, axis=1, level=1)
+                            else:
+                                hist = data
                             hist = hist.dropna(subset=["Close"])
                             if hist.empty:
                                 continue
 
                             for date, row in hist.iterrows():
-                                date_str = date.strftime("%Y-%m-%d")
+                                date_val = date.date() if hasattr(date, 'date') else date
                                 existing = session.query(StockPrice).filter_by(
-                                    symbol=symbol, date=date_str
+                                    symbol=symbol, date=date_val
                                 ).first()
                                 if existing:
                                     existing.open   = float(row["Open"])   if pd.notna(row["Open"])   else existing.open
@@ -241,7 +470,7 @@ class DataScheduler:
                                 else:
                                     session.add(StockPrice(
                                         symbol=symbol,
-                                        date=date_str,
+                                        date=date_val,
                                         open=float(row["Open"])   if pd.notna(row["Open"])   else None,
                                         high=float(row["High"])   if pd.notna(row["High"])   else None,
                                         low=float(row["Low"])     if pd.notna(row["Low"])    else None,

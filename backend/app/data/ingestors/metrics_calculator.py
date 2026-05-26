@@ -9,7 +9,8 @@ from app.data.processors.momentum import (
     calculate_distance_to_ema,
     calculate_relative_volume,
     calculate_performance,
-    calculate_adr_percent
+    calculate_adr_percent,
+    detect_vcp
 )
 import pandas as pd
 import logging
@@ -20,17 +21,72 @@ logger = logging.getLogger(__name__)
 class MetricsCalculator:
     def __init__(self, db: AsyncSession):
         self.db = db
+        self._benchmark_returns_cache: dict = {}
 
-    async def calculate_metrics_for_symbol(self, symbol: str, days: int = 200) -> Optional[StockMetrics]:
-        """Calculate and store metrics for a symbol"""
+    async def _get_benchmark_returns(
+        self,
+        benchmark: str,
+        as_of_date: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Get cumulative percentage returns for a benchmark over standard periods.
+
+        Returns dict like {'13w': 4.2, '4w': 1.1, '1w': -0.3} (% returns) or None
+        if insufficient data. Cached per MetricsCalculator instance.
+        """
+        cache_key = (benchmark, as_of_date)
+        if cache_key in self._benchmark_returns_cache:
+            return self._benchmark_returns_cache[cache_key]
+
+        price_query = (
+            select(StockPrice)
+            .where(StockPrice.symbol == benchmark)
+            .order_by(StockPrice.date.desc())
+            .limit(300)
+        )
+        if as_of_date:
+            from datetime import date as date_type
+            _cutoff = date_type.fromisoformat(as_of_date) if isinstance(as_of_date, str) else as_of_date
+            price_query = price_query.where(StockPrice.date <= _cutoff)
+        result = await self.db.execute(price_query)
+        prices = result.scalars().all()
+
+        if len(prices) < 65:
+            self._benchmark_returns_cache[cache_key] = None
+            return None
+
+        closes = [float(p.close) for p in reversed(prices)]
+        returns = {
+            '1w':  calculate_performance(pd.Series(closes), 5),
+            '4w':  calculate_performance(pd.Series(closes), 20),
+            '13w': calculate_performance(pd.Series(closes), 65),
+        }
+        self._benchmark_returns_cache[cache_key] = returns
+        return returns
+
+    async def calculate_metrics_for_symbol(
+        self,
+        symbol: str,
+        days: int = 200,
+        as_of_date: Optional[str] = None,
+    ) -> Optional[StockMetrics]:
+        """Calculate and store metrics for a symbol.
+
+        as_of_date: ISO date string ('YYYY-MM-DD'). When provided, only prices
+        on or before this date are used, enabling historical backfill.
+        """
         try:
             # Get price history
-            result = await self.db.execute(
+            price_query = (
                 select(StockPrice)
                 .where(StockPrice.symbol == symbol.upper())
                 .order_by(StockPrice.date.desc())
                 .limit(days)
             )
+            if as_of_date:
+                from datetime import date as date_type
+                _cutoff = date_type.fromisoformat(as_of_date) if isinstance(as_of_date, str) else as_of_date
+                price_query = price_query.where(StockPrice.date <= _cutoff)
+            result = await self.db.execute(price_query)
             prices = result.scalars().all()
             
             if len(prices) < 50:  # Need at least 50 days for EMA50
@@ -84,9 +140,20 @@ class MetricsCalculator:
             perf_1w = calculate_performance(close_prices, 5)
             perf_4w = calculate_performance(close_prices, 20)
             perf_13w = calculate_performance(close_prices, 65)
+
+            # Relative Strength vs benchmarks (Mansfield, 13-week period)
+            rs_spy: Optional[float] = None
+            rs_qqq: Optional[float] = None
+            if symbol.upper() not in ('SPY', 'QQQ'):
+                spy_returns = await self._get_benchmark_returns('SPY', as_of_date)
+                if spy_returns is not None:
+                    rs_spy = calculate_relative_strength(perf_13w, spy_returns['13w'])
+                qqq_returns = await self._get_benchmark_returns('QQQ', as_of_date)
+                if qqq_returns is not None:
+                    rs_qqq = calculate_relative_strength(perf_13w, qqq_returns['13w'])
             
             # ADR percentage
-            adr_percent = calculate_adr_percent(close_prices, 20) if len(close_prices) >= 20 else 0.0
+            adr_percent = calculate_adr_percent(df, 20) if len(df) >= 20 else 0.0
             
             # Volume metrics
             avg_vol_20d = int(volumes.tail(20).mean())
@@ -115,6 +182,7 @@ class MetricsCalculator:
             
             # Pullback quality metrics (now can use ATR-normalized)
             volume_contraction = self._calculate_volume_contraction(volumes)
+            vcp_result = detect_vcp(df, lookback=20)
             pullback_quality_score = self._calculate_pullback_quality_score(
                 dist_ema9, dist_ema21, dist_high_52w, weekly_tightness, 
                 volume_contraction, weekly_trend_quality,
@@ -179,6 +247,13 @@ class MetricsCalculator:
                 existing_metrics.distance_to_ema21_atr = dist_ema21_atr
                 existing_metrics.distance_to_ema50_atr = dist_ema50_atr
                 existing_metrics.distance_to_high_52w_atr = dist_high_52w_atr
+                # Relative strength
+                existing_metrics.relative_strength_spy = rs_spy
+                existing_metrics.relative_strength_qqq = rs_qqq
+                # VCP pattern
+                existing_metrics.vcp_score = vcp_result['score']
+                existing_metrics.vcp_contractions_count = vcp_result['count']
+                existing_metrics.vcp_latest_depth_pct = vcp_result['latest_depth_pct']
                 self.db.add(existing_metrics)
             else:
                 # Create new
@@ -226,7 +301,14 @@ class MetricsCalculator:
                     distance_to_ema9_atr=dist_ema9_atr,
                     distance_to_ema21_atr=dist_ema21_atr,
                     distance_to_ema50_atr=dist_ema50_atr,
-                    distance_to_high_52w_atr=dist_high_52w_atr
+                    distance_to_high_52w_atr=dist_high_52w_atr,
+                    # Relative strength
+                    relative_strength_spy=rs_spy,
+                    relative_strength_qqq=rs_qqq,
+                    # VCP pattern
+                    vcp_score=vcp_result['score'],
+                    vcp_contractions_count=vcp_result['count'],
+                    vcp_latest_depth_pct=vcp_result['latest_depth_pct'],
                 )
                 self.db.add(metrics)
             
@@ -272,31 +354,55 @@ class MetricsCalculator:
         return [row[0] for row in result.all()]
 
     def _calculate_weekly_tightness(self, df: pd.DataFrame) -> float:
-        """Calculate weekly tightness - how tight are weekly closes"""
-        if len(df) < 20:  # Need at least 4 weeks
+        """Calculate weekly tightness — ATR-normalized, volume-gated.
+
+        Returns 1/(1 + mean_weekly_range_in_ATR) over the last 4 active weeks.
+        Weeks with zero volume are excluded (inactive stocks score 0.0, not 1.0).
+
+        Scale: 0.67+ = very tight base (<0.5 ATR/week), 0.5 = normal (1 ATR/week),
+               0.33 = loose (2 ATR/week), 0.0 = insufficient active data.
+        """
+        if len(df) < 20:
             return 0.0
-        
-        # Get weekly data (resample to weekly)
+
+        # Daily ATR (14-day) — calculated before resampling to weekly
+        df_daily = df.copy()
+        df_daily['prev_close'] = df_daily['close'].shift(1)
+        df_daily['tr'] = (
+            (df_daily['high'] - df_daily['low'])
+            .combine((df_daily['high'] - df_daily['prev_close']).abs(), max)
+            .combine((df_daily['low']  - df_daily['prev_close']).abs(), max)
+        )
+        daily_atr = df_daily['tr'].tail(14).mean()
+
+        if not daily_atr or daily_atr == 0:
+            return 0.0
+
+        # Resample to weekly
         df_weekly = df.copy()
         df_weekly['date'] = pd.to_datetime(df_weekly['date'])
         df_weekly = df_weekly.set_index('date')
         weekly = df_weekly.resample('W').agg({
-            'open': 'first',
             'high': 'max',
             'low': 'min',
-            'close': 'last',
             'volume': 'sum'
         }).dropna()
-        
+
         if len(weekly) < 4:
             return 0.0
-        
-        # Calculate tightness based on weekly range relative to price
-        weekly['range_pct'] = (weekly['high'] - weekly['low']) / weekly['close'] * 100
-        recent_tightness = weekly['range_pct'].tail(4).mean()
-        
-        # Lower is tighter (better)
-        return float(1.0 / (1.0 + recent_tightness)) if recent_tightness > 0 else 0.0
+
+        # Keep only active weeks (volume > 0) from the last 4
+        recent = weekly.tail(4)
+        active = recent[recent['volume'] > 0]
+        if len(active) < 3:
+            return 0.0
+
+        # Weekly range in ATR units — lower = tighter
+        active = active.copy()
+        active['range_atr'] = (active['high'] - active['low']) / daily_atr
+        mean_range_atr = active['range_atr'].mean()
+
+        return float(1.0 / (1.0 + mean_range_atr))
 
     def _calculate_weekly_volatility_contraction(self, df: pd.DataFrame) -> float:
         """Calculate weekly volatility contraction"""

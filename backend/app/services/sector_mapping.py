@@ -1,4 +1,5 @@
 """Sector mapping service to convert current sectors to TradingView classification"""
+from typing import Optional
 
 TRADINGVIEW_SECTORS = {
     # Technology sectors
@@ -48,7 +49,7 @@ TRADINGVIEW_SECTORS = {
     'Miscellaneous': 'Miscellaneous',
 }
 
-def map_sector_to_tradingview(sector: str | None) -> str:
+def map_sector_to_tradingview(sector: Optional[str]) -> str:
     """Map a sector name to TradingView classification"""
     if not sector:
         return 'Miscellaneous'
