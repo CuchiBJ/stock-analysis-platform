@@ -313,6 +313,8 @@ class DataScheduler:
         last_tier_reevaluation = None
         last_health_check = None
         last_lifecycle_tracking = None
+        last_post_close_cycle_date = None  # date — fires once per weekday after close
+        post_close_window_start = time(16, 10)  # let yfinance settle for ~10 min
         
         # Load tiers from database
         async with self._get_db() as db:
@@ -373,7 +375,23 @@ class DataScheduler:
             else:
                 # After market close: run nightly tasks
                 logger.info(f"Outside market hours (current time: {current_time})")
-                
+
+                # Post-close cycle: capture closing prices into a final SLOW so metrics
+                # reflect the actual close, not the last 15-min snapshot before 16:00 ET.
+                # Fires once per weekday, ~10 min after close (yfinance settle window).
+                if (now.weekday() < 5
+                        and current_time >= post_close_window_start
+                        and last_post_close_cycle_date != now.date()):
+                    logger.info(f"Post-close cycle: final price update + SLOW (current time: {current_time})")
+                    try:
+                        await self._update_prices()
+                        last_price_update = now
+                        await self.trigger_metrics_update()
+                        last_metrics_update = now
+                    except Exception as e:
+                        logger.error(f"Post-close cycle failed: {e}")
+                    last_post_close_cycle_date = now.date()
+
                 # Discovery scans - run once daily after market close
                 if last_discovery_scan is None or (now - last_discovery_scan).total_seconds() >= 86400:
                     logger.info("Triggering nightly discovery scans")
