@@ -112,8 +112,9 @@ async def get_live_transitions(
         if not latest_date:
             return []
 
-        # Step 2: 3-day lookback covers weekends and holidays for "previous" metrics
-        prev_date = latest_date - timedelta(days=3)
+        # Step 2: 7-day lookback covers weekends and long holiday closures (Memorial Day,
+        # Thanksgiving, Christmas) for "previous" metrics — 3 days fails when Mon is also closed
+        prev_date = latest_date - timedelta(days=7)
 
         # Step 3: query only current + previous day, institutional quality only
         # EMA trigger is evaluated in Python (step 4) so we have today's current
