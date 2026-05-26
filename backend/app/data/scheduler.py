@@ -515,6 +515,7 @@ class DataScheduler:
                 query = (
                     select(StockMetrics.symbol, StockMetrics)
                     .where(StockMetrics.date >= cutoff_date)
+                    .order_by(StockMetrics.symbol.asc(), StockMetrics.date.desc())
                     .distinct(StockMetrics.symbol)
                     .limit(5000)
                 )
@@ -562,7 +563,7 @@ class DataScheduler:
                 # Get all active symbols with current metrics
                 query = (
                     select(StockMetrics)
-                    .order_by(StockMetrics.date.desc())
+                    .order_by(StockMetrics.symbol.asc(), StockMetrics.date.desc())
                     .distinct(StockMetrics.symbol)
                 )
                 
