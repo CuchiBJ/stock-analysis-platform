@@ -9,9 +9,10 @@ interface DashboardLayoutProps {
 }
 
 const navItems = [
-  { href: '/dashboard',  label: 'Dashboard'  },
-  { href: '/queue',      label: 'Queue'      },
-  { href: '/guide',      label: 'Guide'      },
+  { href: '/dashboard',   label: 'Dashboard'   },
+  { href: '/queue',       label: 'Queue'       },
+  { href: '/calibration', label: 'Calibration' },
+  { href: '/guide',       label: 'Guide'       },
 ]
 
 export default function DashboardLayout({ children }: DashboardLayoutProps) {

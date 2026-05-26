@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import stocks, sectors, data, websocket, transitions, metrics, realtime, queue, market_context
+from app.api.v1.endpoints import stocks, sectors, data, websocket, transitions, metrics, realtime, queue, market_context, calibration
 
 api_router = APIRouter()
 
@@ -12,3 +12,4 @@ api_router.include_router(transitions.router, prefix="/transitions", tags=["tran
 api_router.include_router(metrics.router, prefix="/metrics", tags=["metrics"])
 api_router.include_router(realtime.router, prefix="/realtime", tags=["realtime"])
 api_router.include_router(queue.router, prefix="/queue", tags=["queue"])
+api_router.include_router(calibration.router, tags=["calibration"])
