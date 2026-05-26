@@ -53,7 +53,7 @@ class DataScheduler:
         )
         symbols = [r[0] for r in result.fetchall()]
         logger.info(f"SLOW cycle: {len(symbols)} symbols with price for {today}")
-        return symbols, str(today)
+        return symbols, today
 
     async def trigger_metrics_update(self, limit=None, symbols=None):
         """SLOW metrics calculation — covers all symbols with today's price.
