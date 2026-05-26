@@ -16,13 +16,21 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Application started")
-    
-    # DatabasePollingDataSource disabled due to connection pool issues
-    # Frontend uses REST API polling directly to backend endpoints
-    # Backend endpoints query database with proper connection management
-    
+
+    # Cleanup scheduler_errors older than 7 days — operational table, not historical
+    try:
+        from datetime import datetime, timedelta
+        from sqlalchemy import delete
+        from app.models.stock import SchedulerError
+        async with AsyncSessionLocal() as session:
+            cutoff = datetime.utcnow() - timedelta(days=7)
+            await session.execute(delete(SchedulerError).where(SchedulerError.occurred_at < cutoff))
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"scheduler_errors cleanup skipped: {e}")
+
     yield
-    
+
     # Shutdown
     logger.info("Application shutdown")
 

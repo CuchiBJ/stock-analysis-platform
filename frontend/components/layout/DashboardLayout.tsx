@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
+import DataHealthBanner from './DataHealthBanner'
 
 interface DashboardLayoutProps {
   children: React.ReactNode
@@ -20,6 +21,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
 
   return (
     <div className="min-h-screen bg-background">
+      <DataHealthBanner />
       {/* Header */}
       <nav className="border-b border-border bg-card">
         <div className="container mx-auto px-4 py-3">

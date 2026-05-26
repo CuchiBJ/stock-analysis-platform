@@ -170,3 +170,21 @@ class TransitionObservation(Base):
         Index('ix_obs_symbol_type_date', 'symbol', 'transition_type', 'date_detected', unique=True),
         Index('ix_obs_aggregation', 'transition_type', 'regime_at_detection', 'outcome_status'),
     )
+
+
+class SchedulerError(Base):
+    __tablename__ = "scheduler_errors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    exception_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    exception_message: Mapped[str] = mapped_column(String, nullable=False)
+    traceback: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        Index("ix_scheduler_errors_occurred_at", "occurred_at"),
+        Index("ix_scheduler_errors_task_name", "task_name"),
+    )
+

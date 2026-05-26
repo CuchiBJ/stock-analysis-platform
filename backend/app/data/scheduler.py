@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.universe.universe_engine import UniverseEngine
 from app.universe.tiers.tier_manager import UniverseTier
 from app.services.websocket_manager import websocket_manager
+from app.services.task_error_tracker import track_task_errors
 from sqlalchemy import func
 from datetime import datetime, time, timedelta
 import pytz
@@ -111,6 +112,7 @@ class DataScheduler:
             self._slow_running = False
         return count
 
+    @track_task_errors(task_name="batch_scan_transitions")
     async def _batch_scan_transitions(self) -> None:
         try:
             from app.services.batch_transition_scanner import BatchTransitionScanner
@@ -121,6 +123,7 @@ class DataScheduler:
         except Exception as e:
             logger.error(f"Batch transition scan failed: {e}")
 
+    @track_task_errors(task_name="evaluate_pending_outcomes")
     async def _evaluate_pending_outcomes(self) -> None:
         try:
             from app.services.outcome_tracker import OutcomeTracker
@@ -132,6 +135,7 @@ class DataScheduler:
         except Exception as e:
             logger.error(f"Outcome evaluation failed: {e}")
 
+    @track_task_errors(task_name="broadcast_metrics_updated")
     async def _broadcast_metrics_updated(self, count: int, tier: str = 'all') -> None:
         """Broadcast metrics_updated event to all WebSocket subscribers."""
         if websocket_manager.get_connection_count() == 0:
@@ -500,6 +504,7 @@ class DataScheduler:
         engine.dispose()
         return ok
 
+    @track_task_errors(task_name="run_discovery_scans")
     async def _run_discovery_scans(self):
         """Run nightly discovery scans to detect new leaders"""
         try:
@@ -552,6 +557,7 @@ class DataScheduler:
             traceback.print_exc()
             return []
 
+    @track_task_errors(task_name="reevaluate_tiers")
     async def _reevaluate_tiers(self):
         """Reevaluate tiers for all active symbols"""
         try:
@@ -628,6 +634,7 @@ class DataScheduler:
             traceback.print_exc()
             return 0
 
+    @track_task_errors(task_name="run_health_check")
     async def _run_health_check(self):
         """Run health monitoring and generate report"""
         try:
@@ -789,6 +796,7 @@ class DataScheduler:
             import traceback
             traceback.print_exc()
 
+    @track_task_errors(task_name="run_realtime_discovery")
     async def _run_realtime_discovery(self):
         """Run realtime discovery to detect volume explosion and RS acceleration"""
         try:
@@ -876,6 +884,7 @@ class DataScheduler:
             traceback.print_exc()
             return []
 
+    @track_task_errors(task_name="run_lifecycle_tracking")
     async def _run_lifecycle_tracking(self):
         """Run lifecycle tracking to detect IPOs, delistings, symbol changes, sector migrations"""
         try:
