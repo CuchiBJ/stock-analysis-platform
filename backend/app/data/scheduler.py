@@ -105,9 +105,21 @@ class DataScheduler:
             asyncio.create_task(self._broadcast_metrics_updated(count, tier='all'))
             # Evaluate pending outcomes after each successful SLOW cycle
             asyncio.create_task(self._evaluate_pending_outcomes())
+            # Batch-detect transitions over the quality universe (populates calibration data)
+            asyncio.create_task(self._batch_scan_transitions())
         finally:
             self._slow_running = False
         return count
+
+    async def _batch_scan_transitions(self) -> None:
+        try:
+            from app.services.batch_transition_scanner import BatchTransitionScanner
+            from datetime import date
+            async with self._get_db() as session:
+                scanner = BatchTransitionScanner(session)
+                await scanner.scan_universe(date.today())
+        except Exception as e:
+            logger.error(f"Batch transition scan failed: {e}")
 
     async def _evaluate_pending_outcomes(self) -> None:
         try:

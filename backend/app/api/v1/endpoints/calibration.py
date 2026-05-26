@@ -7,15 +7,17 @@ resolution when nothing has resolved yet.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from dataclasses import asdict
+from datetime import date, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
-from app.models.stock import TransitionObservation
+from app.models.stock import StockMetrics, TransitionObservation
+from app.services.batch_transition_scanner import BatchTransitionScanner
 from app.services.transition_engine import OperationalTransition
 
 router = APIRouter(prefix="/calibration", tags=["calibration"])
@@ -116,3 +118,22 @@ async def calibration_by_transition_type(db: AsyncSession = Depends(get_db)):
         "eta_first_data": eta_first_data,
         "rows": rows,
     }
+
+
+@router.post("/scan-now", tags=["admin"])
+async def scan_now(
+    as_of_date: Optional[date] = Query(None, description="Scan against this date (default: latest metrics date)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually trigger the batch transition scanner. Useful for testing
+    and for forcing observation accumulation outside the SLOW cycle.
+    """
+    target_date = as_of_date
+    if target_date is None:
+        target_date = (await db.execute(select(func.max(StockMetrics.date)))).scalar()
+        if target_date is None:
+            raise HTTPException(status_code=404, detail="No stock_metrics data available")
+
+    scanner = BatchTransitionScanner(db)
+    stats = await scanner.scan_universe(target_date)
+    return asdict(stats)
