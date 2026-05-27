@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { API_URL } from '@/lib/utils'
 import DashboardLayout from '@/components/layout/DashboardLayout'
@@ -24,6 +24,14 @@ interface Cutoff {
   note: string
 }
 
+interface SubComponent {
+  name: string
+  points: number
+  max_points: number
+  raw_value: number | null
+  verdict: string
+}
+
 interface ScoreComponent {
   name: string
   value: number
@@ -33,6 +41,20 @@ interface ScoreComponent {
   to_improve: number
   kind: 'symbol_controllable' | 'time_dependent' | 'market_wide' | 'group_rotation'
   note: string
+  sub_components?: SubComponent[]
+}
+
+interface AssessmentGap {
+  name: string
+  severity: 'blocker' | 'high' | 'medium' | 'low'
+  what_to_do: string
+}
+
+interface Assessment {
+  verdict: 'elite' | 'strong' | 'mid' | 'weak' | 'disqualified'
+  headline: string
+  strengths: string[]
+  gaps: AssessmentGap[]
 }
 
 interface MultiplierInfo {
@@ -100,6 +122,7 @@ interface DiagnosticResponse {
     multiplier: number
   } | null
   minervini_status: Record<string, any> | null
+  assessment?: Assessment | null
 }
 
 // ─── Human-readable labels ───────────────────────────────────────────────────
@@ -226,6 +249,69 @@ function ListRow({ lst }: { lst: ListCheck }) {
   )
 }
 
+function AssessmentCard({ a }: { a: Assessment }) {
+  const verdictStyle: Record<Assessment['verdict'], { label: string; pill: string; bg: string }> = {
+    elite:         { label: 'Élite',         pill: 'bg-green-500/20 text-green-300 border-green-500/40',  bg: 'border-green-500/30 bg-green-500/5'   },
+    strong:        { label: 'Fuerte',        pill: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40',     bg: 'border-cyan-500/30 bg-cyan-500/5'     },
+    mid:           { label: 'Mid-tier',      pill: 'bg-amber-500/20 text-amber-300 border-amber-500/40', bg: 'border-amber-500/30 bg-amber-500/5'   },
+    weak:          { label: 'Débil',         pill: 'bg-orange-500/20 text-orange-300 border-orange-500/40', bg: 'border-orange-500/30 bg-orange-500/5' },
+    disqualified:  { label: 'Descalificado', pill: 'bg-red-500/20 text-red-300 border-red-500/40',       bg: 'border-red-500/30 bg-red-500/5'       },
+  }
+  const v = verdictStyle[a.verdict]
+  const severityStyle: Record<AssessmentGap['severity'], string> = {
+    blocker: 'border-red-500/40 bg-red-500/5 text-red-300',
+    high:    'border-orange-500/40 bg-orange-500/5 text-orange-300',
+    medium:  'border-amber-500/40 bg-amber-500/5 text-amber-300',
+    low:     'border-white/15 bg-white/5 text-white/70',
+  }
+
+  return (
+    <Card className={`p-5 border ${v.bg}`}>
+      <div className="flex items-center gap-3 mb-3">
+        <span className={`text-[10px] uppercase tracking-widest px-2 py-1 rounded border ${v.pill}`}>
+          {v.label}
+        </span>
+        <span className="text-xs uppercase tracking-widest text-muted-foreground">Quality Assessment</span>
+      </div>
+      <p className="text-sm text-foreground mb-3">{a.headline}</p>
+
+      {a.strengths.length > 0 && (
+        <div className="mb-3">
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Fortalezas</p>
+          <ul className="space-y-1">
+            {a.strengths.map((s, i) => (
+              <li key={i} className="text-xs text-green-400/90 flex gap-2">
+                <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                <span>{s}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {a.gaps.length > 0 && (
+        <div>
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">
+            {a.verdict === 'elite' || a.verdict === 'strong' ? 'Áreas marginales' : 'Qué le falta para ser top'}
+          </p>
+          <ul className="space-y-2">
+            {a.gaps.map((g, i) => (
+              <li key={i} className={`text-xs px-2.5 py-2 rounded border ${severityStyle[g.severity]}`}>
+                <div className="font-semibold flex items-center gap-2">
+                  <XCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{g.name}</span>
+                  <span className="text-[9px] uppercase tracking-wider opacity-60 ml-auto">{g.severity}</span>
+                </div>
+                <p className="mt-1 ml-5 opacity-90 leading-snug">{g.what_to_do}</p>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </Card>
+  )
+}
+
 function kindLabel(kind: ScoreComponent['kind']): { tag: string; cls: string } {
   switch (kind) {
     case 'symbol_controllable': return { tag: 'actionable',  cls: 'text-green-400'  }
@@ -234,6 +320,34 @@ function kindLabel(kind: ScoreComponent['kind']): { tag: string; cls: string } {
     case 'group_rotation':      return { tag: 'group',       cls: 'text-cyan-400'   }
     default:                    return { tag: kind,          cls: 'text-white/40'   }
   }
+}
+
+function SubComponentsTable({ subs }: { subs: SubComponent[] }) {
+  return (
+    <div className="my-2 ml-4 pl-3 border-l-2 border-amber-500/30">
+      <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">
+        Sub-componentes de pullback quality
+      </p>
+      <table className="w-full text-[11px]">
+        <tbody>
+          {subs.map((s, i) => {
+            const filled = s.max_points > 0 ? s.points / s.max_points : 0
+            const cls = filled >= 0.85 ? 'text-green-400' : filled >= 0.5 ? 'text-amber-300' : 'text-red-400'
+            return (
+              <tr key={i} className="border-b border-border/30 last:border-0">
+                <td className="py-1 pr-2 text-foreground/80">{s.name}</td>
+                <td className="py-1 pr-2 text-right font-mono tabular-nums">
+                  <span className={cls}>{s.points.toFixed(0)}</span>
+                  <span className="text-white/30 ml-0.5">/{s.max_points}</span>
+                </td>
+                <td className="py-1 text-foreground/60 leading-snug">{s.verdict}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
 }
 
 function ScoreBreakdownTable({ bd, listPassed }: { bd: ScoreBreakdown; listPassed: boolean }) {
@@ -262,24 +376,33 @@ function ScoreBreakdownTable({ bd, listPassed }: { bd: ScoreBreakdown; listPasse
             const k = kindLabel(c.kind)
             const filledPct = Math.min(100, Math.round((c.contribution / c.max_contribution) * 100))
             return (
-              <tr key={i} className="border-b border-border/30 last:border-0">
-                <td className="py-1.5 pr-3 text-foreground/80">{componentLabel(c.name)}</td>
-                <td className="py-1.5 pr-3 text-right font-mono tabular-nums">
-                  <span className="text-foreground">{c.contribution.toFixed(3)}</span>
-                  <span className="text-white/30 text-[10px] ml-1">({filledPct}%)</span>
-                </td>
-                <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-muted-foreground/60">
-                  {c.max_contribution.toFixed(3)}
-                </td>
-                <td className="py-1.5 pr-3 text-right font-mono tabular-nums">
-                  {c.to_improve > 0.001
-                    ? <span className="text-amber-300">+{c.to_improve.toFixed(3)}</span>
-                    : <span className="text-green-400">at max</span>}
-                </td>
-                <td className="py-1.5">
-                  <span className={`text-[10px] uppercase tracking-wider ${k.cls}`}>{k.tag}</span>
-                </td>
-              </tr>
+              <React.Fragment key={i}>
+                <tr className="border-b border-border/30 last:border-0">
+                  <td className="py-1.5 pr-3 text-foreground/80">{componentLabel(c.name)}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono tabular-nums">
+                    <span className="text-foreground">{c.contribution.toFixed(3)}</span>
+                    <span className="text-white/30 text-[10px] ml-1">({filledPct}%)</span>
+                  </td>
+                  <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-muted-foreground/60">
+                    {c.max_contribution.toFixed(3)}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right font-mono tabular-nums">
+                    {c.to_improve > 0.001
+                      ? <span className="text-amber-300">+{c.to_improve.toFixed(3)}</span>
+                      : <span className="text-green-400">at max</span>}
+                  </td>
+                  <td className="py-1.5">
+                    <span className={`text-[10px] uppercase tracking-wider ${k.cls}`}>{k.tag}</span>
+                  </td>
+                </tr>
+                {c.sub_components && c.sub_components.length > 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-0 py-0">
+                      <SubComponentsTable subs={c.sub_components} />
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
             )
           })}
           <tr className="border-b border-white/10 bg-white/3">
@@ -432,6 +555,9 @@ export default function SymbolPage() {
                 </div>
               </Card>
             )}
+
+            {/* Quality Assessment — top-level "why is this where it is + what's missing" */}
+            {data.assessment && <AssessmentCard a={data.assessment} />}
 
             {/* Status across lists */}
             {data.lists.length > 0 && (

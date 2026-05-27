@@ -607,6 +607,100 @@ async def _calculate_priority_score(
     return score
 
 
+def _pullback_quality_subcomponents(m: StockMetrics) -> list[dict]:
+    """Break down pullback_quality_score (0-100) into its 6 sub-components,
+    so the operator can see EXACTLY where the score is leaking.
+
+    Mirrors _calculate_pullback_quality_score in metrics_calculator.py.
+    """
+    subs: list[dict] = []
+
+    # EMA9 proximity (max 25)
+    d9 = m.distance_to_ema9_atr
+    if d9 is None:
+        pts9 = 0; verdict9 = 'EMA9 distance no calculada'
+    elif abs(d9) <= 0.5:
+        pts9 = 25; verdict9 = 'En sweet spot (≤0.5 ATR)'
+    elif abs(d9) <= 1.0:
+        pts9 = 20; verdict9 = f'Cerca pero no en sweet spot (actual {d9:+.2f} ATR, ideal ≤0.5)'
+    elif abs(d9) <= 1.5:
+        pts9 = 15; verdict9 = f'Pullback moderado (actual {d9:+.2f} ATR, ideal ≤0.5)'
+    elif abs(d9) <= 2.0:
+        pts9 = 10; verdict9 = f'Pullback profundo (actual {d9:+.2f} ATR)'
+    else:
+        pts9 = 0;  verdict9 = f'Demasiado lejos del EMA9 ({d9:+.2f} ATR)'
+    subs.append({'name': 'EMA9 proximity', 'points': pts9, 'max_points': 25,
+                 'raw_value': d9, 'verdict': verdict9})
+
+    # EMA21 proximity (max 20)
+    d21 = m.distance_to_ema21_atr
+    if d21 is None:
+        pts21 = 0; verdict21 = 'EMA21 distance no calculada'
+    elif abs(d21) <= 0.5:
+        pts21 = 20; verdict21 = 'En sweet spot (≤0.5 ATR)'
+    elif abs(d21) <= 1.0:
+        pts21 = 15; verdict21 = f'Cerca pero no en sweet spot (actual {d21:+.2f} ATR)'
+    elif abs(d21) <= 1.5:
+        pts21 = 10; verdict21 = f'Pullback moderado al EMA21 ({d21:+.2f} ATR)'
+    elif abs(d21) <= 2.0:
+        pts21 = 5;  verdict21 = f'Pullback profundo del EMA21 ({d21:+.2f} ATR)'
+    else:
+        pts21 = 0;  verdict21 = f'Demasiado lejos del EMA21 ({d21:+.2f} ATR)'
+    subs.append({'name': 'EMA21 proximity', 'points': pts21, 'max_points': 20,
+                 'raw_value': d21, 'verdict': verdict21})
+
+    # 52W high proximity (max 20)
+    dh = m.distance_to_high_52w_atr
+    if dh is None:
+        ptsh = 0; verdicth = '52W distance no calculada'
+    elif dh >= -1.0:
+        ptsh = 20; verdicth = f'A {dh:+.2f} ATR del máximo anual (excelente)'
+    elif dh >= -2.0:
+        ptsh = 15; verdicth = f'A {dh:+.2f} ATR del máximo (cerca de fuerza)'
+    elif dh >= -3.0:
+        ptsh = 10; verdicth = f'A {dh:+.2f} ATR del máximo (margen aceptable)'
+    elif dh >= -4.0:
+        ptsh = 5;  verdicth = f'A {dh:+.2f} ATR del máximo (lejos)'
+    else:
+        ptsh = 0;  verdicth = f'Demasiado lejos del máximo anual ({dh:+.2f} ATR)'
+    subs.append({'name': 'Cercanía a máximo 52w', 'points': ptsh, 'max_points': 20,
+                 'raw_value': dh, 'verdict': verdicth})
+
+    # Weekly tightness (max 10)
+    wt = m.weekly_tightness or 0.0
+    pts_wt = max(0, min(10, wt * 10))
+    if wt >= 0.9: verdict_wt = 'Base semanal muy apretada'
+    elif wt >= 0.7: verdict_wt = 'Base semanal apretada'
+    elif wt >= 0.5: verdict_wt = 'Base semanal moderada — falta contracción'
+    elif wt >= 0.3: verdict_wt = 'Base semanal floja — rango aún amplio'
+    else: verdict_wt = 'Sin contracción semanal — base inestable'
+    subs.append({'name': 'Tightness semanal', 'points': round(pts_wt, 2), 'max_points': 10,
+                 'raw_value': wt, 'verdict': verdict_wt})
+
+    # Volume contraction (max 10)
+    vc = m.volume_contraction or 0.0
+    pts_vc = max(0, min(10, vc * 10))
+    if vc >= 0.7: verdict_vc = 'Volumen contrayendo fuerte (acumulación)'
+    elif vc >= 0.4: verdict_vc = 'Volumen contrayendo moderadamente'
+    elif vc >= 0.1: verdict_vc = 'Volumen apenas contrayendo'
+    else: verdict_vc = 'Volumen NO contrayendo — falta dry-up institucional'
+    subs.append({'name': 'Volume contraction', 'points': round(pts_vc, 2), 'max_points': 10,
+                 'raw_value': vc, 'verdict': verdict_vc})
+
+    # Weekly trend quality (max 25) — heaviest sub-component
+    wtq = m.weekly_trend_quality or 0.0
+    pts_wtq = max(0, min(25, wtq * 25))
+    if wtq >= 0.9: verdict_wtq = 'Tendencia semanal excelente'
+    elif wtq >= 0.7: verdict_wtq = 'Tendencia semanal sólida'
+    elif wtq >= 0.5: verdict_wtq = 'Tendencia semanal moderada — falta consistencia'
+    elif wtq >= 0.3: verdict_wtq = 'Tendencia semanal débil'
+    else: verdict_wtq = 'Tendencia semanal deteriorada — issue estructural'
+    subs.append({'name': 'Weekly trend quality', 'points': round(pts_wtq, 2), 'max_points': 25,
+                 'raw_value': wtq, 'verdict': verdict_wtq})
+
+    return subs
+
+
 async def _calculate_priority_score_with_breakdown(
     setup: StockMetrics,
     regime,
@@ -638,6 +732,7 @@ async def _calculate_priority_score_with_breakdown(
         'to_improve': round(0.40 - pq_contrib, 4),
         'kind': 'symbol_controllable',
         'note': 'Improve via closer EMA9/21 proximity, tighter weekly range, more volume contraction, better weekly trend quality.',
+        'sub_components': _pullback_quality_subcomponents(setup),
     })
 
     # ── 2. Freshness (25%) ──────────────────────────────────────────────

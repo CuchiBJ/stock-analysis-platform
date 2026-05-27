@@ -283,6 +283,10 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
         import logging as _log_mod
         _log_mod.getLogger(__name__).warning(f"diagnostic: score_breakdown for {sym} failed: {e}")
 
+    # Quality Assessment — top-of-page plain-language narrative answering
+    # "why is this symbol where it is, and what would push it to top?"
+    assessment = _build_quality_assessment(stock, metrics, lists, ctx_mult, group_mult)
+
     # Minervini per-criterion breakdown (helpful when quality_leader fails)
     minervini_status = evaluate_minervini_criteria(metrics)
 
@@ -293,4 +297,179 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
         "market_context_applied": market_context_applied,
         "group_strength": group_strength_payload,
         "minervini_status": minervini_status,
+        "assessment": assessment,
+    }
+
+
+def _build_quality_assessment(stock, m, lists, ctx_mult, group_mult) -> dict:
+    """Generate plain-language assessment of where the symbol stands and what's
+    blocking it from being top-tier.
+
+    Returns:
+      {
+        verdict: "elite" | "strong" | "mid" | "weak" | "disqualified",
+        headline: str,
+        strengths: [str],
+        gaps: [{name, severity, what_to_do}],
+      }
+    """
+    strengths: list[str] = []
+    gaps: list[dict] = []
+
+    actionable_check = next((l for l in lists if l["key"] == "actionable"), None)
+    bd = actionable_check.get("score_breakdown") if actionable_check else None
+
+    # Disqualified: fails the institutional liquidity prereq
+    if not actionable_check or not bd:
+        return {
+            "verdict": "disqualified",
+            "headline": "Sin datos suficientes para evaluar.",
+            "strengths": [],
+            "gaps": [],
+        }
+
+    # Detect why criteria fails (if it does)
+    failing = [c for c in actionable_check.get("criteria", []) if not c["passes"]]
+    if failing:
+        # Group failures
+        liquidity_fail = any("volume" in c["name"].lower() or "adr" in c["name"].lower() for c in failing)
+        ema_fail = any("ema" in c["name"].lower() or "EMA" in c["name"] for c in failing)
+        structure_fail = any(s in c["name"] for c in failing for s in ("SMA", "ema50", "EMA50", "ema200", "EMA200", "perf_1y"))
+
+        if liquidity_fail:
+            return {
+                "verdict": "disqualified",
+                "headline": "Descalificado — no pasa el filtro institucional de liquidez (volumen ≥ 800k, ADR ≥ 4%).",
+                "strengths": [],
+                "gaps": [{
+                    "name": "Liquidez insuficiente",
+                    "severity": "blocker",
+                    "what_to_do": "Este símbolo no es tradeable a tamaño institucional. Esperar volumen sostenido o descartar.",
+                }],
+            }
+        if structure_fail:
+            return {
+                "verdict": "weak",
+                "headline": "Setup roto — fallan criterios estructurales (Stage 2 / Minervini SEPA).",
+                "strengths": [],
+                "gaps": [{
+                    "name": "Estructura no es de tendencia alcista",
+                    "severity": "blocker",
+                    "what_to_do": "Esperar a que precio/medias se realineen. Fuera de scope de setup institucional hasta entonces.",
+                }],
+            }
+        if ema_fail:
+            d9 = m.distance_to_ema9_atr
+            d21 = m.distance_to_ema21_atr
+            return {
+                "verdict": "mid",
+                "headline": "Fuera de zona de pullback — precio extendido respecto a EMAs cortas.",
+                "strengths": [],
+                "gaps": [{
+                    "name": "Distancia EMA fuera de rango",
+                    "severity": "blocker",
+                    "what_to_do": f"Esperar pullback: precio debe estar en [-1.0, +0.5] ATR de EMA9 ({d9:+.2f} actual) o EMA21 ({d21:+.2f} actual).",
+                }],
+            }
+
+    # Criteria passed — analyze the score breakdown to find gaps
+    components = bd["components"]
+    pq_comp = next((c for c in components if c["name"] == "pullback_quality"), None)
+    fresh_comp = next((c for c in components if c["name"] == "freshness"), None)
+    regime_comp = next((c for c in components if c["name"] == "regime_alignment"), None)
+
+    final = bd["final_priority"]
+
+    # Pullback quality analysis
+    if pq_comp:
+        pq_pct = pq_comp["value"]
+        if pq_pct >= 85:
+            strengths.append(f"Pullback de alta calidad ({pq_pct:.0f}/100) — estructura técnica sólida")
+        elif pq_pct >= 70:
+            sub = pq_comp.get("sub_components", [])
+            weakest = sorted(sub, key=lambda s: s["points"] / s["max_points"] if s["max_points"] else 1)[:2]
+            issues = "; ".join(s["verdict"] for s in weakest)
+            gaps.append({
+                "name": "Pullback quality mid-tier",
+                "severity": "medium",
+                "what_to_do": f"Score {pq_pct:.0f}/100 (top suele ser 85+). Sub-issues: {issues}",
+            })
+        else:
+            sub = pq_comp.get("sub_components", [])
+            weakest = sorted(sub, key=lambda s: s["points"] / s["max_points"] if s["max_points"] else 1)[:3]
+            issues = "; ".join(s["verdict"] for s in weakest)
+            gaps.append({
+                "name": "Pullback quality bajo",
+                "severity": "high",
+                "what_to_do": f"Score {pq_pct:.0f}/100 lejos del top. Principales gaps: {issues}",
+            })
+
+    # Freshness analysis
+    if fresh_comp:
+        fr_pct = fresh_comp["value"]
+        if fr_pct >= 100:
+            strengths.append("Freshness en peak (1-3 días en estado)")
+        elif fr_pct >= 75:
+            strengths.append(f"Freshness buena ({fresh_comp['note']})")
+        else:
+            gaps.append({
+                "name": "Setup envejecido",
+                "severity": "medium" if fr_pct >= 40 else "high",
+                "what_to_do": f"{fresh_comp['note']}. Solo una nueva transición resetea esto — esperar o descartar.",
+            })
+
+    # Regime analysis
+    if regime_comp:
+        if regime_comp["value"] >= 0.20:
+            strengths.append("Régimen de mercado favorable (risk_on)")
+        elif regime_comp["value"] <= 0.10:
+            gaps.append({
+                "name": "Régimen de mercado adverso",
+                "severity": "medium",
+                "what_to_do": "Risk-off general. Reducir tamaño o esperar mejora del contexto macro.",
+            })
+
+    # Multipliers
+    ctx_v = bd["ctx_multiplier"]["value"]
+    grp_v = bd["group_multiplier"]["value"]
+    if ctx_v >= 1.10:
+        strengths.append("Contexto multidimensional fuerte (× 1.10)")
+    elif ctx_v < 1.00:
+        gaps.append({
+            "name": "Contexto suprime el score",
+            "severity": "high" if ctx_v <= 0.7 else "medium",
+            "what_to_do": f"Multiplier × {ctx_v:.2f}. Participation/leadership en deterioro — esperar mejora del contexto macro.",
+        })
+
+    if grp_v >= 1.15:
+        strengths.append(f"Grupo líder rotacionalmente — {bd['group_multiplier'].get('group','')} (top 20%)")
+    elif grp_v <= 0.85:
+        gaps.append({
+            "name": "Grupo rotacionalmente débil",
+            "severity": "medium",
+            "what_to_do": f"Grupo {bd['group_multiplier'].get('group','')} en bottom 20%. Penalty × 0.85. Esperar rotación al grupo o buscar setups en grupos fuertes.",
+        })
+
+    # Final verdict
+    if final >= 0.95:
+        verdict = "elite"
+        headline = "Setup de élite. Cerca del top en cada dimensión medida."
+    elif final >= 0.85:
+        verdict = "strong"
+        headline = "Setup fuerte. Pocas áreas por mejorar."
+    elif final >= 0.70:
+        verdict = "mid"
+        headline = "Setup mid-tier. Pasa criterios pero hay gaps específicos para subir."
+    elif final >= 0.50:
+        verdict = "weak"
+        headline = "Setup débil. Pasa el filtro pero el score compuesto es bajo."
+    else:
+        verdict = "weak"
+        headline = "Score muy bajo. Probablemente mejor mirar otros setups."
+
+    return {
+        "verdict": verdict,
+        "headline": headline,
+        "strengths": strengths,
+        "gaps": gaps,
     }
