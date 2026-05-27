@@ -83,14 +83,18 @@ class DataScheduler:
 
                 logger.info(f"Calculating SLOW metrics for {len(symbols)} symbols...")
                 calculator = MetricsCalculator(db)
+                # Write-protection window: skip only when a row was touched recently
+                # (avoids clobbering fresh FAST writes for TIER 1 symbols, but lets SLOW
+                # refresh the rest of the universe every cycle).
+                fresh_cutoff = datetime.utcnow() - timedelta(minutes=5)
                 for sym in symbols:
-                    # Write-protection: skip if FAST already wrote a row for snapshot_date
                     if snapshot_date:
                         existing = await db.execute(
-                            select(StockMetricsModel.date)
+                            select(StockMetricsModel.updated_at)
                             .where(
                                 StockMetricsModel.symbol == sym,
                                 StockMetricsModel.date >= snapshot_date,
+                                StockMetricsModel.updated_at >= fresh_cutoff,
                             )
                             .limit(1)
                         )
