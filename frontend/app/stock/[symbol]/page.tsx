@@ -102,6 +102,33 @@ interface DiagnosticResponse {
   minervini_status: Record<string, any> | null
 }
 
+// ─── Human-readable labels ───────────────────────────────────────────────────
+const MINERVINI_LABELS: Record<string, string> = {
+  perf_1y_gt_30:              'Performance anual > 30%',
+  price_above_ema200:         'Precio sobre EMA200',
+  price_above_ema50:          'Precio sobre EMA50',
+  sma50_gt_sma150:            'SMA50 > SMA150',
+  sma150_gt_sma200_x_105:     'SMA150 > SMA200 × 1.05',
+  range_52w_gte_60pct:        'Rango 52 semanas ≥ 60%',
+  price_above_low_gte_70pct:  'Precio sobre mínimo 52w ≥ 70%',
+  adr_gte_3pct:               'ADR ≥ 3%',
+}
+
+const SCORE_COMPONENT_LABELS: Record<string, string> = {
+  pullback_quality:  'Calidad del pullback',
+  freshness:         'Freshness — días en estado',
+  regime_alignment:  'Alineación con régimen',
+  leader_quality:    'Calidad de líder',
+}
+
+function componentLabel(name: string): string {
+  return SCORE_COMPONENT_LABELS[name] ?? name
+}
+
+function minerviniLabel(key: string): string {
+  return MINERVINI_LABELS[key] ?? key
+}
+
 function formatValue(v: any): string {
   if (v === null || v === undefined) return 'null'
   if (typeof v === 'number') {
@@ -236,7 +263,7 @@ function ScoreBreakdownTable({ bd, listPassed }: { bd: ScoreBreakdown; listPasse
             const filledPct = Math.min(100, Math.round((c.contribution / c.max_contribution) * 100))
             return (
               <tr key={i} className="border-b border-border/30 last:border-0">
-                <td className="py-1.5 pr-3 font-mono text-foreground/80">{c.name}</td>
+                <td className="py-1.5 pr-3 text-foreground/80">{componentLabel(c.name)}</td>
                 <td className="py-1.5 pr-3 text-right font-mono tabular-nums">
                   <span className="text-foreground">{c.contribution.toFixed(3)}</span>
                   <span className="text-white/30 text-[10px] ml-1">({filledPct}%)</span>
@@ -469,7 +496,7 @@ export default function SymbolPage() {
                     <div key={key} className={`px-2 py-1.5 rounded border ${val.passes ? 'border-green-500/30 bg-green-500/5 text-green-400' : 'border-red-500/30 bg-red-500/5 text-red-400'}`}>
                       <div className="flex items-center gap-1.5">
                         {val.passes ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
-                        <span className="font-mono">{key}</span>
+                        <span>{minerviniLabel(key)}</span>
                       </div>
                       {val.value != null && val.threshold != null && (
                         <div className="text-[10px] opacity-75 mt-0.5 ml-4">
