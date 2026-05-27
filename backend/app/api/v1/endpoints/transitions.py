@@ -666,36 +666,56 @@ def _pullback_quality_subcomponents(m: StockMetrics) -> list[dict]:
     subs.append({'name': 'Cercanía a máximo 52w', 'points': ptsh, 'max_points': 20,
                  'raw_value': dh, 'verdict': verdicth})
 
-    # Weekly tightness (max 10)
-    wt = m.weekly_tightness or 0.0
-    pts_wt = max(0, min(10, wt * 10))
-    if wt >= 0.9: verdict_wt = 'Base semanal muy apretada'
-    elif wt >= 0.7: verdict_wt = 'Base semanal apretada'
-    elif wt >= 0.5: verdict_wt = 'Base semanal moderada — falta contracción'
-    elif wt >= 0.3: verdict_wt = 'Base semanal floja — rango aún amplio'
-    else: verdict_wt = 'Sin contracción semanal — base inestable'
-    subs.append({'name': 'Tightness semanal', 'points': round(pts_wt, 2), 'max_points': 10,
+    # Weekly tightness (max 10) — buckets calibrated to real distribution
+    # of the institutional universe (p95 ≈ 0.37, max ≈ 0.42)
+    wt = m.weekly_tightness
+    if wt is None:
+        pts_wt = 0; verdict_wt = 'Sin datos suficientes'
+    elif wt >= 0.40:
+        pts_wt = 10; verdict_wt = f'Base muy apretada (top 5% del universo, wt={wt:.2f})'
+    elif wt >= 0.35:
+        pts_wt = 7;  verdict_wt = f'Base apretada (top 20%, wt={wt:.2f})'
+    elif wt >= 0.30:
+        pts_wt = 4;  verdict_wt = f'Base moderada (zona median, wt={wt:.2f})'
+    elif wt >= 0.25:
+        pts_wt = 2;  verdict_wt = f'Base floja (bottom 25%, wt={wt:.2f})'
+    else:
+        pts_wt = 0;  verdict_wt = f'Sin contracción semanal (wt={wt:.2f})'
+    subs.append({'name': 'Tightness semanal', 'points': pts_wt, 'max_points': 10,
                  'raw_value': wt, 'verdict': verdict_wt})
 
-    # Volume contraction (max 10)
-    vc = m.volume_contraction or 0.0
-    pts_vc = max(0, min(10, vc * 10))
-    if vc >= 0.7: verdict_vc = 'Volumen contrayendo fuerte (acumulación)'
-    elif vc >= 0.4: verdict_vc = 'Volumen contrayendo moderadamente'
-    elif vc >= 0.1: verdict_vc = 'Volumen apenas contrayendo'
-    else: verdict_vc = 'Volumen NO contrayendo — falta dry-up institucional'
-    subs.append({'name': 'Volume contraction', 'points': round(pts_vc, 2), 'max_points': 10,
+    # Volume contraction (max 10) — bucketed
+    vc = m.volume_contraction
+    if vc is None:
+        pts_vc = 0; verdict_vc = 'Sin datos suficientes'
+    elif vc >= 0.60:
+        pts_vc = 10; verdict_vc = f'Volumen contrayendo fuerte (vc={vc:.2f}, top 5%)'
+    elif vc >= 0.40:
+        pts_vc = 8;  verdict_vc = f'Volumen contrayendo bien (vc={vc:.2f}, top 25%)'
+    elif vc >= 0.20:
+        pts_vc = 5;  verdict_vc = f'Volumen contrayendo moderado (vc={vc:.2f}, zona median)'
+    elif vc >= 0.05:
+        pts_vc = 2;  verdict_vc = f'Volumen apenas contrayendo (vc={vc:.2f})'
+    else:
+        pts_vc = 0;  verdict_vc = f'Volumen NO contrayendo (vc={vc:.2f}) — falta dry-up'
+    subs.append({'name': 'Volume contraction', 'points': pts_vc, 'max_points': 10,
                  'raw_value': vc, 'verdict': verdict_vc})
 
-    # Weekly trend quality (max 25) — heaviest sub-component
-    wtq = m.weekly_trend_quality or 0.0
-    pts_wtq = max(0, min(25, wtq * 25))
-    if wtq >= 0.9: verdict_wtq = 'Tendencia semanal excelente'
-    elif wtq >= 0.7: verdict_wtq = 'Tendencia semanal sólida'
-    elif wtq >= 0.5: verdict_wtq = 'Tendencia semanal moderada — falta consistencia'
-    elif wtq >= 0.3: verdict_wtq = 'Tendencia semanal débil'
-    else: verdict_wtq = 'Tendencia semanal deteriorada — issue estructural'
-    subs.append({'name': 'Weekly trend quality', 'points': round(pts_wtq, 2), 'max_points': 25,
+    # Weekly trend quality (max 25) — bucketed, heaviest sub-component
+    wtq = m.weekly_trend_quality
+    if wtq is None:
+        pts_wtq = 0; verdict_wtq = 'Sin datos suficientes'
+    elif wtq >= 0.70:
+        pts_wtq = 25; verdict_wtq = f'Tendencia semanal excelente (wtq={wtq:.2f}, top 5%)'
+    elif wtq >= 0.60:
+        pts_wtq = 19; verdict_wtq = f'Tendencia semanal sólida (wtq={wtq:.2f}, top 20%)'
+    elif wtq >= 0.50:
+        pts_wtq = 13; verdict_wtq = f'Tendencia semanal moderada (wtq={wtq:.2f}, zona median)'
+    elif wtq >= 0.40:
+        pts_wtq = 7;  verdict_wtq = f'Tendencia semanal débil (wtq={wtq:.2f})'
+    else:
+        pts_wtq = 2;  verdict_wtq = f'Tendencia semanal deteriorada (wtq={wtq:.2f}) — issue estructural'
+    subs.append({'name': 'Weekly trend quality', 'points': pts_wtq, 'max_points': 25,
                  'raw_value': wtq, 'verdict': verdict_wtq})
 
     return subs

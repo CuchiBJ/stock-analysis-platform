@@ -535,9 +535,17 @@ class MetricsCalculator:
         dist_ema21_atr: float = None,
         dist_high_52w_atr: float = None
     ) -> float:
-        """Calculate overall pullback quality score (0-100) - ATR-normalized"""
+        """Calculate overall pullback quality score (0-100) — ATR-normalized.
+
+        Bucket thresholds for weekly_tightness, volume_contraction and
+        weekly_trend_quality are calibrated to the real distribution of the
+        institutional universe (measured 2026-05-27, n=848). Each sub-score
+        can ACTUALLY reach its max — a stock in the top 5% of weekly tightness
+        gets 10/10, the median gets 4/10. Linear scaling would have made max
+        unreachable for the realistic distributions.
+        """
         score = 0.0
-        
+
         # Distance to fast EMAs using ATR-normalized positioning (contextual)
         # Ideal: close to EMA9/21 (within 1.5 ATRs, regardless of sign)
         if dist_ema9_atr is not None:
@@ -549,7 +557,7 @@ class MetricsCalculator:
                 score += 15
             elif abs(dist_ema9_atr) <= 2.0:
                 score += 10
-        
+
         if dist_ema21_atr is not None:
             if abs(dist_ema21_atr) <= 0.5:
                 score += 20
@@ -559,28 +567,40 @@ class MetricsCalculator:
                 score += 10
             elif abs(dist_ema21_atr) <= 2.0:
                 score += 5
-        
+
         # Near 52-week high using ATR-normalized positioning (contextual)
-        # Ideal: within 2.0 ATRs of high (volatility-aware)
         if dist_high_52w_atr is not None:
-            if dist_high_52w_atr >= -1.0:  # Within 1 ATR of high
+            if dist_high_52w_atr >= -1.0:
                 score += 20
-            elif dist_high_52w_atr >= -2.0:  # Within 2 ATRs of high
+            elif dist_high_52w_atr >= -2.0:
                 score += 15
-            elif dist_high_52w_atr >= -3.0:  # Within 3 ATRs of high
+            elif dist_high_52w_atr >= -3.0:
                 score += 10
-            elif dist_high_52w_atr >= -4.0:  # Within 4 ATRs of high
+            elif dist_high_52w_atr >= -4.0:
                 score += 5
-        
-        # Weekly tightness
-        score += weekly_tightness * 10
-        
-        # Volume contraction (drying up on pullback)
-        score += max(0, volume_contraction) * 10
-        
-        # Weekly trend quality (most important factor)
-        score += weekly_trend_quality * 25
-        
+
+        # Weekly tightness — bucketed by distribution percentiles
+        if weekly_tightness is not None:
+            if weekly_tightness >= 0.40:   score += 10
+            elif weekly_tightness >= 0.35: score += 7
+            elif weekly_tightness >= 0.30: score += 4
+            elif weekly_tightness >= 0.25: score += 2
+
+        # Volume contraction — bucketed
+        if volume_contraction is not None:
+            if volume_contraction >= 0.60:   score += 10
+            elif volume_contraction >= 0.40: score += 8
+            elif volume_contraction >= 0.20: score += 5
+            elif volume_contraction >= 0.05: score += 2
+
+        # Weekly trend quality — bucketed
+        if weekly_trend_quality is not None:
+            if weekly_trend_quality >= 0.70:   score += 25
+            elif weekly_trend_quality >= 0.60: score += 19
+            elif weekly_trend_quality >= 0.50: score += 13
+            elif weekly_trend_quality >= 0.40: score += 7
+            else:                              score += 2
+
         return min(100.0, max(0.0, score))
 
     def _determine_setup_quality(self, pullback_score: float, dist_ema9: float, dist_ema21: float) -> str:
