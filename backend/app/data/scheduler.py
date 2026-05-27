@@ -340,18 +340,22 @@ class DataScheduler:
             
             # Check if within market hours
             if market_open <= current_time <= market_close:
-                # Price update every 15 minutes — awaited so FAST always uses fresh prices
+                # Price update every 15 minutes — awaited so FAST always uses fresh prices.
+                # NB: last_price_update is set AFTER the awaits complete (fresh datetime.now)
+                # so a slow yfinance pull doesn't cause the next iteration to re-trigger before
+                # FAST/SLOW/Realtime get a chance to run.
                 if last_price_update is None or (now - last_price_update).total_seconds() >= 900:
                     logger.info(f"Triggering price update (current time: {current_time})")
                     try:
                         await self._update_prices()
                     except Exception as e:
                         logger.error(f"Price update failed (continuing): {e}")
-                    last_price_update = now
                     # Immediately chain FAST metrics with fresh prices
                     logger.info("Chaining FAST metrics after price update")
                     await self.trigger_fast_metrics_update()
-                    last_fast_metrics_update = now
+                    after = datetime.now(et_tz)
+                    last_price_update = after
+                    last_fast_metrics_update = after
                     await asyncio.sleep(30)
                     continue
 
@@ -359,19 +363,19 @@ class DataScheduler:
                 if last_fast_metrics_update is None or (now - last_fast_metrics_update).total_seconds() >= 300:
                     logger.info(f"Triggering FAST metrics update (current time: {current_time})")
                     await self.trigger_fast_metrics_update()
-                    last_fast_metrics_update = now
+                    last_fast_metrics_update = datetime.now(et_tz)
 
                 # SLOW metrics every 30 minutes — all symbols with price for today
                 if last_metrics_update is None or (now - last_metrics_update).total_seconds() >= 1800:
                     logger.info(f"Triggering SLOW metrics update (current time: {current_time})")
                     await self.trigger_metrics_update()
-                    last_metrics_update = now
-                
+                    last_metrics_update = datetime.now(et_tz)
+
                 # Realtime discovery every 10 minutes (detect volume explosion, RS acceleration)
                 if last_realtime_discovery is None or (now - last_realtime_discovery).total_seconds() >= 600:
                     logger.info(f"Triggering realtime discovery (current time: {current_time})")
                     asyncio.create_task(self._run_realtime_discovery())
-                    last_realtime_discovery = now
+                    last_realtime_discovery = datetime.now(et_tz)
             else:
                 # After market close: run nightly tasks
                 logger.info(f"Outside market hours (current time: {current_time})")
@@ -385,9 +389,10 @@ class DataScheduler:
                     logger.info(f"Post-close cycle: final price update + SLOW (current time: {current_time})")
                     try:
                         await self._update_prices()
-                        last_price_update = now
                         await self.trigger_metrics_update()
-                        last_metrics_update = now
+                        after = datetime.now(et_tz)
+                        last_price_update = after
+                        last_metrics_update = after
                     except Exception as e:
                         logger.error(f"Post-close cycle failed: {e}")
                     last_post_close_cycle_date = now.date()
