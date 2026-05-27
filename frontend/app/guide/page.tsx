@@ -90,14 +90,15 @@ export default function GuidePage() {
             sin volatilidad operativa. A este conjunto filtrado se le llama el
             <strong className="text-white/80"> universo de calidad</strong>.
           </p>
-          <Block title="Filtros aplicados">
-            <Row label="Volumen promedio 10 días"   value="> 500,000 acciones diarias"  note="liquidez mínima para operar sin deslizamiento" />
-            <Row label="Precio actual"              value="> $5.00"                      note="excluye penny stocks" />
-            <Row label="ADR — Average Daily Range"  value="> 2%"                         note="mínima volatilidad para que el movimiento sea aprovechable" />
+          <Block title="Filtros aplicados (condición necesaria para cualquier setup)">
+            <Row label="Volumen promedio 10 días"   value="≥ 800,000 acciones diarias"  note="liquidez institucional — permite size sin slippage" />
+            <Row label="Precio actual"              value="≥ $5.00"                      note="excluye penny stocks" />
+            <Row label="ADR — Average Daily Range"  value="≥ 4%"                         note="volatilidad operativa real — el movimiento tiene que valer el riesgo" />
           </Block>
           <p className="text-xs text-white/40">
-            El universo actual es de ~1,978 stocks. Todos los porcentajes de breadth,
-            liderazgo y participación se calculan sobre este conjunto, no sobre el mercado completo.
+            Estos thresholds son condición necesaria para que un símbolo aparezca en cualquier lista
+            (actionable, live feed, las 3 lentes del queue). Todos los porcentajes de breadth,
+            liderazgo y participación se calculan sobre este universo institucional.
           </p>
         </Section>
 

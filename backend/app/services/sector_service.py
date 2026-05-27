@@ -37,9 +37,9 @@ class SectorService:
             JOIN stocks s ON s.symbol = l.symbol
             WHERE l.rn = 1
               AND s.market_group IS NOT NULL
-              AND l.avg_volume_10d  >= 500000
+              AND l.avg_volume_10d  >= 800000
               AND l.current_price   >= 5.0
-              AND l.adr_percent     >= 2.0
+              AND l.adr_percent     >= 4.0
               AND l.perf_1w         IS NOT NULL
         """))
         rows = result.fetchall()

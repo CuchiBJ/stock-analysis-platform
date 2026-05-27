@@ -181,8 +181,8 @@ async def recalculate_metrics_missing_rs(
     """Recalculate metrics for stocks whose relative_strength_spy is NULL.
 
     Used to backfill RS after fixing the metric calculator. Targets only
-    quality-universe stocks (avg_volume_10d >= 500k, price >= 5) to keep
-    runtime bounded.
+    quality-universe stocks (avg_volume_10d >= 800k, price >= 5, adr >= 4)
+    to keep runtime bounded.
     """
     calculator = MetricsCalculator(db)
 
@@ -192,8 +192,9 @@ async def recalculate_metrics_missing_rs(
                 SELECT DISTINCT ON (sm.symbol) sm.symbol
                 FROM stock_metrics sm
                 WHERE sm.relative_strength_spy IS NULL
-                  AND sm.avg_volume_10d >= 500000
+                  AND sm.avg_volume_10d >= 800000
                   AND sm.current_price >= 5.0
+                  AND sm.adr_percent >= 4.0
                 ORDER BY sm.symbol, sm.date DESC
                 LIMIT :limit
             """),
@@ -374,8 +375,9 @@ async def get_top_symbols(
                 SELECT DISTINCT ON (sm.symbol) sm.symbol, sm.pullback_quality_score
                 FROM stock_metrics sm
                 WHERE sm.pullback_quality_score IS NOT NULL
-                  AND sm.avg_volume_10d >= 500000
+                  AND sm.avg_volume_10d >= 800000
                   AND sm.current_price >= 5.0
+                  AND sm.adr_percent >= 4.0
                 ORDER BY sm.symbol, sm.date DESC
             ) latest
             ORDER BY pullback_quality_score DESC

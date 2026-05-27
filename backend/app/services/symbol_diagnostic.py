@@ -238,10 +238,10 @@ def diagnose_emerging_leaders(m: StockMetrics) -> ListCheck:
     """
     crit: list[Criterion] = []
 
-    # QUALITY_FILTERS (universe_filters)
-    crit.append(_ge("avg_volume_10d ≥ 500k",   m.avg_volume_10d, 500_000))
+    # QUALITY_FILTERS (universe_filters) — institutional liquidity prerequisite
+    crit.append(_ge("avg_volume_10d ≥ 800k",   m.avg_volume_10d, 800_000))
     crit.append(_ge("current_price ≥ $5",      m.current_price, 5.0))
-    crit.append(_ge("adr_percent ≥ 2%",         m.adr_percent, 2.0))
+    crit.append(_ge("adr_percent ≥ 4%",         m.adr_percent, 4.0))
 
     # Performance + RS
     crit.append(_gt("perf_13w > 20%",          m.perf_13w, 20.0))
@@ -275,10 +275,10 @@ def diagnose_building_bases(m: StockMetrics, d21_history_30d: list[float]) -> Li
     """Mirrors setup_queue_service.list_building_bases filter."""
     crit: list[Criterion] = []
 
-    # QUALITY_FILTERS
-    crit.append(_ge("avg_volume_10d ≥ 500k",   m.avg_volume_10d, 500_000))
+    # QUALITY_FILTERS — institutional liquidity prerequisite
+    crit.append(_ge("avg_volume_10d ≥ 800k",   m.avg_volume_10d, 800_000))
     crit.append(_ge("current_price ≥ $5",      m.current_price, 5.0))
-    crit.append(_ge("adr_percent ≥ 2%",         m.adr_percent, 2.0))
+    crit.append(_ge("adr_percent ≥ 4%",         m.adr_percent, 4.0))
 
     # VCP + weeks in base
     crit.append(_ge("vcp_score ≥ 70",           m.vcp_score, 70.0))
