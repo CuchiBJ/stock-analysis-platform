@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import DataHealthBanner from './DataHealthBanner'
+import SymbolSearch from './SymbolSearch'
 
 interface DashboardLayoutProps {
   children: React.ReactNode
@@ -29,7 +30,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
             <Link href="/" className="text-xl font-bold text-foreground">
               Stock Analysis
             </Link>
-            <div className="flex gap-6">
+            <div className="flex items-center gap-6">
               {navItems.map((item) => (
                 <Link
                   key={item.href}
@@ -44,6 +45,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
                   {item.label}
                 </Link>
               ))}
+              <SymbolSearch />
             </div>
           </div>
         </div>

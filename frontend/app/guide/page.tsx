@@ -76,6 +76,7 @@ export default function GuidePage() {
           { id: 'participation', label: 'Participation' },
           { id: 'leadership',    label: 'Leadership' },
           { id: 'queue',         label: 'Setup Queue' },
+          { id: 'scoring',       label: 'Puntuación y ranking' },
           { id: 'transitions',   label: 'Transitions' },
           { id: 'prob-source',   label: 'Probabilidad de continuación' },
           { id: 'context-filter', label: 'Cómo el contexto filtra los setups' },
@@ -265,6 +266,198 @@ export default function GuidePage() {
             <p className="text-xs text-white/40 mt-1">
               Busca: líderes Minervini + semanas_en_base + tightness + contracción de
               volatilidad semanal + sin sobreextensión.
+            </p>
+          </Block>
+        </Section>
+
+        {/* ── SCORING ───────────────────────────────────────────────── */}
+        <Section id="scoring" title="Puntuación y ranking — cómo se evalúa cada acción">
+          <p className="text-sm text-white/60">
+            Esta es la matemática que decide qué acciones aparecen primero. Cada lista usa
+            scores distintos, y los scores se componen de varios sub-scores. Cada uno está
+            documentado con su fórmula exacta. <strong className="text-white/80">Cumplir los
+            criterios filtra; el score ordena</strong>. Cumplir + tener score bajo significa
+            quedarse fuera del cutoff de su lista.
+          </p>
+
+          <Block title="Capas del scoring — del dato crudo al ranking final">
+            <p className="text-xs text-white/60 mb-2">
+              El score final de un setup en <code className="text-white/50">/actionable</code> se compone en 5 capas:
+            </p>
+            <p className="text-xs font-mono text-white/60 bg-white/5 rounded px-3 py-2">
+              [1] indicadores crudos (price, EMA, RS, vol)<br />
+              [2] sub-scores normalizados (pullback_quality, vcp_score, weekly_trend_quality)<br />
+              [3] priority_score base = Σ(sub-scores × pesos)<br />
+              [4] final_priority = base × context_mult × group_mult<br />
+              [5] sort + cutoff top-N
+            </p>
+            <p className="text-xs text-white/40 mt-2">
+              Los siguientes bloques desarman cada capa.
+            </p>
+          </Block>
+
+          <Block title="[2a] pullback_quality_score — 0 a 100">
+            <p className="text-xs text-white/60 mb-2">
+              Componente más importante del priority_score. Mide qué tan "ordenada" está la
+              retracción. Suma de 5 sub-componentes (todos los thresholds son ATR-normalizados):
+            </p>
+            <Row label="Proximidad a EMA9 (max 25)"      value="|d_ema9_atr| ≤ 0.5 → +25  /  ≤ 1.0 → +20  /  ≤ 1.5 → +15  /  ≤ 2.0 → +10" note="cuanto más cerca del EMA9, más fresco el pullback" />
+            <Row label="Proximidad a EMA21 (max 20)"     value="|d_ema21_atr| ≤ 0.5 → +20  /  ≤ 1.0 → +15  /  ≤ 1.5 → +10  /  ≤ 2.0 → +5" note="EMA21 como pivot estructural" />
+            <Row label="Cercanía al 52W high (max 20)"   value="d_high_atr ≥ -1 → +20  /  ≥ -2 → +15  /  ≥ -3 → +10  /  ≥ -4 → +5" note="setup fuerte solo cerca de máximos" />
+            <Row label="Weekly tightness (max 10)"       value="weekly_tightness × 10" note="contracción semanal de rango" />
+            <Row label="Volume contraction (max 10)"     value="max(0, volume_contraction) × 10" note="volumen secándose en el pullback" />
+            <Row label="Weekly trend quality (max 25)"   value="weekly_trend_quality × 25" note="factor más pesado — calidad de la tendencia semanal" />
+            <p className="text-xs text-white/40 mt-2">
+              Total clampeado a [0, 100]. <code className="text-white/50">pullback_quality_score ≥ 55</code> es el threshold
+              de entrada a <code className="text-white/50">/actionable</code>; <code className="text-white/50">≥ 70</code> es "excellent".
+            </p>
+          </Block>
+
+          <Block title="[2b] vcp_score — 0 a 100 (Volatility Contraction Pattern)">
+            <p className="text-xs text-white/60 mb-2">
+              Score que detecta el patrón VCP de Minervini (Volatility Contraction Pattern):
+              contracciones sucesivas con depth decreciente y volumen secándose.
+            </p>
+            <Row label="Count score (max 40)"        value="min(40, count_contractions × 15)" note="número de contracciones detectadas en 20d (más es mejor hasta 3+)" />
+            <Row label="Narrowing score (max 40)"    value="(% pairs donde depth(i) > depth(i+1)) × 40" note="contracciones que se achican secuencialmente — patrón clásico VCP" />
+            <Row label="Volume score (max 20)"       value="(1 - vol_second_half/vol_first_half) × 40, capped en 20" note="volumen segunda mitad de los 20d / volumen primera mitad" />
+            <p className="text-xs text-white/40 mt-2">
+              <code className="text-white/50">vcp_score ≥ 70</code> es el threshold para entrar a Building Bases queue.
+              VCP detecta consolidaciones técnicas con clusters de contracción — distinto de pullback_quality
+              que mide la retracción contra EMAs.
+            </p>
+          </Block>
+
+          <Block title="[3] priority_score base — para /actionable">
+            <p className="text-xs text-white/60 mb-2">
+              Cada candidato del top 50 (ya filtrado por SQL y ordenado por pullback_quality)
+              recibe un score base entre 0 y ~1.0:
+            </p>
+            <p className="text-xs font-mono text-white/60 bg-white/5 rounded px-3 py-2 mb-2">
+              base = 0.40 × pq/100<br />
+              {'     '}+ 0.25 × freshness_score(days_in_state)<br />
+              {'     '}+ regime_alignment_weight  (0.08–0.20)<br />
+              {'     '}+ 0.15 × pq/100<br />
+              {'     '}+ regime_setup_confidence_adjust  (residual, &lt; 0.1)
+            </p>
+            <p className="text-xs text-white/40">
+              Notar que pullback_quality contribuye <strong className="text-white/60">dos veces</strong>:
+              40% como "pullback quality" + 15% como "leader quality" = 55% efectivo del base score.
+              Es por diseño: la quality del pullback es la señal dominante.
+            </p>
+          </Block>
+
+          <Block title="[3a] Freshness decay — cuánto pierde el score con días en estado">
+            <p className="text-xs text-white/60 mb-2">
+              <code className="text-white/50">days_in_state</code> = días que el stock lleva en su estado actual
+              (e.g. EMA9_PULLBACK). Más viejo = score menor.
+            </p>
+            <Row label="1–3 días"   value="freshness = 1.00 (peak)"     note="setup fresco — máxima confianza temporal" />
+            <Row label="4–7 días"   value="freshness = 0.75 (bueno)"    note="aún operable" />
+            <Row label="8–14 días"  value="freshness = 0.45 (moderado)" note="late-stage — el contexto pudo cambiar" />
+            <Row label="15–20 días" value="freshness = 0.20 (stale)"    note="precaución alta" />
+            <Row label="21+ días"   value="freshness = 0.10 (extended)" note="ya no es setup fresco" />
+            <p className="text-xs text-white/40 mt-2">
+              Tabla expuesta en el card como badge (fresh / aging / late / stale / extended).
+            </p>
+          </Block>
+
+          <Block title="[3b] Regime alignment weight">
+            <p className="text-xs text-white/60 mb-2">
+              Componente que vale 0.08–0.20 según el régimen detectado por <code className="text-white/50">MarketRegimeEngine</code>:
+            </p>
+            <Row label="risk_on"      value="+0.20" note="amplitud + liderazgo saludables — todo suma" />
+            <Row label="choppy"       value="+0.14" note="lateral / oscilante" />
+            <Row label="transition"   value="+0.12" note="cambiando entre regímenes" />
+            <Row label="risk_off"     value="+0.08" note="risk-off — incluso buenos setups pagan penalty" />
+            <Row label="default"      value="+0.14" note="cuando el régimen no matchea ningún preset" />
+          </Block>
+
+          <Block title="[4] Multipliers compositivos">
+            <p className="text-xs text-white/60 mb-2">
+              El base se multiplica por <strong className="text-white/80">DOS factores externos</strong> antes del clamp:
+            </p>
+            <p className="text-xs font-mono text-white/60 bg-white/5 rounded px-3 py-2 mb-3">
+              final_priority = min(1.0, base × context_multiplier × group_multiplier)
+            </p>
+
+            <p className="text-[11px] uppercase tracking-widest text-white/40 mt-3 mb-1">Context multiplier (participation × leadership)</p>
+            <Row label="COLLAPSING participation (cualquier liderazgo)" value="× 0.50  + suprime u-and-r, emerging-leaders" note="regla más fuerte — colapso de amplitud domina" />
+            <Row label="NARROWING + THINNING/COLLAPSING/EXHAUSTED"     value="× 0.70  + suprime emerging-leaders" note="amplitud achicándose + liderazgo adverso" />
+            <Row label="EXHAUSTED leadership override (no COLLAPSING)" value="× 0.60  + badge 'exhausted'" note="liderazgo climáctico — riesgo de techo" />
+            <Row label="EXPANDING + EXPANDING/HEALTHY"                  value="× 1.10  (boost)" note="amplitud creciente + liderazgo sano" />
+            <Row label="STABLE / UNKNOWN / cualquier otra combinación"  value="× 1.00  (neutro)" note="incluye cold-start con descriptores UNKNOWN — NUNCA suprime" />
+
+            <p className="text-[11px] uppercase tracking-widest text-white/40 mt-4 mb-1">Group multiplier (market group performance)</p>
+            <Row label="Top 20% de los ~25 groups por perf_monthly" value="× 1.15  (leader)" note="boost por estar en grupo líder rotacionalmente" />
+            <Row label="Bottom 20%"                                  value="× 0.85  (weak)"   note="penalty por grupo débil rotacionalmente" />
+            <Row label="Middle 60% o group_count &lt; 5 (sample escaso)" value="× 1.00  (neutral)" note="grupos con &lt;5 stocks no se rankean por confianza estadística" />
+            <p className="text-xs text-white/40 mt-2">
+              Group strength se basa en <code className="text-white/50">performance_monthly</code> del market group del stock
+              (e.g. "Electronic Technology", "Renewables"). Hay ~25 groups canónicos.
+            </p>
+
+            <p className="text-[11px] uppercase tracking-widest text-white/40 mt-4 mb-1">Regime cont multiplier (solo aplica a continuation_prob)</p>
+            <Row label="risk_on"    value="× 1.00" />
+            <Row label="choppy"     value="× 0.85" />
+            <Row label="transition" value="× 0.80" />
+            <Row label="risk_off"   value="× 0.65" />
+            <p className="text-xs text-white/40 mt-2">
+              Este multiplier NO afecta priority_score — solo modula la probabilidad de continuación
+              que se muestra en el card.
+            </p>
+          </Block>
+
+          <Block title="[5] observation_priority — el score para /live (distinto al de /actionable)">
+            <p className="text-xs text-white/60 mb-2">
+              <code className="text-white/50">/live</code> NO usa priority_score. Usa otro score 0–100 que mide
+              "qué tan worth monitoring es esta acción ANTES de que reclame":
+            </p>
+            <Row label="Structure intactness (30%)"     value="weekly_trend_quality × 15  +  d_ema50_atr scoring (>0.5 → +15)" note="estructura intacta = uptrend aún válido" />
+            <Row label="RS persistence (25%)"           value="RS ≥ 110 → 25  /  ≥ 105 → 20  /  ≥ 100 → 15  /  ≥ 97 → 10  /  ≥ 95 → 5" note="RS aguantando durante el pullback es la señal institucional clave" />
+            <Row label="Pullback orderliness (20%)"     value="volume_contraction × 12 + rvol scoring" note="rvol &lt; 0.6 → fuerte dry-up; rvol &gt; 1.2 = distribution = 0" />
+            <Row label="Volatility contraction (15%)"   value="weekly_volatility_contraction × 10  +  weekly_tightness × 5" />
+            <Row label="Pullback depth quality (10%)"   value="d_ema21_atr ∈ [-1.5, -0.3] → 10 (sweet spot)  /  [-0.3, 0] → 6  /  [-3.0, -1.5] → 5  /  &lt; -3 → 2" note="sweet spot: pullback claro pero no demasiado profundo" />
+            <p className="text-xs text-white/40 mt-2">
+              <code className="text-white/50">/live</code> ordena: ENTERING_PULLBACK primero, luego pre_reclaim por observation_priority desc, luego strength. Top 10 sale.
+            </p>
+          </Block>
+
+          <Block title="[5] Sort + cutoff por lista">
+            <Row label="/actionable"           value="top 50 candidates ordenados por pullback_quality desc → score → top 12 por final_priority desc" note="DOBLE cutoff: SQL (top 50) y post-score (top 12)" />
+            <Row label="/live"                 value="top 10 — entering_pullback FIRST, luego pre_reclaim por observation_priority desc, tiebreak por strength" note="cutoff estricto en 10" />
+            <Row label="/queue/u-and-r"        value="todos los que pasan filtro — ordenados por (event_age asc, |d21_atr| asc, rs_spy desc)" note="sin cutoff numérico — el filtro es estricto, todos los survivors aparecen" />
+            <Row label="/queue/emerging-leaders" value="top 30 por perf_13w desc" note="solo los 30 con mejor performance trimestral" />
+            <Row label="/queue/building-bases"  value="todos los que pasan filtro — ordenados por (atr_range_last_20d asc, vcp_score desc)" note="primero la base más apretada" />
+          </Block>
+
+          <Block title="Por qué un setup puede pasar TODO y no aparecer">
+            <p className="text-xs text-white/60">
+              Caso real (ARWR, 2026-05-27): el stock pasa los 13 criterios de filtro de
+              <code className="text-white/50"> /actionable</code> con pullback_quality = 89.40 (el highest del universo).
+              Pero queda fuera del top 12 porque otros 12 stocks tienen final_priority ≥ 1.000 (clamp)
+              después de aplicar context × group multipliers. Resultado: ARWR pasa filtro pero no aparece.
+            </p>
+            <p className="text-xs text-white/60 mt-2">
+              Lo mismo puede pasar en <code className="text-white/50">/live</code> (cutoff 10) y <code className="text-white/50">/queue/emerging-leaders</code> (cutoff 30).
+              <strong className="text-white/80"> /queue/u-and-r y /queue/building-bases no tienen cutoff numérico</strong>:
+              el filtro hace todo el trabajo, todos los survivors aparecen.
+            </p>
+          </Block>
+
+          <Block title="Diagnosticar un símbolo específico — usar /stock/[symbol]">
+            <p className="text-xs text-white/60">
+              Escribí el ticker en el search del nav (esquina superior derecha). El page muestra
+              por cada lista los 3 estados posibles:
+            </p>
+            <p className="text-xs text-white/60 mt-2">
+              <span className="text-green-400">✓ verde</span> = pasa criterios <strong>Y</strong> aparece (con rank exacto N/total)<br />
+              <span className="text-amber-400">⚠ amber</span> = pasa criterios pero queda debajo del cutoff top-N (con explicación inline)<br />
+              <span className="text-red-400">✗ rojo</span> = falla uno o más criterios (expandible muestra cuáles y por cuánto)
+            </p>
+            <p className="text-xs text-white/40 mt-2">
+              Además abajo se muestra el detalle Minervini SEPA (8 criterios) y la historia de
+              transitions del último mes con outcome.
             </p>
           </Block>
         </Section>

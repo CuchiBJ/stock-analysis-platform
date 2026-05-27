@@ -28,10 +28,16 @@ export default function DashboardPage() {
     enabled: monitoredSymbols.length > 0,
   })
 
-  // Keyboard nav
+  // Keyboard nav — only when no input/textarea/contenteditable has focus
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey) return
+      const target = e.target as HTMLElement | null
+      if (target) {
+        const tag = target.tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+        if (target.isContentEditable) return
+      }
       if (e.key === 'r') window.location.reload()
       if (e.key === '1') document.getElementById('setups')?.scrollIntoView({ behavior: 'smooth' })
       if (e.key === '2') document.getElementById('transitions')?.scrollIntoView({ behavior: 'smooth' })

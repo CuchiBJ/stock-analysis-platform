@@ -1,0 +1,344 @@
+'use client'
+
+import { useEffect, useState } from 'react'
+import { useParams } from 'next/navigation'
+import { API_URL } from '@/lib/utils'
+import DashboardLayout from '@/components/layout/DashboardLayout'
+import Card from '@/components/base/Card'
+import LoadingSkeleton from '@/components/base/LoadingSkeleton'
+import GroupStrengthBadge from '@/components/shared/GroupStrengthBadge'
+import { CheckCircle2, XCircle, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react'
+
+interface Criterion {
+  name: string
+  actual: any
+  threshold: any
+  passes: boolean
+  kind: string
+}
+
+interface Cutoff {
+  kind: string
+  n: number
+  ranked_by: string
+  note: string
+}
+
+interface ListCheck {
+  key: string
+  name: string
+  passes: boolean
+  criteria: Criterion[]
+  cutoff?: Cutoff | null
+  appears_in_endpoint?: boolean
+  rank_in_endpoint?: number | null
+  total_in_endpoint?: number
+}
+
+interface TransitionEntry {
+  transition_type: string
+  date_detected: string | null
+  outcome_status: string
+}
+
+interface DiagnosticResponse {
+  header: {
+    symbol: string
+    name: string | null
+    sector: string | null
+    industry: string | null
+    market_group: string | null
+    current_price: number | null
+    has_metrics: boolean
+    metrics_date: string | null
+    is_latest: boolean
+  }
+  note?: string
+  lists: ListCheck[]
+  transition_history: TransitionEntry[]
+  market_context_applied: {
+    participation: string
+    leadership: string
+    score_multiplier: number
+    suppress_lenses: string[]
+    surface_warnings: string[]
+  } | null
+  group_strength: {
+    group: string | null
+    badge: 'leader' | 'neutral' | 'weak'
+    multiplier: number
+  } | null
+  minervini_status: Record<string, any> | null
+}
+
+function formatValue(v: any): string {
+  if (v === null || v === undefined) return 'null'
+  if (typeof v === 'number') {
+    if (Math.abs(v) >= 10_000) return Math.round(v).toLocaleString()
+    if (Number.isInteger(v)) return String(v)
+    return v.toFixed(2)
+  }
+  if (Array.isArray(v)) return `[${v.map(formatValue).join(', ')}]`
+  return String(v)
+}
+
+function ListRow({ lst }: { lst: ListCheck }) {
+  // Three states:
+  //   "in_list":     passes criteria AND appears in endpoint (or no cutoff)   → green
+  //   "below_cutoff": passes criteria but ranks below cutoff                  → amber
+  //   "fails":       at least one criterion fails                              → red
+  const hasCutoff = !!lst.cutoff
+  const state = !lst.passes
+    ? 'fails'
+    : hasCutoff && lst.appears_in_endpoint === false
+      ? 'below_cutoff'
+      : 'in_list'
+
+  const [open, setOpen] = useState(state !== 'in_list')
+
+  const Icon = state === 'in_list' ? CheckCircle2 : state === 'below_cutoff' ? AlertTriangle : XCircle
+  const palette =
+    state === 'in_list' ? 'text-green-400' :
+    state === 'below_cutoff' ? 'text-amber-400' :
+    'text-red-400'
+  const failedCount = lst.criteria.filter(c => !c.passes).length
+  const totalInEndpoint = lst.total_in_endpoint ?? null
+
+  return (
+    <div className="border-b border-border/50 last:border-0">
+      <button
+        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/20 transition-colors text-left"
+        onClick={() => setOpen(!open)}
+      >
+        {open ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" /> : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />}
+        <Icon className={`w-4 h-4 ${palette}`} />
+        <span className="text-sm text-foreground flex-1">{lst.name}</span>
+        {state === 'in_list' && lst.rank_in_endpoint != null && totalInEndpoint != null && (
+          <span className="text-[10px] uppercase tracking-wider text-green-400">
+            rank {lst.rank_in_endpoint}/{totalInEndpoint}
+          </span>
+        )}
+        {state === 'below_cutoff' && (
+          <span className="text-[10px] uppercase tracking-wider text-amber-400">
+            below top {lst.cutoff?.n}
+          </span>
+        )}
+        {state === 'fails' && (
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            {failedCount} criteri{failedCount === 1 ? 'on' : 'a'} fail
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="px-4 pb-3 pt-1 bg-muted/10">
+          {lst.cutoff && (
+            <div className={`text-[11px] mb-2 px-2 py-1.5 rounded border ${
+              state === 'below_cutoff'
+                ? 'border-amber-500/30 bg-amber-500/5 text-amber-300'
+                : 'border-white/10 bg-white/5 text-muted-foreground'
+            }`}>
+              <span className="font-semibold">Cutoff:</span> top {lst.cutoff.n} by {lst.cutoff.ranked_by}.
+              {state === 'below_cutoff' && ' Passes filter but ranks below cutoff — does not appear in the list.'}
+            </div>
+          )}
+          <table className="w-full text-xs">
+            <tbody>
+              {lst.criteria.map((c, i) => (
+                <tr key={i} className="border-b border-border/30 last:border-0">
+                  <td className="py-1.5 pr-3 align-top">
+                    {c.passes
+                      ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400/70" />
+                      : <XCircle className="w-3.5 h-3.5 text-red-400" />}
+                  </td>
+                  <td className="py-1.5 pr-3 text-foreground/80">{c.name}</td>
+                  <td className="py-1.5 pr-3 font-mono tabular-nums text-right text-muted-foreground">
+                    {formatValue(c.actual)}
+                  </td>
+                  <td className="py-1.5 font-mono tabular-nums text-muted-foreground/60">
+                    vs {formatValue(c.threshold)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function outcomeBadge(status: string) {
+  const colors: Record<string, string> = {
+    SUCCESS: 'border-green-500/40 bg-green-500/10 text-green-400',
+    FAILURE: 'border-red-500/40 bg-red-500/10 text-red-400',
+    NEUTRAL: 'border-amber-500/40 bg-amber-500/10 text-amber-400',
+    PENDING: 'border-white/15 bg-white/5 text-white/50',
+    INSUFFICIENT_DATA: 'border-white/15 bg-white/5 text-white/40',
+  }
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded border uppercase tracking-wide ${colors[status] ?? colors.PENDING}`}>
+      {status}
+    </span>
+  )
+}
+
+export default function SymbolPage() {
+  const params = useParams()
+  const symbol = String(params?.symbol ?? '').toUpperCase()
+  const [data, setData] = useState<DiagnosticResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    fetch(`${API_URL}/api/v1/stocks/${symbol}/diagnostic`)
+      .then(async r => {
+        if (r.status === 404) throw new Error(`Symbol ${symbol} not found`)
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json()
+      })
+      .then(d => { if (!cancelled) { setData(d); setError(null) } })
+      .catch(e => { if (!cancelled) setError(e.message) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [symbol])
+
+  return (
+    <DashboardLayout>
+      <div className="max-w-4xl mx-auto space-y-4">
+        {loading && <LoadingSkeleton variant="card" />}
+
+        {error && (
+          <Card className="p-6 border-red-500/30 bg-red-500/5">
+            <p className="text-sm text-red-300">{error}</p>
+          </Card>
+        )}
+
+        {data && (
+          <>
+            {/* Header */}
+            <Card className="p-5">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-3">
+                    <h1 className="text-2xl font-bold text-foreground">{data.header.symbol}</h1>
+                    {data.group_strength && (
+                      <GroupStrengthBadge group={data.group_strength.group} badge={data.group_strength.badge} />
+                    )}
+                  </div>
+                  {data.header.name && (
+                    <p className="text-sm text-muted-foreground mt-1">{data.header.name}</p>
+                  )}
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {data.header.sector} · {data.header.industry}
+                  </p>
+                </div>
+                <div className="text-right">
+                  {data.header.current_price != null && (
+                    <div className="text-2xl font-mono tabular-nums text-foreground">
+                      ${data.header.current_price.toFixed(2)}
+                    </div>
+                  )}
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    metrics @ <span className="font-mono">{data.header.metrics_date ?? 'none'}</span>
+                    {!data.header.is_latest && data.header.metrics_date && (
+                      <span className="ml-1 text-amber-400">· not latest snapshot</span>
+                    )}
+                  </p>
+                </div>
+              </div>
+            </Card>
+
+            {data.note && (
+              <Card className="p-4 border-amber-500/30 bg-amber-500/5">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+                  <p className="text-xs text-amber-300">{data.note}</p>
+                </div>
+              </Card>
+            )}
+
+            {/* Status across lists */}
+            {data.lists.length > 0 && (
+              <Card className="p-0 overflow-hidden">
+                <div className="px-4 py-3 border-b border-border/50">
+                  <h2 className="text-xs uppercase tracking-widest text-muted-foreground">Status across lists</h2>
+                </div>
+                {data.lists.map(lst => <ListRow key={lst.key} lst={lst} />)}
+              </Card>
+            )}
+
+            {/* Market context applied */}
+            {data.market_context_applied && (
+              <Card className="p-4">
+                <h2 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">Market context applied</h2>
+                <div className="grid grid-cols-3 gap-4 text-sm">
+                  <div>
+                    <div className="text-[10px] text-muted-foreground uppercase tracking-wider">Participation</div>
+                    <div className="font-mono text-foreground mt-1">{data.market_context_applied.participation}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-muted-foreground uppercase tracking-wider">Leadership</div>
+                    <div className="font-mono text-foreground mt-1">{data.market_context_applied.leadership}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-muted-foreground uppercase tracking-wider">Score multiplier</div>
+                    <div className="font-mono text-foreground mt-1">×{data.market_context_applied.score_multiplier.toFixed(2)}</div>
+                  </div>
+                </div>
+                {data.market_context_applied.suppress_lenses.length > 0 && (
+                  <p className="text-[11px] text-amber-300 mt-3">
+                    Suppresses lenses: {data.market_context_applied.suppress_lenses.join(', ')}
+                  </p>
+                )}
+              </Card>
+            )}
+
+            {/* Transition history */}
+            {data.transition_history.length > 0 && (
+              <Card className="p-4">
+                <h2 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">
+                  Transition history · last 30 days
+                </h2>
+                <div className="space-y-1.5">
+                  {data.transition_history.map((t, i) => (
+                    <div key={i} className="flex items-center gap-3 text-xs">
+                      <span className="font-mono text-muted-foreground tabular-nums w-24 shrink-0">{t.date_detected}</span>
+                      <span className="font-mono text-foreground flex-1">{t.transition_type}</span>
+                      {outcomeBadge(t.outcome_status)}
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
+
+            {/* Minervini breakdown (optional, useful when quality_leader fails) */}
+            {data.minervini_status && (
+              <Card className="p-4">
+                <h2 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">Minervini SEPA breakdown</h2>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  {Object.entries(data.minervini_status).map(([key, val]: [string, any]) => (
+                    <div key={key} className={`px-2 py-1.5 rounded border ${val.passes ? 'border-green-500/30 bg-green-500/5 text-green-400' : 'border-red-500/30 bg-red-500/5 text-red-400'}`}>
+                      <div className="flex items-center gap-1.5">
+                        {val.passes ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                        <span className="font-mono">{key}</span>
+                      </div>
+                      {val.value != null && val.threshold != null && (
+                        <div className="text-[10px] opacity-75 mt-0.5 ml-4">
+                          {typeof val.value === 'number' ? val.value.toFixed(1) : val.value}
+                          {' / '}
+                          {typeof val.threshold === 'number' ? val.threshold.toFixed(1) : val.threshold}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
+          </>
+        )}
+      </div>
+    </DashboardLayout>
+  )
+}
