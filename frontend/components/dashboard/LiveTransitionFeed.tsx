@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import Link from 'next/link'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import {
@@ -153,9 +154,10 @@ export default function LiveTransitionFeed() {
 
       <div className="space-y-2 max-h-96 overflow-y-auto">
         {transitions.map((event, index) => (
-          <div
+          <Link
             key={`${event.symbol}-${index}`}
-            className={`p-3 rounded ${getSeverityColor(event.severity)} ${getRowAccent(event)} transition-all hover:opacity-90`}
+            href={`/stock/${event.symbol}`}
+            className={`block p-3 rounded ${getSeverityColor(event.severity)} ${getRowAccent(event)} transition-all hover:opacity-90`}
             style={{ opacity: index >= 8 ? 0.4 : 1 }}
           >
             {/* Row 1: symbol + badges + price context + time */}
@@ -220,7 +222,7 @@ export default function LiveTransitionFeed() {
                 <span>Vol: {event.volume_change_pct > 0 ? '+' : ''}{event.volume_change_pct.toFixed(0)}%</span>
               )}
             </div>
-          </div>
+          </Link>
         ))}
       </div>
     </Card>

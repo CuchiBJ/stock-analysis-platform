@@ -407,7 +407,7 @@ async def get_actionable_setups(
         actionable = []
         for setup in setups:
             days_in_state = days_in_state_map.get(setup.symbol, 1)
-            priority_score = await _calculate_priority_score(
+            priority_score, score_breakdown = await _calculate_priority_score_with_breakdown(
                 setup, regime, transition_engine, db, days_in_state
             )
             setup_type = _classify_setup_type(setup)
@@ -418,12 +418,32 @@ async def get_actionable_setups(
             # Apply context + group multipliers compositionally
             market_group = market_group_map.get(setup.symbol)
             group_mult = compute_group_multiplier(market_group, group_perfs)
-            final_priority = min(1.0, priority_score * ctx_multiplier.score_multiplier * group_mult.score_multiplier)
+            final_priority_unclamped = priority_score * ctx_multiplier.score_multiplier * group_mult.score_multiplier
+            final_priority = min(1.0, final_priority_unclamped)
+
+            # Augment the breakdown with the multiplier layer + final
+            score_breakdown_full = dict(score_breakdown)
+            score_breakdown_full['ctx_multiplier'] = {
+                'value': ctx_multiplier.score_multiplier,
+                'max_value': 1.10,
+                'kind': 'market_wide',
+            }
+            score_breakdown_full['group_multiplier'] = {
+                'value': group_mult.score_multiplier,
+                'max_value': 1.15,
+                'kind': 'group_rotation',
+                'badge': group_mult.badge,
+                'group': market_group,
+            }
+            score_breakdown_full['final_priority_unclamped'] = round(final_priority_unclamped, 4)
+            score_breakdown_full['final_priority'] = round(final_priority, 4)
+            score_breakdown_full['clamped'] = final_priority_unclamped > 1.0
 
             dist_pct, ema_label = _dist_to_setup_pct(setup, setup_type.replace('_pullback', '') if setup_type else '')
             actionable.append({
                 "symbol":               setup.symbol,
                 "priority_score":       final_priority,
+                "score_breakdown":      score_breakdown_full,
                 "continuation_prob":    round(cont_prob, 2),
                 "probability_source":   prob_source,
                 "sample_size":          sample_size,
@@ -576,34 +596,111 @@ async def _calculate_priority_score(
     db: AsyncSession,
     days_in_state: int = 1,
 ) -> float:
-    """Calculate priority score for actionable setup."""
-    score = 0.0
+    """Calculate priority score for actionable setup.
 
-    # Pullback quality (40%)
-    score += 0.4 * (setup.pullback_quality_score / 100.0)
+    Thin wrapper around _calculate_priority_score_with_breakdown for callers
+    that don't need the component-level detail.
+    """
+    score, _ = await _calculate_priority_score_with_breakdown(
+        setup, regime, transition_engine, db, days_in_state
+    )
+    return score
 
-    # Freshness (25%) — real decay based on days_in_state
-    score += 0.25 * _freshness_score(days_in_state)
 
-    # Regime alignment (20%) — graded by regime severity
-    score += _REGIME_ALIGNMENT_WEIGHTS.get(regime.regime.value, 0.14)
+async def _calculate_priority_score_with_breakdown(
+    setup: StockMetrics,
+    regime,
+    transition_engine: TransitionEngine,
+    db: AsyncSession,
+    days_in_state: int = 1,
+) -> tuple[float, dict]:
+    """Calculate priority score AND return a per-component breakdown.
 
-    # Leader quality (15%)
-    score += 0.15 * (setup.pullback_quality_score / 100.0)
+    The breakdown dict has shape:
+      {
+        'components': [{ name, value, max_possible, contribution, max_contribution,
+                         to_improve, kind, note }],
+        'base_score': float,        # sum of contributions BEFORE regime-state confidence adjust
+        'after_regime_adjust': float,  # final base post-RegimeAwareEngine
+      }
+    """
+    components: list[dict] = []
 
-    # Regime × setup-state confidence adjustment via RegimeAwareEngine
+    # ── 1. Pullback quality (40%) ────────────────────────────────────────
+    pq = (setup.pullback_quality_score or 0.0) / 100.0
+    pq_contrib = 0.4 * pq
+    components.append({
+        'name': 'pullback_quality',
+        'value': pq * 100,
+        'max_value': 100.0,
+        'contribution': pq_contrib,
+        'max_contribution': 0.40,
+        'to_improve': round(0.40 - pq_contrib, 4),
+        'kind': 'symbol_controllable',
+        'note': 'Improve via closer EMA9/21 proximity, tighter weekly range, more volume contraction, better weekly trend quality.',
+    })
+
+    # ── 2. Freshness (25%) ──────────────────────────────────────────────
+    fr = _freshness_score(days_in_state)
+    fr_contrib = 0.25 * fr
+    components.append({
+        'name': 'freshness',
+        'value': fr * 100,
+        'max_value': 100.0,
+        'contribution': fr_contrib,
+        'max_contribution': 0.25,
+        'to_improve': round(0.25 - fr_contrib, 4),
+        'kind': 'time_dependent',
+        'note': f'Days in state: {days_in_state}. Peak is 1-3d. Once aging, only a fresh state transition resets freshness.',
+    })
+
+    # ── 3. Regime alignment (max 0.20) ───────────────────────────────────
+    regime_val = _REGIME_ALIGNMENT_WEIGHTS.get(regime.regime.value, 0.14)
+    components.append({
+        'name': 'regime_alignment',
+        'value': regime_val,
+        'max_value': 0.20,
+        'contribution': regime_val,
+        'max_contribution': 0.20,
+        'to_improve': round(0.20 - regime_val, 4),
+        'kind': 'market_wide',
+        'note': f'Current regime: {regime.regime.value}. Market-wide, uncontrollable per-symbol.',
+    })
+
+    # ── 4. Leader quality (15%, same input as pq) ────────────────────────
+    lq_contrib = 0.15 * pq
+    components.append({
+        'name': 'leader_quality',
+        'value': pq * 100,
+        'max_value': 100.0,
+        'contribution': lq_contrib,
+        'max_contribution': 0.15,
+        'to_improve': round(0.15 - lq_contrib, 4),
+        'kind': 'symbol_controllable',
+        'note': 'Same input as pullback_quality (raises both contributions together).',
+    })
+
+    base_score = pq_contrib + fr_contrib + regime_val + lq_contrib
+
+    # ── 5. Regime × setup-state confidence adjust (RegimeAwareEngine) ────
     setup_type = _classify_setup_type(setup)
     setup_state = (
         SetupState.TIGHTENING if setup_type == 'ema9_pullback'
         else SetupState.CONTROLLED_PULLBACK
     )
+    final = base_score
     try:
-        adj = RegimeAwareEngine(db).calculate_regime_adjustment(setup_state, score, regime)
-        score = adj.adjusted_confidence
+        adj = RegimeAwareEngine(db).calculate_regime_adjustment(setup_state, base_score, regime)
+        final = adj.adjusted_confidence
     except Exception:
         pass
 
-    return score
+    breakdown = {
+        'components': components,
+        'base_score': round(base_score, 4),
+        'after_regime_adjust': round(final, 4),
+    }
+    return final, breakdown
 
 
 def _classify_setup_type(setup: StockMetrics) -> str:

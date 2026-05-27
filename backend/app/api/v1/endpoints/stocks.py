@@ -236,6 +236,53 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
     await _augment_with_rank("emerging_leaders", _fetch_emerging_symbols)
     await _augment_with_rank("building_bases", _fetch_bases_symbols)
 
+    # Per-symbol priority_score breakdown for /actionable — works even when the symbol
+    # is below the top-12 cutoff. This is what answers "what's holding me back?".
+    try:
+        from app.api.v1.endpoints.transitions import _calculate_priority_score_with_breakdown
+        from app.services.transition_engine import TransitionEngine
+        from app.services.market_regime_engine import MarketRegimeEngine
+
+        # Find the /actionable list check to attach breakdown to it.
+        # Compute regardless of pass/fail — the breakdown shows where the score
+        # components sit even when the symbol doesn't qualify (educational).
+        actionable_check = next((l for l in lists if l["key"] == "actionable"), None)
+        if actionable_check:
+            t_engine = TransitionEngine(db)
+            r_engine = MarketRegimeEngine(db)
+            regime = await r_engine.detect_regime()
+            # days_in_state: best-effort from setup_state_log
+            from app.api.v1.endpoints.transitions import _get_days_in_state
+            dis_map = await _get_days_in_state(db, [sym])
+            days_in_state = dis_map.get(sym, 1)
+            base_score, breakdown = await _calculate_priority_score_with_breakdown(
+                metrics, regime, t_engine, db, days_in_state
+            )
+            ctx_v = ctx_mult.score_multiplier
+            grp_v = group_mult.score_multiplier
+            final_unclamped = base_score * ctx_v * grp_v
+            final = min(1.0, final_unclamped)
+            breakdown_full = dict(breakdown)
+            breakdown_full["ctx_multiplier"] = {
+                "value": ctx_v,
+                "max_value": 1.10,
+                "kind": "market_wide",
+            }
+            breakdown_full["group_multiplier"] = {
+                "value": grp_v,
+                "max_value": 1.15,
+                "kind": "group_rotation",
+                "badge": group_mult.badge,
+                "group": stock.market_group,
+            }
+            breakdown_full["final_priority_unclamped"] = round(final_unclamped, 4)
+            breakdown_full["final_priority"] = round(final, 4)
+            breakdown_full["clamped"] = final_unclamped > 1.0
+            actionable_check["score_breakdown"] = breakdown_full
+    except Exception as e:
+        import logging as _log_mod
+        _log_mod.getLogger(__name__).warning(f"diagnostic: score_breakdown for {sym} failed: {e}")
+
     # Minervini per-criterion breakdown (helpful when quality_leader fails)
     minervini_status = evaluate_minervini_criteria(metrics)
 

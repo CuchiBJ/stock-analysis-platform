@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 import { API_URL } from '@/lib/utils'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
@@ -38,7 +39,6 @@ interface QueueResponse {
 
 interface Props {
   refreshKey: number
-  onSymbolClick: (symbol: string) => void
 }
 
 function trendColor(t: string) {
@@ -53,7 +53,7 @@ function tightnessColor(r: number) {
   return 'text-orange-400'
 }
 
-export default function BuildingBasesQueue({ refreshKey, onSymbolClick }: Props) {
+export default function BuildingBasesQueue({ refreshKey }: Props) {
   const [response, setResponse] = useState<QueueResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -96,7 +96,7 @@ export default function BuildingBasesQueue({ refreshKey, onSymbolClick }: Props)
       {rows.map(r => (
         <Card key={r.symbol} className="p-3 hover:bg-muted/30 cursor-pointer transition-colors">
           <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3 min-w-0 flex-1" onClick={() => onSymbolClick(r.symbol)}>
+            <Link href={`/stock/${r.symbol}`} className="flex items-center gap-3 min-w-0 flex-1">
               <div className="font-bold text-foreground w-16">{r.symbol}</div>
               {r.group_strength && (
                 <GroupStrengthBadge group={r.group_strength.group} badge={r.group_strength.badge} />
@@ -105,7 +105,7 @@ export default function BuildingBasesQueue({ refreshKey, onSymbolClick }: Props)
               <div className={`text-xs ${trendColor(r.volume_contraction_trend)}`}>
                 vol {r.volume_contraction_trend}
               </div>
-            </div>
+            </Link>
 
             <div className="flex items-center gap-4 text-xs">
               <div>

@@ -24,6 +24,36 @@ interface Cutoff {
   note: string
 }
 
+interface ScoreComponent {
+  name: string
+  value: number
+  max_value: number
+  contribution: number
+  max_contribution: number
+  to_improve: number
+  kind: 'symbol_controllable' | 'time_dependent' | 'market_wide' | 'group_rotation'
+  note: string
+}
+
+interface MultiplierInfo {
+  value: number
+  max_value: number
+  kind: string
+  badge?: string
+  group?: string | null
+}
+
+interface ScoreBreakdown {
+  components: ScoreComponent[]
+  base_score: number
+  after_regime_adjust: number
+  ctx_multiplier: MultiplierInfo
+  group_multiplier: MultiplierInfo
+  final_priority_unclamped: number
+  final_priority: number
+  clamped: boolean
+}
+
 interface ListCheck {
   key: string
   name: string
@@ -33,6 +63,7 @@ interface ListCheck {
   appears_in_endpoint?: boolean
   rank_in_endpoint?: number | null
   total_in_endpoint?: number
+  score_breakdown?: ScoreBreakdown | null
 }
 
 interface TransitionEntry {
@@ -161,8 +192,124 @@ function ListRow({ lst }: { lst: ListCheck }) {
               ))}
             </tbody>
           </table>
+          {lst.score_breakdown && <ScoreBreakdownTable bd={lst.score_breakdown} listPassed={lst.passes} />}
         </div>
       )}
+    </div>
+  )
+}
+
+function kindLabel(kind: ScoreComponent['kind']): { tag: string; cls: string } {
+  switch (kind) {
+    case 'symbol_controllable': return { tag: 'actionable',  cls: 'text-green-400'  }
+    case 'time_dependent':      return { tag: 'time-decay',  cls: 'text-amber-400'  }
+    case 'market_wide':         return { tag: 'market-wide', cls: 'text-white/40'   }
+    case 'group_rotation':      return { tag: 'group',       cls: 'text-cyan-400'   }
+    default:                    return { tag: kind,          cls: 'text-white/40'   }
+  }
+}
+
+function ScoreBreakdownTable({ bd, listPassed }: { bd: ScoreBreakdown; listPassed: boolean }) {
+  const components = bd.components
+  const ctxAtMax = bd.ctx_multiplier.value >= bd.ctx_multiplier.max_value - 0.001
+  const grpAtMax = bd.group_multiplier.value >= bd.group_multiplier.max_value - 0.001
+
+  return (
+    <div className="mt-4 pt-3 border-t border-white/10">
+      <p className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">
+        Score breakdown {!listPassed && <span className="text-amber-400">· hypothetical — list criteria fail</span>}
+      </p>
+
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-[10px] uppercase tracking-wider text-muted-foreground/60">
+            <th className="text-left  py-1 pr-3">Component</th>
+            <th className="text-right py-1 pr-3">Contribution</th>
+            <th className="text-right py-1 pr-3">Max</th>
+            <th className="text-right py-1 pr-3">To improve</th>
+            <th className="text-left  py-1">Kind</th>
+          </tr>
+        </thead>
+        <tbody>
+          {components.map((c, i) => {
+            const k = kindLabel(c.kind)
+            const filledPct = Math.min(100, Math.round((c.contribution / c.max_contribution) * 100))
+            return (
+              <tr key={i} className="border-b border-border/30 last:border-0">
+                <td className="py-1.5 pr-3 font-mono text-foreground/80">{c.name}</td>
+                <td className="py-1.5 pr-3 text-right font-mono tabular-nums">
+                  <span className="text-foreground">{c.contribution.toFixed(3)}</span>
+                  <span className="text-white/30 text-[10px] ml-1">({filledPct}%)</span>
+                </td>
+                <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-muted-foreground/60">
+                  {c.max_contribution.toFixed(3)}
+                </td>
+                <td className="py-1.5 pr-3 text-right font-mono tabular-nums">
+                  {c.to_improve > 0.001
+                    ? <span className="text-amber-300">+{c.to_improve.toFixed(3)}</span>
+                    : <span className="text-green-400">at max</span>}
+                </td>
+                <td className="py-1.5">
+                  <span className={`text-[10px] uppercase tracking-wider ${k.cls}`}>{k.tag}</span>
+                </td>
+              </tr>
+            )
+          })}
+          <tr className="border-b border-white/10 bg-white/3">
+            <td className="py-1.5 pr-3 font-mono text-foreground/60 italic">base score</td>
+            <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-foreground">
+              {bd.base_score.toFixed(3)}
+            </td>
+            <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-muted-foreground/60">1.000</td>
+            <td className="py-1.5 pr-3 text-right font-mono tabular-nums">
+              {bd.base_score >= 0.999
+                ? <span className="text-green-400">at max</span>
+                : <span className="text-amber-300">+{(1.0 - bd.base_score).toFixed(3)}</span>}
+            </td>
+            <td />
+          </tr>
+        </tbody>
+      </table>
+
+      <div className="mt-3 grid grid-cols-2 gap-x-4 text-xs">
+        <div className="flex justify-between">
+          <span className="text-foreground/80">× context multiplier</span>
+          <span className="font-mono tabular-nums">
+            <span className="text-foreground">{bd.ctx_multiplier.value.toFixed(2)}</span>
+            <span className="text-white/30 ml-1">/ {bd.ctx_multiplier.max_value.toFixed(2)}</span>
+            {ctxAtMax && <span className="text-green-400 ml-1">✓</span>}
+          </span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-foreground/80">
+            × group multiplier
+            {bd.group_multiplier.group && (
+              <span className="text-white/40 text-[10px] ml-1">({bd.group_multiplier.group})</span>
+            )}
+          </span>
+          <span className="font-mono tabular-nums">
+            <span className="text-foreground">{bd.group_multiplier.value.toFixed(2)}</span>
+            <span className="text-white/30 ml-1">/ {bd.group_multiplier.max_value.toFixed(2)}</span>
+            {grpAtMax && <span className="text-green-400 ml-1">✓</span>}
+          </span>
+        </div>
+      </div>
+
+      <div className="mt-3 pt-2 border-t border-white/10 flex justify-between items-center text-xs">
+        <span className="text-foreground/80 uppercase tracking-wider text-[10px]">
+          final priority
+        </span>
+        <div className="text-right">
+          <span className="font-mono tabular-nums text-base text-foreground">
+            {bd.final_priority.toFixed(3)}
+          </span>
+          {bd.clamped && (
+            <span className="text-[10px] text-amber-400 ml-2">
+              clamped from {bd.final_priority_unclamped.toFixed(3)}
+            </span>
+          )}
+        </div>
+      </div>
     </div>
   )
 }

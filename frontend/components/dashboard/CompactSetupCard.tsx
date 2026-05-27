@@ -1,5 +1,6 @@
 'use client'
 
+import Link from 'next/link'
 import { Flame } from 'lucide-react'
 import GroupStrengthBadge from '@/components/shared/GroupStrengthBadge'
 
@@ -83,12 +84,14 @@ export default function CompactSetupCard({
   const freshInfo = FRESHNESS[freshness] ?? FRESHNESS.fresh
 
   return (
-    <div className={`
-      w-full flex flex-col gap-2.5 p-3 rounded-lg
-      bg-white/5 border border-white/8 border-l-2 ${accentBorder}
-      ${isPriority ? 'ring-1 ring-orange-400/30 bg-orange-400/5' : ''}
-      cursor-pointer hover:bg-white/8 transition-colors
-    `}>
+    <Link
+      href={`/stock/${symbol}`}
+      className={`
+        w-full flex flex-col gap-2.5 p-3 rounded-lg
+        bg-white/5 border border-white/8 border-l-2 ${accentBorder}
+        ${isPriority ? 'ring-1 ring-orange-400/30 bg-orange-400/5' : ''}
+        cursor-pointer hover:bg-white/8 transition-colors
+      `}>
 
       {/* Row 1: Symbol + badges + continuation prob */}
       <div className="flex items-center justify-between">
@@ -152,6 +155,6 @@ export default function CompactSetupCard({
       {groupStrength && (
         <GroupStrengthBadge group={groupStrength.group} badge={groupStrength.badge} />
       )}
-    </div>
+    </Link>
   )
 }

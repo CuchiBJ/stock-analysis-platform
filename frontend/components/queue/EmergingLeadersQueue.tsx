@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 import { API_URL } from '@/lib/utils'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
@@ -46,7 +47,6 @@ interface QueueResponse {
 
 interface Props {
   refreshKey: number
-  onSymbolClick: (symbol: string) => void
 }
 
 const CRITERION_LABELS: Record<string, string> = {
@@ -60,7 +60,7 @@ const CRITERION_LABELS: Record<string, string> = {
   adr_gte_3pct: 'ADR ≥ 3%',
 }
 
-export default function EmergingLeadersQueue({ refreshKey, onSymbolClick }: Props) {
+export default function EmergingLeadersQueue({ refreshKey }: Props) {
   const [response, setResponse] = useState<QueueResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -171,12 +171,12 @@ export default function EmergingLeadersQueue({ refreshKey, onSymbolClick }: Prop
                   <span className="text-muted-foreground">RS: </span>
                   <span className="font-mono text-foreground">{r.rs_spy.toFixed(0)}</span>
                 </div>
-                <button
-                  onClick={() => onSymbolClick(r.symbol)}
+                <Link
+                  href={`/stock/${r.symbol}`}
                   className="text-primary hover:text-primary/80"
                 >
-                  history →
-                </button>
+                  detail →
+                </Link>
                 <a
                   href={r.tradingview_url}
                   target="_blank"

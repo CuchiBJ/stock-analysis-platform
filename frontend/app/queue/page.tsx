@@ -6,7 +6,6 @@ import DashboardLayout from '@/components/layout/DashboardLayout'
 import UnderCutRallyQueue from '@/components/queue/UnderCutRallyQueue'
 import EmergingLeadersQueue from '@/components/queue/EmergingLeadersQueue'
 import BuildingBasesQueue from '@/components/queue/BuildingBasesQueue'
-import SymbolHistoryDrawer from '@/components/queue/SymbolHistoryDrawer'
 
 type Tab = 'u-and-r' | 'emerging' | 'building-bases'
 
@@ -18,7 +17,6 @@ interface Counts {
 
 export default function QueuePage() {
   const [activeTab, setActiveTab] = useState<Tab>('u-and-r')
-  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [counts, setCounts] = useState<Counts>({ uAndR: null, emerging: null, buildingBases: null })
   const [refreshKey, setRefreshKey] = useState(0)
 
@@ -63,7 +61,7 @@ export default function QueuePage() {
       <header className="mb-6">
         <h1 className="text-2xl font-bold text-foreground">Setup Queue</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Líderes en corrección listos para ejecución. Tres lentes con criterios distintos.
+          Líderes en corrección listos para ejecución. Click en un símbolo para ver su diagnostic completo.
         </p>
       </header>
 
@@ -80,20 +78,10 @@ export default function QueuePage() {
       </div>
 
       <div>
-        {activeTab === 'u-and-r' && (
-          <UnderCutRallyQueue refreshKey={refreshKey} onSymbolClick={setSelectedSymbol} />
-        )}
-        {activeTab === 'emerging' && (
-          <EmergingLeadersQueue refreshKey={refreshKey} onSymbolClick={setSelectedSymbol} />
-        )}
-        {activeTab === 'building-bases' && (
-          <BuildingBasesQueue refreshKey={refreshKey} onSymbolClick={setSelectedSymbol} />
-        )}
+        {activeTab === 'u-and-r' && <UnderCutRallyQueue refreshKey={refreshKey} />}
+        {activeTab === 'emerging' && <EmergingLeadersQueue refreshKey={refreshKey} />}
+        {activeTab === 'building-bases' && <BuildingBasesQueue refreshKey={refreshKey} />}
       </div>
-
-      {selectedSymbol && (
-        <SymbolHistoryDrawer symbol={selectedSymbol} onClose={() => setSelectedSymbol(null)} />
-      )}
     </div>
     </DashboardLayout>
   )

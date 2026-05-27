@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 import { API_URL } from '@/lib/utils'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
@@ -39,7 +40,6 @@ interface QueueResponse {
 
 interface Props {
   refreshKey: number
-  onSymbolClick: (symbol: string) => void
 }
 
 function transitionLabel(t: string) {
@@ -50,7 +50,7 @@ function ageLabel(d: number) {
   return d === 0 ? 'today' : d === 1 ? '1d ago' : `${d}d ago`
 }
 
-export default function UnderCutRallyQueue({ refreshKey, onSymbolClick }: Props) {
+export default function UnderCutRallyQueue({ refreshKey }: Props) {
   const [response, setResponse] = useState<QueueResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -134,7 +134,7 @@ export default function UnderCutRallyQueue({ refreshKey, onSymbolClick }: Props)
           className="p-3 hover:bg-muted/30 cursor-pointer transition-colors"
         >
           <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3 min-w-0 flex-1" onClick={() => onSymbolClick(r.symbol)}>
+            <Link href={`/stock/${r.symbol}`} className="flex items-center gap-3 min-w-0 flex-1">
               <div className="font-bold text-foreground w-16">{r.symbol}</div>
               <div className="text-[10px] uppercase tracking-wider text-muted-foreground bg-muted/50 px-2 py-0.5 rounded">
                 {transitionLabel(r.transition_type)}
@@ -143,7 +143,7 @@ export default function UnderCutRallyQueue({ refreshKey, onSymbolClick }: Props)
                 <GroupStrengthBadge group={r.group_strength.group} badge={r.group_strength.badge} />
               )}
               <div className="text-xs text-muted-foreground">{ageLabel(r.event_age_days)}</div>
-            </div>
+            </Link>
 
             <div className="flex items-center gap-4 text-xs">
               <div>
