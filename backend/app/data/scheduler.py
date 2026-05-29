@@ -12,7 +12,7 @@ from datetime import datetime, time, timedelta
 import pytz
 import logging
 import asyncio
-import time
+import time as _time   # alias to avoid colliding with datetime.time
 import uuid
 import pandas as pd
 import yfinance as yf
@@ -91,7 +91,7 @@ class DataScheduler:
             # refresh the rest of the universe every cycle).
             fresh_cutoff = datetime.utcnow() - timedelta(minutes=5)
 
-            t0 = time.monotonic()
+            t0 = _time.monotonic()
             logger.info(f"Calculating SLOW metrics for {len(symbols)} symbols (parallel, concurrency=15)...")
 
             semaphore = asyncio.Semaphore(15)
@@ -122,7 +122,7 @@ class DataScheduler:
 
             results = await asyncio.gather(*(_process_one(sym) for sym in symbols), return_exceptions=True)
             count = sum(1 for r in results if r is True)
-            duration = round(time.monotonic() - t0, 2)
+            duration = round(_time.monotonic() - t0, 2)
             logger.info(f"SLOW metrics calculated for {count} symbols in {duration}s ({count/duration:.0f}/s)")
             asyncio.create_task(self._broadcast_metrics_updated(count, tier='all'))
             # Evaluate pending outcomes after each successful SLOW cycle
