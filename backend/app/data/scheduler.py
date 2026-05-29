@@ -12,6 +12,7 @@ from datetime import datetime, time, timedelta
 import pytz
 import logging
 import asyncio
+import time
 import uuid
 import pandas as pd
 import yfinance as yf
@@ -23,7 +24,11 @@ logger = logging.getLogger(__name__)
 class DataScheduler:
     def __init__(self, database_url=None):
         if database_url:
-            self.engine = create_async_engine(database_url, echo=False)
+            # Pool sized for parallel SLOW metrics calc (concurrency 15 + headroom
+            # for outcome_tracker / batch_scanner / discovery running in parallel).
+            self.engine = create_async_engine(
+                database_url, echo=False, pool_size=20, max_overflow=10,
+            )
             self.async_session_maker = async_sessionmaker(
                 self.engine, class_=AsyncSession, expire_on_commit=False
             )
@@ -72,41 +77,53 @@ class DataScheduler:
         self._slow_running = True
         count = 0
         try:
-            async with self._get_db() as db:
-                snapshot_date = None
-                if symbols is None:
+            snapshot_date = None
+            if symbols is None:
+                async with self._get_db() as db:
                     symbols, snapshot_date = await self._get_slow_symbols_and_date(db)
-                if not symbols:
-                    return 0
-                if limit:
-                    symbols = symbols[:limit]
+            if not symbols:
+                return 0
+            if limit:
+                symbols = symbols[:limit]
 
-                logger.info(f"Calculating SLOW metrics for {len(symbols)} symbols...")
-                calculator = MetricsCalculator(db)
-                # Write-protection window: skip only when a row was touched recently
-                # (avoids clobbering fresh FAST writes for TIER 1 symbols, but lets SLOW
-                # refresh the rest of the universe every cycle).
-                fresh_cutoff = datetime.utcnow() - timedelta(minutes=5)
-                for sym in symbols:
-                    if snapshot_date:
-                        existing = await db.execute(
-                            select(StockMetricsModel.updated_at)
-                            .where(
-                                StockMetricsModel.symbol == sym,
-                                StockMetricsModel.date >= snapshot_date,
-                                StockMetricsModel.updated_at >= fresh_cutoff,
-                            )
-                            .limit(1)
-                        )
-                        if existing.scalar():
-                            continue
+            # Write-protection window: skip only when a row was touched recently
+            # (avoids clobbering fresh FAST writes for TIER 1 symbols, but lets SLOW
+            # refresh the rest of the universe every cycle).
+            fresh_cutoff = datetime.utcnow() - timedelta(minutes=5)
+
+            t0 = time.monotonic()
+            logger.info(f"Calculating SLOW metrics for {len(symbols)} symbols (parallel, concurrency=15)...")
+
+            semaphore = asyncio.Semaphore(15)
+
+            async def _process_one(sym: str) -> bool:
+                """Process one symbol with its own session. Returns True if metrics were written."""
+                async with semaphore:
                     try:
-                        await calculator.calculate_metrics_for_symbol(sym)
-                        count += 1
+                        async with self._get_db() as db:
+                            if snapshot_date:
+                                existing = await db.execute(
+                                    select(StockMetricsModel.updated_at)
+                                    .where(
+                                        StockMetricsModel.symbol == sym,
+                                        StockMetricsModel.date >= snapshot_date,
+                                        StockMetricsModel.updated_at >= fresh_cutoff,
+                                    )
+                                    .limit(1)
+                                )
+                                if existing.scalar():
+                                    return False
+                            calculator = MetricsCalculator(db)
+                            await calculator.calculate_metrics_for_symbol(sym)
+                            await db.commit()
+                            return True
                     except Exception:
-                        continue
-                await db.commit()
-                logger.info(f"SLOW metrics calculated for {count} symbols")
+                        return False
+
+            results = await asyncio.gather(*(_process_one(sym) for sym in symbols), return_exceptions=True)
+            count = sum(1 for r in results if r is True)
+            duration = round(time.monotonic() - t0, 2)
+            logger.info(f"SLOW metrics calculated for {count} symbols in {duration}s ({count/duration:.0f}/s)")
             asyncio.create_task(self._broadcast_metrics_updated(count, tier='all'))
             # Evaluate pending outcomes after each successful SLOW cycle
             asyncio.create_task(self._evaluate_pending_outcomes())
