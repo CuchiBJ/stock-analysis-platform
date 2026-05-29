@@ -386,13 +386,15 @@ class DataScheduler:
 
                 # Post-close cycle: capture closing prices into a final SLOW so metrics
                 # reflect the actual close, not the last 15-min snapshot before 16:00 ET.
-                # Fires once per weekday, ~10 min after close (yfinance settle window).
+                # Uses Polygon Grouped Daily Bars (~3 sec for 6600+ symbols) instead of
+                # yfinance bulk (5-28 min). yfinance is the fallback if Polygon fails.
+                # Fires once per weekday, ~10 min after close.
                 if (now.weekday() < 5
                         and current_time >= post_close_window_start
                         and last_post_close_cycle_date != now.date()):
-                    logger.info(f"Post-close cycle: final price update + SLOW (current time: {current_time})")
+                    logger.info(f"Post-close cycle (Polygon EOD): current time {current_time}")
                     try:
-                        await self._update_prices()
+                        await self._update_prices_polygon_eod(now.date())
                         await self.trigger_metrics_update()
                         after = datetime.now(et_tz)
                         last_price_update = after
@@ -431,6 +433,33 @@ class DataScheduler:
             
             # Sleep for 30 seconds before checking again
             await asyncio.sleep(30)
+
+    async def _update_prices_polygon_eod(self, target_date) -> None:
+        """Update closing prices via Polygon Grouped Daily Bars.
+
+        ~3 seconds for 6600+ symbols (vs 5-28 min for yfinance bulk).
+        Polygon free tier supports this endpoint (1 API call total).
+        Falls back to yfinance bulk on Polygon failure.
+        """
+        try:
+            from app.data.ingestors.polygon_eod_ingestor import PolygonEODIngestor
+            async with self._get_db() as db:
+                ingestor = PolygonEODIngestor(db)
+                stats = await ingestor.ingest_eod(target_date)
+            if stats["written"] == 0:
+                logger.warning(
+                    f"Polygon EOD returned 0 rows for {target_date} — falling back to yfinance"
+                )
+                await self._update_prices()
+                return
+            logger.info(
+                f"Polygon EOD: wrote {stats['written']} prices for {target_date} "
+                f"in {stats['duration_sec']}s (Polygon-fetched {stats['fetched']}, "
+                f"{stats['fetched'] - stats['in_universe']} outside universe)"
+            )
+        except Exception as e:
+            logger.error(f"Polygon EOD ingestion failed: {e} — falling back to yfinance")
+            await self._update_prices()
 
     async def _update_prices(self):
         """Update prices for all active stocks using yfinance bulk download.
