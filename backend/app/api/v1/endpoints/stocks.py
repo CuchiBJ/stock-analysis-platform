@@ -485,9 +485,19 @@ def _build_quality_assessment(stock, m, lists, ctx_mult, group_mult) -> dict:
             if any("perf_1y" in c["name"] for c in structure_fails):
                 reasons.append(f"perf_1y={m.perf_1y:.0f}% (Stage 2 requiere >30%)")
             if any("52w low" in c["name"].lower() for c in structure_fails):
-                reasons.append("precio cercano al mínimo 52w (necesita ≥ low×1.5)")
+                if m.low_52w and m.low_52w > 0 and m.current_price:
+                    pct = (m.current_price - m.low_52w) / m.low_52w * 100
+                    reasons.append(
+                        f"recuperación desde mín 52w insuficiente ({pct:.0f}% sobre low, requiere ≥50%)"
+                    )
+                else:
+                    reasons.append("recuperación desde mín 52w insuficiente")
+            if any("52w high" in c["name"].lower() for c in structure_fails):
+                reasons.append("muy lejos del máximo 52w (>3 ATR)")
             if any("sma" in c["name"].lower() for c in structure_fails):
-                reasons.append("SMAs no alineadas")
+                reasons.append("SMAs no alineadas (medias largas no en orden alcista)")
+            if any("ema50" in c["name"].lower() for c in structure_fails):
+                reasons.append("precio bajo EMA50")
             headline = f"Setup roto — estructura no es de tendencia alcista ({'; '.join(reasons) if reasons else 'criterios Minervini fallan'})."
             verdict = "weak"
         elif ema_fails:
