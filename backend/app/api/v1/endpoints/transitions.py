@@ -40,7 +40,14 @@ router = APIRouter()
 # - Near 52-week high, far from low:     distance_to_high_52w_atr >= -3 ATR
 #                                        price >= 52w_low * 1.5
 # - Liquid and tradable:                 avg_volume_10d >= 800k, ADR >= 4%
+_LARGE_CAP_SYMBOLS = (
+    select(Stock.symbol).where(Stock.market_cap >= 600_000_000)
+)
+
 _INSTITUTIONAL_SETUP = and_(
+    # Universe membership: market cap ≥ $600M (excludes small/micro-caps + NULLs)
+    StockMetrics.symbol.in_(_LARGE_CAP_SYMBOLS),
+
     # Liquidity and volatility
     StockMetrics.avg_volume_10d >= 800_000,
     StockMetrics.adr_percent >= 4.0,
