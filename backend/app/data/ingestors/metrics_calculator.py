@@ -63,10 +63,15 @@ class MetricsCalculator:
         self._benchmark_returns_cache[cache_key] = returns
         return returns
 
+    # Default lookback: 260 trading days (~13 months) so the 52w high/low
+    # window (252 days) always has full coverage. Previous default of 200
+    # was ~9.5 months, causing high_52w/low_52w to miss real extremes that
+    # fell outside the window (e.g., AAPL's $194 low from June 2025 was
+    # invisible when days=200 was used in May 2026).
     async def calculate_metrics_for_symbol(
         self,
         symbol: str,
-        days: int = 200,
+        days: int = 260,
         as_of_date: Optional[str] = None,
     ) -> Optional[StockMetrics]:
         """Calculate and store metrics for a symbol.
@@ -325,7 +330,7 @@ class MetricsCalculator:
     async def calculate_metrics_batch(
         self,
         symbols: List[str],
-        days: int = 200
+        days: int = 260
     ) -> int:
         """Calculate metrics for multiple symbols"""
         count = 0
