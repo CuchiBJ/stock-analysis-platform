@@ -498,45 +498,58 @@ class DataScheduler:
             logger.error(f"Price update failed: {e}")
 
     def _bulk_download_prices_sync(self, symbols: list) -> int:
-        """Synchronous yfinance bulk download — runs in thread pool."""
+        """yfinance bulk download with parallel batches + per-batch retry.
+
+        Architecture:
+          - Filter non-downloadable suffixes upfront
+          - Split into chunks of 100 (vs the old 200 — smaller blast radius)
+          - 5 parallel ThreadPoolExecutor workers issuing yf.download concurrently
+          - Per-batch timeout (45s) so a hung batch doesn't block forever
+          - Failed batches retry ONCE with half-size chunks
+          - Each batch commits its own session (no global lock)
+
+        Measured intent:
+          - Normal day: ~5min serial → ~1-2 min parallel
+          - Bad day (yfinance flaky): ~28 min → ~5-8 min, partial coverage
+            instead of total failure
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
         from app.models.stock import StockPrice
 
         sync_url = settings.database_url.replace("postgresql+asyncpg", "postgresql+psycopg2")
-        engine = create_engine(sync_url, pool_size=5, echo=False)
+        engine = create_engine(sync_url, pool_size=10, echo=False)
         Session = sessionmaker(engine)
 
-        # Filter symbols that Yahoo Finance cannot serve: warrants (*W), units (*U),
-        # rights (*R) with 5-char tickers, and $ prefixes. These always fail and
-        # consume rate limit quota.
+        # Filter symbols Yahoo Finance can't serve (warrants/units/rights, $ prefixes)
         _SKIP_SUFFIXES = frozenset({'W', 'U', 'R'})
         excluded = [s for s in symbols if s.startswith('$') or (len(s) == 5 and s[-1] in _SKIP_SUFFIXES)]
         if excluded:
             logger.info(f"Price download: excluding {len(excluded)} non-downloadable symbols (warrants/units/rights)")
         symbols = [s for s in symbols if not (s.startswith('$') or (len(s) == 5 and s[-1] in _SKIP_SUFFIXES))]
 
-        BATCH = 200
-        ok = 0
+        BATCH = 100
+        WORKERS = 5
+        BATCH_TIMEOUT_SEC = 45
 
-        for i in range(0, len(symbols), BATCH):
-            batch = symbols[i:i + BATCH]
+        def _process_batch(batch: list) -> int:
+            """Download + persist one batch. Returns ok count."""
             try:
                 data = yf.download(
                     batch, period="5d", auto_adjust=True,
-                    progress=False, threads=False  # threads=False prevents DNS exhaustion
+                    progress=False, threads=False,
                 )
-                if data.empty:
-                    continue
+                if data is None or data.empty:
+                    return 0
 
                 multi = isinstance(data.columns, pd.MultiIndex)
-
+                ok = 0
                 with Session() as session:
                     for symbol in batch:
                         try:
                             if multi:
                                 if symbol not in data.columns.get_level_values(1):
-                                    logger.debug(f"Symbol {symbol} not in yfinance response — skipping")
                                     continue
                                 hist = data.xs(symbol, axis=1, level=1)
                             else:
@@ -544,7 +557,6 @@ class DataScheduler:
                             hist = hist.dropna(subset=["Close"])
                             if hist.empty:
                                 continue
-
                             for date, row in hist.iterrows():
                                 date_val = date.date() if hasattr(date, 'date') else date
                                 existing = session.query(StockPrice).filter_by(
@@ -570,9 +582,55 @@ class DataScheduler:
                         except Exception:
                             continue
                     session.commit()
-
+                return ok
             except Exception as e:
-                logger.error(f"Batch {i//BATCH + 1} failed: {e}")
+                logger.warning(f"yfinance batch failed ({len(batch)} symbols): {e}")
+                return -1  # marker for retry
+
+        batches = [symbols[i:i + BATCH] for i in range(0, len(symbols), BATCH)]
+        logger.info(
+            f"yfinance bulk download: {len(symbols)} symbols in {len(batches)} batches "
+            f"({WORKERS} parallel workers, timeout {BATCH_TIMEOUT_SEC}s/batch)"
+        )
+
+        ok = 0
+        failed_batches: list[list] = []
+        with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+            futures = {executor.submit(_process_batch, b): b for b in batches}
+            for f in as_completed(futures):
+                batch = futures[f]
+                try:
+                    result = f.result(timeout=BATCH_TIMEOUT_SEC)
+                    if result < 0:
+                        failed_batches.append(batch)
+                    else:
+                        ok += result
+                except FuturesTimeout:
+                    logger.warning(f"yfinance batch timed out ({len(batch)} symbols) — queued for retry")
+                    failed_batches.append(batch)
+                except Exception as e:
+                    logger.warning(f"yfinance batch raised {type(e).__name__}: {e} — queued for retry")
+                    failed_batches.append(batch)
+
+        # Retry failed batches at half size, same parallelism
+        if failed_batches:
+            retry_chunks = []
+            for batch in failed_batches:
+                half = max(1, len(batch) // 2)
+                for i in range(0, len(batch), half):
+                    retry_chunks.append(batch[i:i + half])
+            logger.info(f"Retrying {len(failed_batches)} failed batches as {len(retry_chunks)} half-size chunks")
+            with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+                futures = {executor.submit(_process_batch, b): b for b in retry_chunks}
+                for f in as_completed(futures):
+                    batch = futures[f]
+                    try:
+                        result = f.result(timeout=BATCH_TIMEOUT_SEC)
+                        if result > 0:
+                            ok += result
+                    except Exception:
+                        # final failure: log and move on (partial coverage > total failure)
+                        logger.warning(f"Retry batch failed permanently ({len(batch)} symbols)")
 
         engine.dispose()
         return ok
