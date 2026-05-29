@@ -450,49 +450,59 @@ def _build_quality_assessment(stock, m, lists, ctx_mult, group_mult) -> dict:
             "gaps": [],
         }
 
-    # Detect why criteria fails (if it does)
+    # Detect why criteria fails (if it does). Classify each fail into a category
+    # and surface the actual failing criteria in the gaps. Headline reflects the
+    # PRIMARY blocker but the operator always sees the full list.
     failing = [c for c in actionable_check.get("criteria", []) if not c["passes"]]
     if failing:
-        # Group failures
-        liquidity_fail = any("volume" in c["name"].lower() or "adr" in c["name"].lower() for c in failing)
-        ema_fail = any("ema" in c["name"].lower() or "EMA" in c["name"] for c in failing)
-        structure_fail = any(s in c["name"] for c in failing for s in ("SMA", "ema50", "EMA50", "ema200", "EMA200", "perf_1y"))
+        def has_kw(c, *kws):
+            n = c["name"].lower()
+            return any(k.lower() in n for k in kws)
 
-        if liquidity_fail:
-            return {
-                "verdict": "disqualified",
-                "headline": "Descalificado — no pasa el filtro institucional de liquidez (volumen ≥ 800k, ADR ≥ 4%).",
-                "strengths": [],
-                "gaps": [{
-                    "name": "Liquidez insuficiente",
-                    "severity": "blocker",
-                    "what_to_do": "Este símbolo no es tradeable a tamaño institucional. Esperar volumen sostenido o descartar.",
-                }],
-            }
-        if structure_fail:
-            return {
-                "verdict": "weak",
-                "headline": "Setup roto — fallan criterios estructurales (Stage 2 / Minervini SEPA).",
-                "strengths": [],
-                "gaps": [{
-                    "name": "Estructura no es de tendencia alcista",
-                    "severity": "blocker",
-                    "what_to_do": "Esperar a que precio/medias se realineen. Fuera de scope de setup institucional hasta entonces.",
-                }],
-            }
-        if ema_fail:
+        liquidity_fails = [c for c in failing if has_kw(c, "avg_volume", "≥ 800k", "≥ 700k", "≥ 500k", "≥ $5", "current_price ≥")]
+        volatility_fails = [c for c in failing if has_kw(c, "adr_percent", "adr ≥")]
+        structure_fails  = [c for c in failing if has_kw(c, "sma150", "sma200", "perf_1y", "52w low", "52W low", "52w high", "52W high", "price > ema50", "price > sma")]
+        ema_fails        = [c for c in failing if has_kw(c, "ema9 distance", "ema21 distance", "ema9 or ema21")]
+        pq_fails         = [c for c in failing if has_kw(c, "pullback_quality")]
+
+        # Build a gap entry per failing criterion (REAL granular info)
+        gap_list = [{
+            "name": c["name"],
+            "severity": "blocker",
+            "what_to_do": f"Valor actual: {c['actual']} — umbral: {c['threshold']}.",
+        } for c in failing]
+
+        # Pick the most specific headline based on which category has fails
+        if liquidity_fails:
+            headline = "Descalificado por liquidez — volumen/precio mínimo no se cumple."
+            verdict = "disqualified"
+        elif volatility_fails and not structure_fails and not ema_fails:
+            headline = f"ADR insuficiente — la acción no se mueve lo suficiente diario para el setup ({m.adr_percent:.2f}% vs ≥4% requerido)."
+            verdict = "weak"
+        elif structure_fails:
+            # Build a specific reason describing which structural criteria fail
+            reasons = []
+            if any("perf_1y" in c["name"] for c in structure_fails):
+                reasons.append(f"perf_1y={m.perf_1y:.0f}% (Stage 2 requiere >30%)")
+            if any("52w low" in c["name"].lower() for c in structure_fails):
+                reasons.append("precio cercano al mínimo 52w (necesita ≥ low×1.5)")
+            if any("sma" in c["name"].lower() for c in structure_fails):
+                reasons.append("SMAs no alineadas")
+            headline = f"Setup roto — estructura no es de tendencia alcista ({'; '.join(reasons) if reasons else 'criterios Minervini fallan'})."
+            verdict = "weak"
+        elif ema_fails:
             d9 = m.distance_to_ema9_atr
             d21 = m.distance_to_ema21_atr
-            return {
-                "verdict": "mid",
-                "headline": "Fuera de zona de pullback — precio extendido respecto a EMAs cortas.",
-                "strengths": [],
-                "gaps": [{
-                    "name": "Distancia EMA fuera de rango",
-                    "severity": "blocker",
-                    "what_to_do": f"Esperar pullback: precio debe estar en [-1.0, +0.5] ATR de EMA9 ({d9:+.2f} actual) o EMA21 ({d21:+.2f} actual).",
-                }],
-            }
+            headline = f"Fuera de zona de pullback — precio extendido (EMA9 {d9:+.2f} ATR, EMA21 {d21:+.2f} ATR; rango requerido [-1.0, +0.5])."
+            verdict = "mid"
+        elif pq_fails:
+            headline = f"Pullback quality bajo ({m.pullback_quality_score:.0f}/100 < 55 requerido)."
+            verdict = "weak"
+        else:
+            headline = f"Falla 1+ criterio del setup institucional."
+            verdict = "weak"
+
+        return {"verdict": verdict, "headline": headline, "strengths": [], "gaps": gap_list}
 
     # Criteria passed — analyze the score breakdown to find gaps
     components = bd["components"]
