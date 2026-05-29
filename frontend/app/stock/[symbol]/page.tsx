@@ -76,6 +76,23 @@ interface ScoreBreakdown {
   clamped: boolean
 }
 
+interface RankRow {
+  symbol: string | null
+  values: Record<string, any>
+}
+
+interface RankExplanation {
+  list_key: string
+  sort_key_label: string
+  key_fields: { field: string; label: string; direction: string }[]
+  this_symbol: RankRow
+  top_symbol: RankRow
+  above_symbol: RankRow | null
+  below_symbol: RankRow | null
+  deciding_factor: string | null
+  narrative: string
+}
+
 interface ListCheck {
   key: string
   name: string
@@ -86,6 +103,7 @@ interface ListCheck {
   rank_in_endpoint?: number | null
   total_in_endpoint?: number
   score_breakdown?: ScoreBreakdown | null
+  rank_explanation?: RankExplanation | null
 }
 
 interface TransitionEntry {
@@ -212,6 +230,7 @@ function ListRow({ lst }: { lst: ListCheck }) {
       </button>
       {open && (
         <div className="px-4 pb-3 pt-1 bg-muted/10">
+          {lst.rank_explanation && <RankExplanationBlock rx={lst.rank_explanation} />}
           {lst.cutoff && (
             <div className={`text-[11px] mb-2 px-2 py-1.5 rounded border ${
               state === 'below_cutoff'
@@ -245,6 +264,87 @@ function ListRow({ lst }: { lst: ListCheck }) {
           {lst.score_breakdown && <ScoreBreakdownTable bd={lst.score_breakdown} listPassed={lst.passes} />}
         </div>
       )}
+    </div>
+  )
+}
+
+function formatRankValue(v: any): string {
+  if (v === null || v === undefined) return '—'
+  if (typeof v === 'boolean') return v ? 'true' : 'false'
+  if (typeof v === 'number') {
+    if (Math.abs(v) >= 100) return v.toFixed(1)
+    return v.toFixed(2)
+  }
+  return String(v)
+}
+
+function RankExplanationBlock({ rx }: { rx: RankExplanation }) {
+  return (
+    <div className="mt-3 mb-3 px-3 py-2.5 rounded border border-cyan-500/30 bg-cyan-500/5">
+      <p className="text-[10px] uppercase tracking-widest text-cyan-300/80 mb-1.5">
+        Por qué este rank
+      </p>
+      <p className="text-xs text-foreground/90 mb-2 leading-snug">{rx.narrative}</p>
+
+      <div className="text-[10px] text-muted-foreground mb-2">
+        <span className="font-semibold text-white/70">Sort:</span> {rx.sort_key_label}
+        {rx.deciding_factor && (
+          <span className="ml-2">
+            · <span className="font-semibold text-cyan-300">Factor decisivo:</span> {rx.deciding_factor}
+          </span>
+        )}
+      </div>
+
+      <table className="w-full text-[11px]">
+        <thead>
+          <tr className="text-[9px] uppercase tracking-wider text-muted-foreground/60">
+            <th className="text-left  py-1 pr-3">Símbolo</th>
+            {rx.key_fields.map((kf, i) => (
+              <th key={i} className="text-right py-1 pr-3">{kf.field}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          <tr className="text-green-400/90">
+            <td className="py-1 pr-3 font-mono">
+              {rx.top_symbol.symbol} <span className="text-[9px] opacity-60">(rank 1)</span>
+            </td>
+            {rx.key_fields.map((kf, i) => (
+              <td key={i} className="py-1 pr-3 text-right font-mono tabular-nums">
+                {formatRankValue(rx.top_symbol.values[kf.field])}
+              </td>
+            ))}
+          </tr>
+          {rx.above_symbol && (
+            <tr className="text-white/60">
+              <td className="py-1 pr-3 font-mono">{rx.above_symbol.symbol} <span className="text-[9px] opacity-60">(↑)</span></td>
+              {rx.key_fields.map((kf, i) => (
+                <td key={i} className="py-1 pr-3 text-right font-mono tabular-nums">
+                  {formatRankValue(rx.above_symbol!.values[kf.field])}
+                </td>
+              ))}
+            </tr>
+          )}
+          <tr className="text-foreground border-y border-cyan-500/20 bg-cyan-500/5">
+            <td className="py-1.5 pr-3 font-mono font-semibold">{rx.this_symbol.symbol} <span className="text-[9px] opacity-60">(este)</span></td>
+            {rx.key_fields.map((kf, i) => (
+              <td key={i} className="py-1.5 pr-3 text-right font-mono tabular-nums">
+                {formatRankValue(rx.this_symbol.values[kf.field])}
+              </td>
+            ))}
+          </tr>
+          {rx.below_symbol && (
+            <tr className="text-white/50">
+              <td className="py-1 pr-3 font-mono">{rx.below_symbol.symbol} <span className="text-[9px] opacity-60">(↓)</span></td>
+              {rx.key_fields.map((kf, i) => (
+                <td key={i} className="py-1 pr-3 text-right font-mono tabular-nums">
+                  {formatRankValue(rx.below_symbol!.values[kf.field])}
+                </td>
+              ))}
+            </tr>
+          )}
+        </tbody>
+      </table>
     </div>
   )
 }

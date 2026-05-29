@@ -186,55 +186,75 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
     ]
 
     # Compute actual inclusion + rank by hitting the same endpoints/services the UI uses.
-    # This makes "passes criteria + cutoff" answers truthful: passing filter ≠ appearing.
+    # ALSO captures the sort-key signature so we can explain WHY this symbol is at its rank.
     import logging as _logging
     _log = _logging.getLogger(__name__)
 
-    async def _augment_with_rank(list_key: str, fetch_symbols):
+    async def _augment_with_rank(list_key: str, fetch_rows, key_fields: list[dict]):
+        """fetch_rows() returns list[dict] with at least 'symbol' + the sort-key fields.
+        key_fields is [{field, direction, label}] in sort precedence order.
+        """
         try:
-            symbols_in_order = await fetch_symbols()
+            rows = await fetch_rows()
+            symbols_in_order = [r["symbol"] for r in rows]
             in_list = sym in symbols_in_order
+            rank = symbols_in_order.index(sym) + 1 if in_list else None
             for lst in lists:
                 if lst["key"] == list_key:
                     lst["appears_in_endpoint"] = in_list
-                    lst["rank_in_endpoint"] = (
-                        symbols_in_order.index(sym) + 1 if in_list else None
-                    )
-                    lst["total_in_endpoint"] = len(symbols_in_order)
+                    lst["rank_in_endpoint"] = rank
+                    lst["total_in_endpoint"] = len(rows)
+                    if in_list and len(rows) > 0:
+                        lst["rank_explanation"] = _build_rank_explanation(
+                            list_key, rows, sym, rank, key_fields
+                        )
                     break
         except Exception as e:
             _log.warning(f"diagnostic: rank for {sym} in {list_key} failed: {e}")
 
-    async def _fetch_actionable_symbols():
+    async def _fetch_actionable_rows():
         from app.api.v1.endpoints.transitions import get_actionable_setups
         resp = await get_actionable_setups(limit=12, db=db)
-        return [s["symbol"] for s in resp.get("setups", [])]
+        return resp.get("setups", [])
 
-    async def _fetch_live_symbols():
+    async def _fetch_live_rows():
         from app.api.v1.endpoints.transitions import get_live_transitions
         resp = await get_live_transitions(limit=20, background_tasks=None, db=db)
-        return [s["symbol"] for s in resp] if isinstance(resp, list) else []
+        return resp if isinstance(resp, list) else []
 
-    async def _fetch_uar_symbols():
+    async def _fetch_uar_rows():
         from app.services.setup_queue_service import SetupQueueService
-        resp = await SetupQueueService(db).list_u_and_r()
-        return [r["symbol"] for r in resp]
+        return await SetupQueueService(db).list_u_and_r()
 
-    async def _fetch_emerging_symbols():
+    async def _fetch_emerging_rows():
         from app.services.setup_queue_service import SetupQueueService
-        resp = await SetupQueueService(db).list_emerging_leaders()
-        return [r["symbol"] for r in resp]
+        return await SetupQueueService(db).list_emerging_leaders()
 
-    async def _fetch_bases_symbols():
+    async def _fetch_bases_rows():
         from app.services.setup_queue_service import SetupQueueService
-        resp = await SetupQueueService(db).list_building_bases()
-        return [r["symbol"] for r in resp]
+        return await SetupQueueService(db).list_building_bases()
 
-    await _augment_with_rank("actionable", _fetch_actionable_symbols)
-    await _augment_with_rank("live", _fetch_live_symbols)
-    await _augment_with_rank("u_and_r", _fetch_uar_symbols)
-    await _augment_with_rank("emerging_leaders", _fetch_emerging_symbols)
-    await _augment_with_rank("building_bases", _fetch_bases_symbols)
+    await _augment_with_rank("actionable", _fetch_actionable_rows, [
+        {"field": "priority_score", "direction": "desc", "label": "priority_score"},
+    ])
+    await _augment_with_rank("live", _fetch_live_rows, [
+        {"field": "transition", "direction": "category", "label": "transition type (entering_pullback primero)"},
+        {"field": "is_pre_reclaim", "direction": "desc_bool", "label": "is_pre_reclaim flag"},
+        {"field": "observation_priority", "direction": "desc", "label": "observation_priority"},
+        {"field": "strength", "direction": "desc", "label": "strength"},
+    ])
+    await _augment_with_rank("u_and_r", _fetch_uar_rows, [
+        {"field": "event_age_days", "direction": "asc", "label": "event_age (más nuevo primero)"},
+        {"field": "distance_to_ema21_atr", "direction": "abs_asc", "label": "|distancia EMA21| (más cerca primero)"},
+        {"field": "rs_spy", "direction": "desc", "label": "RS vs SPY"},
+    ])
+    await _augment_with_rank("emerging_leaders", _fetch_emerging_rows, [
+        {"field": "perf_13w", "direction": "desc", "label": "perf_13w"},
+    ])
+    await _augment_with_rank("building_bases", _fetch_bases_rows, [
+        {"field": "atr_range_last_20d", "direction": "asc", "label": "ATR range 20d (más apretado primero)"},
+        {"field": "vcp_score", "direction": "desc", "label": "VCP score"},
+    ])
 
     # Per-symbol priority_score breakdown for /actionable — works even when the symbol
     # is below the top-12 cutoff. This is what answers "what's holding me back?".
@@ -298,6 +318,108 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
         "group_strength": group_strength_payload,
         "minervini_status": minervini_status,
         "assessment": assessment,
+    }
+
+
+def _build_rank_explanation(
+    list_key: str,
+    rows: list[dict],
+    sym: str,
+    rank: int,
+    key_fields: list[dict],
+) -> dict:
+    """Explain WHY this symbol is at its rank in this list.
+
+    Compares against:
+    - the top symbol (rank 1)
+    - the immediately-above symbol (rank-1) if not at top
+    - the immediately-below symbol (rank+1) if not at bottom
+
+    Returns dict with sort_key_label, this_symbol values, comparisons,
+    and a plain-language narrative.
+    """
+    def get_val(row: dict, field: str):
+        return row.get(field)
+
+    def fmt(v):
+        if v is None:
+            return "n/a"
+        if isinstance(v, float):
+            return f"{v:.2f}"
+        return str(v)
+
+    this_row = rows[rank - 1]
+    top_row = rows[0]
+    above_row = rows[rank - 2] if rank > 1 else None
+    below_row = rows[rank] if rank < len(rows) else None
+
+    # Extract values per sort key
+    this_values = {kf["field"]: get_val(this_row, kf["field"]) for kf in key_fields}
+    top_values = {kf["field"]: get_val(top_row, kf["field"]) for kf in key_fields}
+
+    # Determine the deciding factor — first key where this differs from top
+    def is_better(this_v, top_v, direction):
+        if this_v is None or top_v is None:
+            return False
+        if direction == "desc":
+            return this_v > top_v
+        if direction == "asc":
+            return this_v < top_v
+        if direction == "abs_asc":
+            return abs(this_v) < abs(top_v)
+        if direction == "category":
+            return this_v == top_v  # categorical equality
+        return False
+
+    deciding_factor = None
+    for kf in key_fields:
+        if this_values[kf["field"]] != top_values[kf["field"]]:
+            deciding_factor = kf
+            break
+
+    sort_label = " → ".join(kf["label"] for kf in key_fields)
+
+    # Build narrative
+    parts = []
+    if rank == 1:
+        parts.append(f"Top de la lista — gana por {key_fields[0]['label']}.")
+    else:
+        if deciding_factor:
+            this_v = fmt(this_values[deciding_factor["field"]])
+            top_v = fmt(top_values[deciding_factor["field"]])
+            top_sym = top_row.get("symbol", "?")
+            parts.append(
+                f"Rank #{rank} vs top ({top_sym}): {deciding_factor['label']} "
+                f"= {this_v} (this) vs {top_v} (top)."
+            )
+        else:
+            parts.append(f"Empate en sort keys con top — orden de inserción.")
+
+        if above_row is not None and deciding_factor:
+            ab_sym = above_row.get("symbol", "?")
+            ab_v = fmt(get_val(above_row, deciding_factor["field"]))
+            parts.append(
+                f"Inmediato encima ({ab_sym}): {deciding_factor['label']} = {ab_v}."
+            )
+
+    return {
+        "list_key": list_key,
+        "sort_key_label": sort_label,
+        "key_fields": [{"field": kf["field"], "label": kf["label"], "direction": kf["direction"]} for kf in key_fields],
+        "this_symbol": {"symbol": sym, "values": this_values},
+        "top_symbol": {"symbol": top_row.get("symbol"), "values": top_values},
+        "above_symbol": (
+            {"symbol": above_row.get("symbol"),
+             "values": {kf["field"]: get_val(above_row, kf["field"]) for kf in key_fields}}
+            if above_row else None
+        ),
+        "below_symbol": (
+            {"symbol": below_row.get("symbol"),
+             "values": {kf["field"]: get_val(below_row, kf["field"]) for kf in key_fields}}
+            if below_row else None
+        ),
+        "deciding_factor": deciding_factor["label"] if deciding_factor else None,
+        "narrative": " ".join(parts),
     }
 
 
