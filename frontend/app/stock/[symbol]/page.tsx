@@ -7,6 +7,7 @@ import DashboardLayout from '@/components/layout/DashboardLayout'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import GroupStrengthBadge from '@/components/shared/GroupStrengthBadge'
+import TakeFromQueueButton from '@/components/queue/TakeFromQueueButton'
 import { CheckCircle2, XCircle, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react'
 
 interface Criterion {
@@ -656,6 +657,9 @@ export default function SymbolPage() {
               </Card>
             )}
 
+            <TakeFromQueueCTAFromLists symbol={symbol} lists={data.lists} />
+
+
             {/* Quality Assessment — top-level "why is this where it is + what's missing" */}
             {data.assessment && <AssessmentCard a={data.assessment} />}
 
@@ -740,5 +744,40 @@ export default function SymbolPage() {
         )}
       </div>
     </DashboardLayout>
+  )
+}
+
+// Maps diagnostic list names → setup enum values understood by the journal vocab.
+const LENS_TO_SETUP: Record<string, string> = {
+  'Queue · Undercut & Rally': 'u_and_r',
+  'Queue · Emerging Leaders': 'emerging',
+  'Queue · Building Bases':   'building_base',
+}
+
+function TakeFromQueueCTAFromLists({ symbol, lists }: { symbol: string; lists: ListCheck[] }) {
+  const activeLenses: { name: string; setup: string }[] = []
+  for (const l of lists) {
+    const setup = LENS_TO_SETUP[l.name]
+    if (!setup) continue
+    const allPass = l.criteria && l.criteria.length > 0 && l.criteria.every(c => c.passes)
+    if (allPass) activeLenses.push({ name: l.name.replace('Queue · ', ''), setup })
+  }
+  if (activeLenses.length === 0) return null
+  return (
+    <Card className="p-3 border-blue-500/30 bg-blue-500/5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs text-blue-300">
+          Activo en {activeLenses.length} {activeLenses.length === 1 ? 'lente' : 'lentes'} del sistema
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {activeLenses.map(l => (
+            <div key={l.setup} className="flex items-center gap-1.5 text-[11px]">
+              <span className="text-muted-foreground">{l.name}:</span>
+              <TakeFromQueueButton symbol={symbol} setup={l.setup} />
+            </div>
+          ))}
+        </div>
+      </div>
+    </Card>
   )
 }

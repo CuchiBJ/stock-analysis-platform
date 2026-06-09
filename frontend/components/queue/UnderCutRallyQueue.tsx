@@ -7,6 +7,7 @@ import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import { ExternalLink, EyeOff, Eye } from 'lucide-react'
 import GroupStrengthBadge from '@/components/shared/GroupStrengthBadge'
+import TakeFromQueueButton from '@/components/queue/TakeFromQueueButton'
 
 interface GroupStrength {
   group: string | null
@@ -175,6 +176,7 @@ export default function UnderCutRallyQueue({ refreshKey }: Props) {
               >
                 TV <ExternalLink className="w-3 h-3" />
               </a>
+              <TakeFromQueueButton symbol={r.symbol} setup="u_and_r" />
             </div>
           </div>
         </Card>

@@ -7,6 +7,7 @@ import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import { ExternalLink, ChevronDown, ChevronRight, EyeOff, Eye } from 'lucide-react'
 import GroupStrengthBadge from '@/components/shared/GroupStrengthBadge'
+import TakeFromQueueButton from '@/components/queue/TakeFromQueueButton'
 
 interface CriterionStatus {
   passes: boolean
@@ -185,6 +186,7 @@ export default function EmergingLeadersQueue({ refreshKey }: Props) {
                 >
                   TV <ExternalLink className="w-3 h-3" />
                 </a>
+                <TakeFromQueueButton symbol={r.symbol} setup="emerging" />
               </div>
             </div>
 

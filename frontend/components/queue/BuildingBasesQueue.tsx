@@ -7,6 +7,7 @@ import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import { ExternalLink } from 'lucide-react'
 import GroupStrengthBadge from '@/components/shared/GroupStrengthBadge'
+import TakeFromQueueButton from '@/components/queue/TakeFromQueueButton'
 
 interface GroupStrength {
   group: string | null
@@ -135,6 +136,7 @@ export default function BuildingBasesQueue({ refreshKey }: Props) {
               >
                 TV <ExternalLink className="w-3 h-3" />
               </a>
+              <TakeFromQueueButton symbol={r.symbol} setup="building_base" />
             </div>
           </div>
         </Card>
