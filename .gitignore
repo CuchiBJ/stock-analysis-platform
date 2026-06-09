@@ -44,12 +44,17 @@ build/
 *.sqlite
 *.sqlite3
 
-# IDE
+# IDE / agent tooling
 .vscode/
 .idea/
+.windsurf/
+.claude/
 *.swp
 *.swo
 *~
+
+# TypeScript build cache
+*.tsbuildinfo
 
 # OS
 .DS_Store
