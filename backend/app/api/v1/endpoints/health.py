@@ -1,10 +1,11 @@
-"""Data-pipeline health endpoint — single source of truth for the UI banner
-and the CLI health check. Returns latest dates, lag, and recent scheduler
-errors so a stale/broken pipeline becomes impossible to ignore.
+"""Data-pipeline health endpoint — single source of truth for the UI banner,
+the always-on PipelineHealthChip, and the CLI health check. Returns latest
+dates, lag, recent errors, per-cycle heartbeats, universe coverage, and
+market state so a stale/broken/partial pipeline becomes impossible to ignore.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, date as date_cls
+from datetime import datetime, timedelta, time as _time
 from typing import Optional
 
 import pytz
@@ -13,9 +14,133 @@ from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
-from app.models.stock import StockMetrics, StockPrice, SchedulerError
+from app.models.stock import (
+    StockMetrics,
+    StockPrice,
+    SchedulerError,
+    PipelineHeartbeat,
+)
 
 router = APIRouter(prefix="/health", tags=["health"])
+
+
+MARKET_OPEN_ET = _time(9, 30)
+MARKET_WARMUP_END_ET = _time(10, 30)
+MARKET_CLOSE_ET = _time(16, 0)
+AFTER_HOURS_END_ET = _time(20, 0)
+ET = pytz.timezone("US/Eastern")
+
+
+def compute_market_state(now_et: datetime) -> dict:
+    """Pure helper — derive market session phase from an ET-aware datetime."""
+    is_weekday = now_et.weekday() < 5
+    t = now_et.time()
+    if not is_weekday:
+        return {
+            "is_open": False,
+            "is_warmup": False,
+            "minutes_since_open": None,
+            "session_phase": "closed",
+        }
+
+    open_dt = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    minutes_since_open = int((now_et - open_dt).total_seconds() // 60)
+
+    if t < MARKET_OPEN_ET:
+        phase = "pre_market"
+        is_open = False
+        is_warmup = False
+    elif t <= MARKET_WARMUP_END_ET:
+        phase = "warmup"
+        is_open = True
+        is_warmup = True
+    elif t <= MARKET_CLOSE_ET:
+        phase = "regular"
+        is_open = True
+        is_warmup = False
+    elif t <= AFTER_HOURS_END_ET:
+        phase = "after_hours"
+        is_open = False
+        is_warmup = False
+    else:
+        phase = "closed"
+        is_open = False
+        is_warmup = False
+
+    return {
+        "is_open": is_open,
+        "is_warmup": is_warmup,
+        "minutes_since_open": minutes_since_open,
+        "session_phase": phase,
+    }
+
+
+async def _coverage(db: AsyncSession, now_et: datetime) -> dict:
+    """Coverage = symbols refreshed today / total symbols with a price for today.
+
+    Denominator is the full processable universe (everything with a stock_price
+    row for the latest available date), not just the quality-filtered subset —
+    the operator wants to know how much of the pipeline has cycled, period.
+    """
+    latest_price_date = (await db.execute(select(func.max(StockPrice.date)))).scalar()
+    if latest_price_date is None:
+        return {"expected": 0, "actual": 0, "pct": 0.0}
+
+    expected_q = (
+        select(func.count(func.distinct(StockPrice.symbol)))
+        .where(StockPrice.date == latest_price_date)
+    )
+    expected = (await db.execute(expected_q)).scalar() or 0
+
+    market_open_et = ET.localize(
+        datetime.combine(now_et.date(), MARKET_OPEN_ET)
+    )
+    # Keep the tz-aware value: comparing a naive datetime parameter against a
+    # TIMESTAMPTZ column under asyncpg silently produces 0 matches because the
+    # naive value is interpreted in an unexpected zone. Tz-aware UTC is safe.
+    market_open_utc = market_open_et.astimezone(pytz.UTC)
+
+    actual_q = (
+        select(func.count(func.distinct(StockMetrics.symbol)))
+        .where(
+            StockMetrics.date == latest_price_date,
+            StockMetrics.updated_at >= market_open_utc,
+        )
+    )
+    actual = (await db.execute(actual_q)).scalar() or 0
+
+    pct = (actual / expected * 100.0) if expected > 0 else 0.0
+    return {"expected": int(expected), "actual": int(actual), "pct": round(pct, 1)}
+
+
+async def _heartbeats(db: AsyncSession) -> list[dict]:
+    rows = (
+        await db.execute(
+            select(PipelineHeartbeat).order_by(PipelineHeartbeat.cycle_name)
+        )
+    ).scalars().all()
+    now = datetime.utcnow()
+    out: list[dict] = []
+    for r in rows:
+        last_run = r.last_run_at
+        # Normalize to naive UTC for delta arithmetic
+        if last_run is not None and last_run.tzinfo is not None:
+            last_run_naive = last_run.astimezone(pytz.UTC).replace(tzinfo=None)
+        else:
+            last_run_naive = last_run
+        age_seconds = int((now - last_run_naive).total_seconds()) if last_run_naive else None
+        out.append({
+            "cycle_name": r.cycle_name,
+            "last_run_at": r.last_run_at.isoformat() if r.last_run_at else None,
+            "last_success_at": r.last_success_at.isoformat() if r.last_success_at else None,
+            "last_duration_seconds": float(r.last_duration_seconds or 0.0),
+            "symbols_processed": r.symbols_processed,
+            "symbols_expected": r.symbols_expected,
+            "status": r.status,
+            "last_error_message": r.last_error_message,
+            "age_seconds": age_seconds,
+        })
+    return out
 
 
 async def build_health_snapshot(db: AsyncSession) -> dict:
@@ -28,8 +153,7 @@ async def build_health_snapshot(db: AsyncSession) -> dict:
         metrics_lag_days = (price_latest - metrics_latest).days
     is_stale = bool(metrics_lag_days is not None and metrics_lag_days > 0)
 
-    et = pytz.timezone("US/Eastern")
-    now_et = datetime.now(et)
+    now_et = datetime.now(ET)
     today_et = now_et.date()
     is_weekday = today_et.weekday() < 5  # Mon=0 .. Fri=4
 
@@ -57,6 +181,10 @@ async def build_health_snapshot(db: AsyncSession) -> dict:
         for r in recent_rows
     ]
 
+    heartbeats = await _heartbeats(db)
+    coverage = await _coverage(db, now_et)
+    market_state = compute_market_state(now_et)
+
     warnings = []
     if is_stale:
         warnings.append(f"Stock metrics {metrics_lag_days} day(s) behind stock prices")
@@ -73,6 +201,9 @@ async def build_health_snapshot(db: AsyncSession) -> dict:
         "is_weekday": is_weekday,
         "recent_errors_24h": errors_count,
         "recent_errors": recent_errors,
+        "pipeline_heartbeats": heartbeats,
+        "coverage": coverage,
+        "market_state": market_state,
         "warnings": warnings,
     }
 

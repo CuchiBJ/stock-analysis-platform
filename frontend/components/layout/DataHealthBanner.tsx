@@ -1,47 +1,10 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { API_URL } from '@/lib/utils'
 import { AlertTriangle, AlertOctagon } from 'lucide-react'
-
-interface RecentError {
-  task_name: string
-  exception_type: string
-  exception_message: string
-  occurred_at: string
-}
-
-interface HealthSnapshot {
-  stock_metrics_latest: string | null
-  stock_price_latest: string | null
-  metrics_lag_days: number | null
-  is_stale: boolean
-  today_et: string
-  is_weekday: boolean
-  recent_errors_24h: number
-  recent_errors: RecentError[]
-  warnings: string[]
-}
+import { usePipelineHealth } from '@/hooks/usePipelineHealth'
 
 export default function DataHealthBanner() {
-  const [health, setHealth] = useState<HealthSnapshot | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      try {
-        const r = await fetch(`${API_URL}/api/v1/health/data-freshness`)
-        if (!r.ok) return
-        const data: HealthSnapshot = await r.json()
-        if (!cancelled) setHealth(data)
-      } catch {
-        // network errors are ignored — banner is best-effort
-      }
-    }
-    load()
-    const id = setInterval(load, 60_000)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [])
+  const { data: health } = usePipelineHealth()
 
   if (!health) return null
 
@@ -55,7 +18,6 @@ export default function DataHealthBanner() {
     : 'border-amber-500/40 bg-amber-500/10 text-amber-300'
 
   const Icon = hasErrors ? AlertOctagon : AlertTriangle
-
   const mostRecent = health.recent_errors[0]
 
   return (

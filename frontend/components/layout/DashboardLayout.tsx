@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import DataHealthBanner from './DataHealthBanner'
+import PipelineHealthChip from './PipelineHealthChip'
 import SymbolSearch from './SymbolSearch'
 
 interface DashboardLayoutProps {
@@ -28,9 +29,12 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
       <nav className="border-b border-border bg-card">
         <div className="container mx-auto px-4 py-3">
           <div className="flex items-center justify-between">
-            <Link href="/" className="text-xl font-bold text-foreground">
-              Stock Analysis
-            </Link>
+            <div className="flex items-center gap-4">
+              <Link href="/" className="text-xl font-bold text-foreground">
+                Stock Analysis
+              </Link>
+              <PipelineHealthChip />
+            </div>
             <div className="flex items-center gap-6">
               {navItems.map((item) => (
                 <Link

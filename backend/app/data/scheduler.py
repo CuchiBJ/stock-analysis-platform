@@ -7,6 +7,7 @@ from app.universe.universe_engine import UniverseEngine
 from app.universe.tiers.tier_manager import UniverseTier
 from app.services.websocket_manager import websocket_manager
 from app.services.task_error_tracker import track_task_errors
+from app.data.pipeline_heartbeat import record_cycle
 from sqlalchemy import func
 from datetime import datetime, time, timedelta
 import pytz
@@ -16,7 +17,7 @@ import time as _time   # alias to avoid colliding with datetime.time
 import uuid
 import pandas as pd
 import yfinance as yf
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,30 @@ class DataScheduler:
             return self.async_session_maker()
         raise RuntimeError("Database not initialized")
 
+    async def _record_heartbeat(
+        self,
+        cycle_name: str,
+        *,
+        duration_seconds: float,
+        symbols_processed: Optional[int] = None,
+        symbols_expected: Optional[int] = None,
+        status: str = "ok",
+        error_message: Optional[str] = None,
+    ) -> None:
+        """Persist last-run state of a scheduler cycle. Never raises."""
+        try:
+            async with self._get_db() as db:
+                await record_cycle(
+                    db, cycle_name,
+                    duration_seconds=duration_seconds,
+                    symbols_processed=symbols_processed,
+                    symbols_expected=symbols_expected,
+                    status=status,  # type: ignore[arg-type]
+                    error_message=error_message,
+                )
+        except Exception as e:
+            logger.warning(f"heartbeat write failed for {cycle_name}: {e}")
+
     async def _get_slow_symbols_and_date(self, db) -> tuple:
         """All symbols with a stock_price for the latest available date + that date."""
         from sqlalchemy import select, func
@@ -60,6 +85,16 @@ class DataScheduler:
         symbols = [r[0] for r in result.fetchall()]
         logger.info(f"SLOW cycle: {len(symbols)} symbols with price for {today}")
         return symbols, today
+
+    async def _count_slow_expected(self) -> Optional[int]:
+        """Symbols expected to be processed by the next SLOW cycle (= those with
+        a stock_price for the latest available date). Used to decide ok vs partial."""
+        try:
+            async with self._get_db() as db:
+                symbols, _ = await self._get_slow_symbols_and_date(db)
+                return len(symbols) if symbols else None
+        except Exception:
+            return None
 
     async def trigger_metrics_update(self, limit=None, symbols=None):
         """SLOW metrics calculation — covers all symbols with today's price.
@@ -367,13 +402,31 @@ class DataScheduler:
                 # FAST/SLOW/Realtime get a chance to run.
                 if last_price_update is None or (now - last_price_update).total_seconds() >= 900:
                     logger.info(f"Triggering price update (current time: {current_time})")
+                    price_t0 = _time.monotonic()
+                    price_status = "ok"
+                    price_error = None
                     try:
                         await self._update_prices()
                     except Exception as e:
                         logger.error(f"Price update failed (continuing): {e}")
+                        price_status = "failed"
+                        price_error = str(e)
+                    await self._record_heartbeat(
+                        "price",
+                        duration_seconds=_time.monotonic() - price_t0,
+                        status=price_status,
+                        error_message=price_error,
+                    )
                     # Immediately chain FAST metrics with fresh prices
                     logger.info("Chaining FAST metrics after price update")
-                    await self.trigger_fast_metrics_update()
+                    fast_t0 = _time.monotonic()
+                    fast_count = await self.trigger_fast_metrics_update()
+                    await self._record_heartbeat(
+                        "fast_metrics",
+                        duration_seconds=_time.monotonic() - fast_t0,
+                        symbols_processed=fast_count or None,
+                        status="ok" if fast_count else "failed",
+                    )
                     after = datetime.now(et_tz)
                     last_price_update = after
                     last_fast_metrics_update = after
@@ -383,13 +436,34 @@ class DataScheduler:
                 # FAST metrics every 5 minutes (between price updates)
                 if last_fast_metrics_update is None or (now - last_fast_metrics_update).total_seconds() >= 300:
                     logger.info(f"Triggering FAST metrics update (current time: {current_time})")
-                    await self.trigger_fast_metrics_update()
+                    fast_t0 = _time.monotonic()
+                    fast_count = await self.trigger_fast_metrics_update()
+                    await self._record_heartbeat(
+                        "fast_metrics",
+                        duration_seconds=_time.monotonic() - fast_t0,
+                        symbols_processed=fast_count or None,
+                        status="ok" if fast_count else "failed",
+                    )
                     last_fast_metrics_update = datetime.now(et_tz)
 
                 # SLOW metrics every 30 minutes — all symbols with price for today
                 if last_metrics_update is None or (now - last_metrics_update).total_seconds() >= 1800:
                     logger.info(f"Triggering SLOW metrics update (current time: {current_time})")
-                    await self.trigger_metrics_update()
+                    slow_t0 = _time.monotonic()
+                    slow_expected = await self._count_slow_expected()
+                    slow_count = await self.trigger_metrics_update()
+                    slow_status = "ok"
+                    if slow_expected and slow_count < slow_expected * 0.95:
+                        slow_status = "partial"
+                    elif not slow_count:
+                        slow_status = "failed"
+                    await self._record_heartbeat(
+                        "slow_metrics",
+                        duration_seconds=_time.monotonic() - slow_t0,
+                        symbols_processed=slow_count,
+                        symbols_expected=slow_expected,
+                        status=slow_status,
+                    )
                     last_metrics_update = datetime.now(et_tz)
 
                 # Realtime discovery every 10 minutes (detect volume explosion, RS acceleration)
@@ -410,14 +484,27 @@ class DataScheduler:
                         and current_time >= post_close_window_start
                         and last_post_close_cycle_date != now.date()):
                     logger.info(f"Post-close cycle (Polygon EOD): current time {current_time}")
+                    pc_t0 = _time.monotonic()
+                    pc_status = "ok"
+                    pc_error = None
+                    pc_count: Optional[int] = None
                     try:
                         await self._update_prices_polygon_eod(now.date())
-                        await self.trigger_metrics_update()
+                        pc_count = await self.trigger_metrics_update()
                         after = datetime.now(et_tz)
                         last_price_update = after
                         last_metrics_update = after
                     except Exception as e:
                         logger.error(f"Post-close cycle failed: {e}")
+                        pc_status = "failed"
+                        pc_error = str(e)
+                    await self._record_heartbeat(
+                        "post_close_cycle",
+                        duration_seconds=_time.monotonic() - pc_t0,
+                        symbols_processed=pc_count,
+                        status=pc_status,
+                        error_message=pc_error,
+                    )
                     last_post_close_cycle_date = now.date()
 
                 # Discovery scans - run once daily after market close
@@ -664,7 +751,7 @@ class DataScheduler:
                 for symbol, metrics in metrics_records:
                     ticker_data.append({
                         "symbol": symbol,
-                        "rs_spy": metrics.rs_spy if hasattr(metrics, 'rs_spy') else None,
+                        "rs_spy": metrics.relative_strength_spy if hasattr(metrics, 'rs_spy') else None,
                         "rs_qqq": metrics.rs_qqq if hasattr(metrics, 'rs_qqq') else None,
                         "volume": metrics.avg_volume_10d if hasattr(metrics, 'avg_volume_10d') else None,
                         "avg_volume_20d": metrics.avg_volume_20d if hasattr(metrics, 'avg_volume_20d') else None,
@@ -719,7 +806,7 @@ class DataScheduler:
                         symbol=symbol,
                         avg_volume_20d=metrics.avg_volume_20d if hasattr(metrics, 'avg_volume_20d') else 0,
                         avg_dollar_volume_20d=metrics.avg_volume_20d * metrics.current_price if hasattr(metrics, 'avg_volume_20d') and metrics.current_price else 0,
-                        rs_baseline_spy=metrics.rs_spy if hasattr(metrics, 'rs_spy') else 0,
+                        rs_baseline_spy=metrics.relative_strength_spy if hasattr(metrics, 'rs_spy') else 0,
                         rs_baseline_qqq=metrics.rs_qqq if hasattr(metrics, 'rs_qqq') else 0,
                         institutional_quality_score=metrics.institutional_quality_score if hasattr(metrics, 'institutional_quality_score') else 0
                     )
@@ -883,33 +970,27 @@ class DataScheduler:
                             instrument_id=internal_id,
                             sector=sector,  # Assign the sector we're filling
                             industry="Unknown",
-                            market_cap=None,
                             float_shares=None,
                             avg_volume_20d=0,
                             avg_dollar_volume_20d=0,
                             rs_baseline_spy=0,
                             rs_baseline_qqq=0,
                             institutional_quality_score=0,
-                            updated_at=datetime.utcnow()
                         )
                         db.add(db_enrichment)
-                        
+
                         # Assign tier (TIER 4 for gap fills)
                         db_tier = UniverseTierModel(
                             instrument_id=internal_id,
                             tier="tier_4",
-                            assigned_at=datetime.utcnow(),
-                            updated_at=datetime.utcnow(),
-                            reason="coverage_gap_fill"
                         )
                         db.add(db_tier)
-                        
+
                         # Add to Stock table
                         db_stock = Stock(
                             symbol=symbol.upper(),
-                            company_name=ticker.get("name", symbol),
+                            name=ticker.get("name", symbol),
                             is_active=True,
-                            added_at=datetime.utcnow()
                         )
                         db.add(db_stock)
                         
@@ -930,6 +1011,10 @@ class DataScheduler:
     @track_task_errors(task_name="run_realtime_discovery")
     async def _run_realtime_discovery(self):
         """Run realtime discovery to detect volume explosion and RS acceleration"""
+        rd_t0 = _time.monotonic()
+        rd_status = "ok"
+        rd_error = None
+        rd_count: Optional[int] = None
         try:
             async with self._get_db() as db:
                 from sqlalchemy import select
@@ -985,17 +1070,17 @@ class DataScheduler:
                             logger.info(f"Realtime volume explosion detected: {symbol} (ratio: {volume_ratio:.2f})")
                     
                     # RS acceleration check
-                    if latest.rs_spy and previous.rs_spy:
-                        rs_change = latest.rs_spy - previous.rs_spy
-                        if rs_change >= 0.5 and latest.rs_spy > 2.0:
+                    if latest.relative_strength_spy and previous.relative_strength_spy:
+                        rs_change = latest.relative_strength_spy - previous.relative_strength_spy
+                        if rs_change >= 0.5 and latest.relative_strength_spy > 2.0:
                             candidate = DiscoveryCandidate(
                                 symbol=symbol,
                                 trigger=DiscoveryTrigger.RS_ACCELERATION,
                                 timestamp=datetime.utcnow(),
                                 data={
                                     "rs_change": rs_change,
-                                    "current_rs": latest.rs_spy,
-                                    "previous_rs": previous.rs_spy
+                                    "current_rs": latest.relative_strength_spy,
+                                    "previous_rs": previous.relative_strength_spy
                                 },
                                 confidence=min(100, 50 + int(rs_change * 20)),
                                 priority=1
@@ -1008,12 +1093,23 @@ class DataScheduler:
                     await self.universe_engine.process_discovery_candidate(candidate, db)
                 
                 logger.info(f"Realtime discovery complete: {len(realtime_candidates)} candidates detected")
+                rd_count = len(realtime_candidates)
                 return realtime_candidates
         except Exception as e:
             logger.error(f"Realtime discovery failed: {e}")
             import traceback
             traceback.print_exc()
+            rd_status = "failed"
+            rd_error = str(e)
             return []
+        finally:
+            await self._record_heartbeat(
+                "realtime_discovery",
+                duration_seconds=_time.monotonic() - rd_t0,
+                symbols_processed=rd_count,
+                status=rd_status,
+                error_message=rd_error,
+            )
 
     @track_task_errors(task_name="run_lifecycle_tracking")
     async def _run_lifecycle_tracking(self):

@@ -309,3 +309,19 @@ class JournalStopEvent(Base):
         Index('ix_journal_stop_events_trade', 'trade_id', 'occurred_at'),
     )
 
+
+class PipelineHeartbeat(Base):
+    __tablename__ = "pipeline_heartbeats"
+
+    cycle_name: Mapped[str] = mapped_column(String(50), primary_key=True)
+    last_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_success_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_duration_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    symbols_processed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    symbols_expected: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ok")
+    last_error_message: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
