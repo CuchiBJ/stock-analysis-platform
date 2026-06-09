@@ -188,3 +188,124 @@ class SchedulerError(Base):
         Index("ix_scheduler_errors_task_name", "task_name"),
     )
 
+
+class JournalTrade(Base):
+    """One real round-trip executed in the broker, as recorded in the user's journal.
+
+    Source of truth for what actually happened with capital at risk. Pairs Compra+Venta
+    rows from the journal CSV into single records; partial fills become separate trades
+    via FIFO matching against open Compras of the same symbol.
+    """
+    __tablename__ = "journal_trades"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+
+    symbol: Mapped[str] = mapped_column(String(10), nullable=False)
+    setup: Mapped[str] = mapped_column(String(32), nullable=False, default='unknown')
+    # DEPRECATED — manual operator label. New trades default to 'unknown'; the
+    # canonical context dimension is `regime_at_entry` from system snapshots.
+    # Column preserved for historical CSV-imported trades.
+    context: Mapped[str] = mapped_column(String(32), nullable=False, default='unknown')
+
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    qty: Mapped[float] = mapped_column(Float, nullable=False)
+    stop_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Snapshot of the FIRST non-null stop_price ever set on this trade.
+    # Immutable after first set — preserves planned risk for honest R-multiple
+    # computation across the trade's lifetime (R = (exit-entry) / (entry-initial_stop)
+    # stays comparable even after operator moves stop to BE or trails).
+    initial_stop_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Decision grouping: NULL means this row IS the representative of its decision;
+    # non-NULL means it's a partial execution child of the decision whose
+    # representative has id = parent_trade_id. decision_id = COALESCE(parent_trade_id, id).
+    parent_trade_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # DEPRECATED — derived field. New trades leave this NULL; `_trade_to_dict`
+    # computes entry_price * qty on-demand. Historical rows retain cached values.
+    cost_total: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    exit_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # DEPRECATED — derived field. New trades leave this NULL; `_trade_to_dict`
+    # computes (exit_date - entry_date).days on-demand. Historical rows cached.
+    duration_days: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    pnl_dollars: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # DEPRECATED — derived field. New trades leave this NULL; `_trade_to_dict`
+    # computes exit/entry - 1 on-demand. Historical rows cached.
+    pnl_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    r_multiple: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    error_note: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # DEPRECATED — low-signal free-text. Removed from NewTradeModal; only
+    # editable via EditTradeModal. Re-evaluate for full removal in 6 months
+    # based on usage.
+    post_venta: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # Decision provenance — separates queue-driven trades from discretionary.
+    # `from_queue`: null=unmarked, true=came from take-from-queue workflow,
+    # false=operator explicitly marked as off-system.
+    from_queue: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # Categorized origin of the entry decision. Vocabulary kept short on
+    # purpose — operators don't honestly self-label fomo/revenge in the moment.
+    entry_reason: Mapped[str] = mapped_column(String(20), nullable=False, default='other')
+    # Categorized reason for the exit. `partial_take` is auto-inferred when
+    # qty<trade.qty on close unless operator overrides.
+    exit_reason: Mapped[str] = mapped_column(String(20), nullable=False, default='unknown')
+
+    # Operator-supplied risk plan at entry. Nullable for backward compatibility
+    # with historical CSV-imported trades. When `planned_risk_dollars` is set,
+    # it takes precedence over stop-derived inference for risk exposure metrics.
+    # `account_balance_at_entry` enables normalization to % of account.
+    planned_risk_dollars: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    account_balance_at_entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # System engine snapshots taken at entry time. Immutable after first save.
+    # `regime_at_entry`: composite "<participation>/<leadership>" from MarketContextEngine.
+    # `system_score_at_entry`: priority_score (0-1) from SetupPriorityEngine if metrics available.
+    # `group_strength_at_entry`: badge "leader"|"neutral"|"weak" from GroupStrengthService.
+    # `leader_health_at_entry`: overall_health_score (0-1) from LeaderHealthCalculator (market-wide).
+    regime_at_entry: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    system_score_at_entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    group_strength_at_entry: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    leader_health_at_entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Optional link to the closest transition_observation detected for this symbol
+    # near entry_date (±3 days). Populated on import when a match exists; null otherwise.
+    # This is how the journal closes the loop with empirical calibration.
+    linked_observation_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    source_row: Mapped[int] = mapped_column(Integer, nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index('ix_journal_symbol_entry', 'symbol', 'entry_date'),
+        Index('ix_journal_setup_context', 'setup', 'context'),
+        Index('ix_journal_parent_trade_id', 'parent_trade_id'),
+    )
+
+
+class JournalStopEvent(Base):
+    """Append-only audit log of stop_price changes per JournalTrade.
+
+    Auto-classified by the PATCH/POST handlers; operator never types the kind.
+    Used to (a) preserve the operator's risk-management actions for review and
+    (b) enable analytics like "% of winners that reached BE before exit".
+    """
+    __tablename__ = "journal_stop_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    trade_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    old_stop_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    new_stop_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # One of: 'initial', 'moved_to_be', 'trailed_up', 'widened', 'removed'.
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+    auto_classified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        Index('ix_journal_stop_events_trade', 'trade_id', 'occurred_at'),
+    )
+
