@@ -5,13 +5,14 @@ Covered:
   - record_cycle — upsert semantics, last_success_at preservation, DB-error safety
 """
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytz
 
 from app.api.v1.endpoints.health import compute_market_state
 from app.data.pipeline_heartbeat import record_cycle
+from app.data.scheduler import DataScheduler
 
 
 ET = pytz.timezone("US/Eastern")
@@ -77,6 +78,32 @@ def test_market_state_saturday_returns_closed():
     assert state["is_open"] is False
     assert state["is_warmup"] is False
     assert state["minutes_since_open"] is None
+
+
+# ---- clock-skew self-recovery ------------------------------------------------
+
+def test_future_dated_markers_flags_skewed_cadence():
+    """A marker stamped well in the future (backward clock correction) is flagged
+    so the loop can reset and self-recover instead of freezing."""
+    now = _et(2026, 6, 2, 13, 0)
+    markers = {
+        "price": now - timedelta(minutes=10),        # past — fine
+        "fast_metrics": now + timedelta(hours=3),    # future — skew
+        "slow_metrics": None,                        # unset — ignored
+        "realtime_discovery": now + timedelta(seconds=30),  # within tolerance
+    }
+    flagged = DataScheduler._future_dated_markers(markers, now)
+    assert flagged == ["fast_metrics"]
+
+
+def test_future_dated_markers_empty_when_all_in_past():
+    now = _et(2026, 6, 2, 13, 0)
+    markers = {
+        "price": now - timedelta(minutes=1),
+        "fast_metrics": now - timedelta(minutes=5),
+        "slow_metrics": now,
+    }
+    assert DataScheduler._future_dated_markers(markers, now) == []
 
 
 # ---- record_cycle ------------------------------------------------------------

@@ -21,6 +21,11 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# A cadence marker dated more than this far in the future can only be the result
+# of a backward system-clock correction (the marker was stamped while the clock
+# was ahead). Anything inside this band is normal jitter and left alone.
+_CLOCK_SKEW_TOLERANCE_S = 120
+
 
 class DataScheduler:
     def __init__(self, database_url=None):
@@ -354,6 +359,19 @@ class DataScheduler:
         except Exception as e:
             logger.error(f"State tracking failed: {e}")
 
+    @staticmethod
+    def _future_dated_markers(
+        markers: Dict[str, Optional[datetime]],
+        now: datetime,
+        tolerance_s: int = _CLOCK_SKEW_TOLERANCE_S,
+    ) -> list:
+        """Return the names of cadence markers stamped further than tolerance in
+        the future relative to `now` — the signature of a backward clock
+        correction that would otherwise freeze the loop's interval checks.
+        """
+        cutoff = now + timedelta(seconds=tolerance_s)
+        return [name for name, ts in markers.items() if ts is not None and ts > cutoff]
+
     async def _scheduler_loop(self):
         """Background scheduler loop that executes jobs based on time"""
         logger.info("Scheduler loop started")
@@ -393,7 +411,39 @@ class DataScheduler:
         while self._running:
             now = datetime.now(et_tz)
             current_time = now.time()
-            
+
+            # Clock-skew self-recovery. If the system clock jumps forward (NTP
+            # correction, sleep/wake) the cadence markers get stamped in the
+            # future; once the clock settles back, (now - last_X) goes negative,
+            # the >= interval checks never fire again, and every cycle silently
+            # freezes until real time catches up to the stale markers (observed:
+            # a ~3h freeze). Detect any future-dated marker and reset the cadence
+            # so the loop re-establishes cycles from the corrected clock at once.
+            _future = self._future_dated_markers(
+                {
+                    "price": last_price_update,
+                    "fast_metrics": last_fast_metrics_update,
+                    "slow_metrics": last_metrics_update,
+                    "realtime_discovery": last_realtime_discovery,
+                },
+                now,
+            )
+            if _future:
+                logger.warning(
+                    f"Clock anomaly: cadence markers {_future} dated in the future "
+                    f"(now={now.isoformat()}). Resetting cadence to self-recover."
+                )
+                await self._record_heartbeat(
+                    "clock_recovery",
+                    duration_seconds=0.0,
+                    status="failed",
+                    error_message=f"future-dated markers reset: {_future}",
+                )
+                last_price_update = None
+                last_fast_metrics_update = None
+                last_metrics_update = None
+                last_realtime_discovery = None
+
             # Check if within market hours
             if market_open <= current_time <= market_close:
                 # Price update every 15 minutes — awaited so FAST always uses fresh prices.
