@@ -134,6 +134,21 @@ class MarketContextEngine:
         result = await self._db.execute(select(func.max(StockMetrics.date)))
         return result.scalar_one_or_none()
 
+    async def _resolve_trading_date(self, target: date) -> Optional[date]:
+        """Snap a calendar-day target to the most recent date that actually has
+        StockMetrics rows (<= target).
+
+        The N-days-ago comparison dates are computed as raw calendar offsets
+        (Decision 5), so they can land on a weekend or market holiday with no
+        data — silently breaking the comparison (e.g. rs_persistence collapsing
+        to 0.0 because the lookback date has zero leaders). Resolving to the
+        nearest available trading date prevents that.
+        """
+        result = await self._db.execute(
+            select(func.max(StockMetrics.date)).where(StockMetrics.date <= target)
+        )
+        return result.scalar_one_or_none()
+
     async def _universe_size(self, as_of: date) -> int:
         result = await self._db.execute(
             select(func.count()).select_from(StockMetrics)
@@ -235,9 +250,11 @@ class MarketContextEngine:
         breadth_ema200_ratio = (above_ema200 / total_with_ema200) if total_with_ema200 > 0 else 0.0
         highs_lows_ratio = near_highs / max(near_lows, 1)
 
-        # Historical breadth for momentum (Decision 6: use historical date's universe)
-        date_5d_ago = as_of - timedelta(days=_DAYS_5T)
-        date_20d_ago = as_of - timedelta(days=_DAYS_20T)
+        # Historical breadth for momentum (Decision 6: use historical date's universe).
+        # Snap calendar offsets to the nearest available trading date so a weekend
+        # or holiday lookback doesn't silently zero out the comparison.
+        date_5d_ago = await self._resolve_trading_date(as_of - timedelta(days=_DAYS_5T))
+        date_20d_ago = await self._resolve_trading_date(as_of - timedelta(days=_DAYS_20T))
 
         breadth_5d_ago, _ = await self._breadth_above_ema21(date_5d_ago)
         breadth_20d_ago, universe_20d = await self._breadth_above_ema21(date_20d_ago)
@@ -327,9 +344,12 @@ class MarketContextEngine:
         leaders_today = await self._fetch_leaders(as_of)
         leader_count = len(leaders_today)
 
-        date_5d = as_of - timedelta(days=_DAYS_5T)
-        date_10d = as_of - timedelta(days=_DAYS_10T)
-        date_20d = as_of - timedelta(days=_DAYS_20T)
+        # Snap calendar offsets to the nearest available trading date — otherwise a
+        # holiday lookback (e.g. Memorial Day) returns zero leaders and corrupts
+        # rs_persistence / turnover / deltas.
+        date_5d = await self._resolve_trading_date(as_of - timedelta(days=_DAYS_5T))
+        date_10d = await self._resolve_trading_date(as_of - timedelta(days=_DAYS_10T))
+        date_20d = await self._resolve_trading_date(as_of - timedelta(days=_DAYS_20T))
 
         leaders_5d = await self._fetch_leaders(date_5d)
         leaders_10d = await self._fetch_leaders(date_10d)

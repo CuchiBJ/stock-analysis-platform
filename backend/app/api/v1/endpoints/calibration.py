@@ -108,7 +108,15 @@ async def calibration_by_transition_type(db: AsyncSession = Depends(get_db)):
             )
         ).scalar()
         if oldest_pending is not None:
-            eta_first_data = (oldest_pending + timedelta(days=10)).isoformat()
+            # Resolver needs 10 trading-day price rows after detection, not 10
+            # calendar days — skip weekends so the ETA reflects market sessions.
+            candidate = oldest_pending
+            biz_days = 0
+            while biz_days < 10:
+                candidate += timedelta(days=1)
+                if candidate.weekday() < 5:
+                    biz_days += 1
+            eta_first_data = candidate.isoformat()
 
     return {
         "min_samples_required": MIN_SAMPLES_REQUIRED,
