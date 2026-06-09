@@ -206,26 +206,21 @@ class UniverseEngine:
             instrument_id=identity.internal_id,
             sector="Unknown",  # Will be enriched later
             industry="Unknown",
-            market_cap=None,
             float_shares=None,
             avg_volume_20d=0,
             avg_dollar_volume_20d=0,
             rs_baseline_spy=0,
             rs_baseline_qqq=0,
             institutional_quality_score=0,
-            updated_at=datetime.utcnow()
         )
         db.add(db_enrichment)
         await db.commit()
         logger.info(f"Created enrichment record for: {candidate.symbol}")
-        
+
         # Assign initial tier (TIER 3 for new discoveries)
         db_tier = UniverseTierModel(
             instrument_id=identity.internal_id,
             tier="tier_3",  # Start at TIER 3 for new discoveries
-            assigned_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-            reason="discovery_candidate"
         )
         db.add(db_tier)
         await db.commit()
