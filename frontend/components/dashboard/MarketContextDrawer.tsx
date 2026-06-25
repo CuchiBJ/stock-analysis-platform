@@ -1,8 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { X, ChevronRight, ChevronDown } from 'lucide-react'
-import type { MarketContextData } from './MarketContextBar'
+import { breadthLevelColor, type MarketContextData } from './MarketContextBar'
 
 interface Props {
   ctx: MarketContextData
@@ -17,7 +17,7 @@ function descriptorBg(d: string): string {
   return 'bg-white/5 border-white/15 text-white/50'
 }
 
-function MetricRow({ label, value }: { label: string; value: string | number }) {
+function MetricRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="flex justify-between items-center py-1.5 border-b border-white/5 last:border-0">
       <span className="text-xs text-white/50">{label}</span>
@@ -83,7 +83,7 @@ export default function MarketContextDrawer({ ctx, onClose }: Props) {
               delta={p.delta_5d}
               deltaUnit="pp"
             />
-            <MetricRow label="Breadth above EMA21"  value={`${(p.metrics.breadth_above_ema21 * 100).toFixed(1)}%`} />
+            <MetricRow label="Breadth above EMA21"  value={<span className={breadthLevelColor(p.metrics.breadth_above_ema21 * 100)}>{(p.metrics.breadth_above_ema21 * 100).toFixed(1)}%</span>} />
             <MetricRow label="Breadth momentum 5d"  value={`${(p.metrics.breadth_momentum_5d * 100).toFixed(2)}pp`} />
             <MetricRow label="Highs / lows ratio"   value={p.metrics.highs_lows_ratio.toFixed(2)} />
           </section>

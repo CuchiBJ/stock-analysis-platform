@@ -12,7 +12,11 @@ from app.services.transition_engine import (
     OperationalTransition,
     FreshnessState
 )
-from app.services.observation_scorer import score_observation_priority, is_pre_reclaim_candidate
+from app.services.observation_scorer import (
+    score_observation_priority,
+    score_breakout_quality,
+    is_pre_reclaim_candidate,
+)
 from app.services.setup_lifecycle_engine import SetupLifecycleEngine, SetupState
 from app.services.market_regime_engine import MarketRegimeEngine
 from app.services.regime_aware_engine import RegimeAwareEngine
@@ -87,6 +91,17 @@ def _passes_ema_trigger(metrics: StockMetrics) -> bool:
     return (-1.0 <= ema9 <= 0.5) or (-1.0 <= ema21 <= 0.5)
 
 
+def _passes_breakout_trigger(metrics: StockMetrics) -> bool:
+    """Breakout surfacing — líder por encima de EMA21 y cerca del máximo 52w.
+
+    Complementa el trigger de pullback: un breakout (coiling) está por encima
+    de las EMAs, así que el gate de pullback lo excluiría.
+    """
+    ema21  = metrics.distance_to_ema21_atr   if metrics.distance_to_ema21_atr   is not None else -999.0
+    high52 = metrics.distance_to_high_52w_atr if metrics.distance_to_high_52w_atr is not None else -999.0
+    return 0 < ema21 <= 1.5 and high52 >= -1.0
+
+
 # Combined: institutional quality REQUIRED + at least one EMA trigger zone
 _ACTIONABLE_FILTER = and_(
     _INSTITUTIONAL_SETUP,
@@ -154,8 +169,9 @@ async def get_live_transitions(
             if current.date != latest_date:
                 continue
 
-            # Step 5: EMA trigger evaluated in Python on today's metrics
-            if not _passes_ema_trigger(current):
+            # Step 5: surfacing gate — pullback (zona EMA) o breakout (coiling en máximos)
+            in_ema_zone = _passes_ema_trigger(current)
+            if not (in_ema_zone or _passes_breakout_trigger(current)):
                 continue
 
             if len(metrics_list) >= 2:
@@ -172,9 +188,27 @@ async def get_live_transitions(
                     'timestamp': datetime.utcnow()
                 })()
 
+            is_breakout = op_transition.transition == OperationalTransition.BREAKOUT
+
+            # Por la vía de breakout solo entran breakouts reales: un líder cerca
+            # de máximos pero clasificado como stabilizing/continuation no debe
+            # inundar el feed (que sigue siendo de pullbacks + breakouts).
+            if not in_ema_zone and not is_breakout:
+                continue
+
             severity = _determine_severity(op_transition.transition)
             obs_priority = score_observation_priority(current)
             pre_reclaim = is_pre_reclaim_candidate(current)
+
+            # setup_score unifica el ranking del feed: breakouts puntúan por su
+            # calidad de coiling; el resto usa el pullback_quality_score.
+            if is_breakout:
+                setup_score = round(score_breakout_quality(current), 1)
+            else:
+                setup_score = (
+                    round(current.pullback_quality_score, 1)
+                    if current.pullback_quality_score is not None else None
+                )
 
             previous = metrics_list[1] if len(metrics_list) >= 2 else None
             dist_pct, ema_label = _dist_to_setup_pct(current, op_transition.transition.value)
@@ -184,6 +218,11 @@ async def get_live_transitions(
                 "direction": _get_transition_direction(op_transition.transition),
                 "strength": op_transition.strength,
                 "observation_priority": round(obs_priority, 1),
+                "pullback_quality_score": (
+                    round(current.pullback_quality_score, 1)
+                    if current.pullback_quality_score is not None else None
+                ),
+                "setup_score": setup_score,
                 "is_pre_reclaim": pre_reclaim,
                 "timestamp": op_transition.timestamp.isoformat(),
                 "narrative": op_transition.narrative,
@@ -199,9 +238,11 @@ async def get_live_transitions(
         # Drop stable — no actionable signal
         transitions = [t for t in transitions if t["transition"] != OperationalTransition.STABLE.value]
 
-        # entering_pullback surfaces first, then pre-reclaim candidates by observation priority
+        # Quality-first: mejor setup_score arriba (pullback o breakout indistintamente),
+        # luego urgencia de evento (entering_pullback, pre-reclaim, prioridad, fuerza).
         transitions.sort(
             key=lambda x: (
+                x["setup_score"] or 0.0,
                 x["transition"] == OperationalTransition.ENTERING_PULLBACK.value,
                 x["is_pre_reclaim"],
                 x["observation_priority"],
@@ -210,6 +251,15 @@ async def get_live_transitions(
             reverse=True,
         )
         result_transitions = transitions[:limit]
+
+        # Garantizar visibilidad de los breakouts: aunque puntúen por debajo del
+        # corte del feed, siempre se anexan (el resto mantiene orden por score).
+        if len(transitions) > limit:
+            extra_breakouts = [
+                t for t in transitions[limit:]
+                if t["transition"] == OperationalTransition.BREAKOUT.value
+            ]
+            result_transitions = result_transitions + extra_breakouts
 
         # Broadcast top transition to WebSocket subscribers (non-blocking)
         if result_transitions and websocket_manager.get_connection_count() > 0:
@@ -494,6 +544,12 @@ def _dist_to_setup_pct(metrics, transition: str):
         return None, "EMA21"
     d9 = metrics.distance_to_ema9_atr
     d21 = metrics.distance_to_ema21_atr
+    if transition == 'breakout':
+        d_high = metrics.distance_to_high_52w_atr
+        if d_high is not None:
+            high_price = price - (d_high * atr)
+            return round((high_price - price) / price * 100, 1), "52w high"
+        return None, "52w high"
     if transition == 'entering_pullback' and d9 is not None and abs(d9) <= 0.5:
         ema_price = price - (d9 * atr)
         return round((ema_price - price) / price * 100, 1), "EMA9"
@@ -523,6 +579,7 @@ def _determine_severity(transition: OperationalTransition) -> str:
         OperationalTransition.FLUSH_AND_RECOVER,
         OperationalTransition.SUPPORT_HOLDING,
         OperationalTransition.ENTERING_PULLBACK,
+        OperationalTransition.BREAKOUT,
         OperationalTransition.RECLAIMING,
         OperationalTransition.CONTINUATION_HOLDING,
     ]:
@@ -543,6 +600,7 @@ def _get_transition_direction(transition: OperationalTransition) -> str:
         OperationalTransition.FLUSH_AND_RECOVER,
         OperationalTransition.SUPPORT_HOLDING,
         OperationalTransition.ENTERING_PULLBACK,
+        OperationalTransition.BREAKOUT,
     ]:
         return "preparing"
     elif transition in [

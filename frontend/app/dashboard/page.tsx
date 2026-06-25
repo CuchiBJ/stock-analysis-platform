@@ -7,7 +7,8 @@ import dynamic from 'next/dynamic'
 import { usePricePolling } from '@/hooks/usePricePolling'
 import { API_URL } from '@/lib/utils'
 
-const MarketContextBar    = dynamic(() => import('@/components/dashboard/MarketContextBar'),    { ssr: false })
+const MarketContextBar       = dynamic(() => import('@/components/dashboard/MarketContextBar'),       { ssr: false })
+const SectorRotationCallout  = dynamic(() => import('@/components/dashboard/SectorRotationCallout'),  { ssr: false })
 const TopActionableSetups = dynamic(() => import('@/components/dashboard/TopActionableSetups'),  { ssr: false })
 const LiveTransitionFeed  = dynamic(() => import('@/components/dashboard/LiveTransitionFeed'),   { ssr: false })
 const SectorHeatmap       = dynamic(() => import('@/components/charts/SectorHeatmap'),           { ssr: false })
@@ -50,8 +51,9 @@ export default function DashboardPage() {
     <DashboardLayout>
 
       {/* STATUS BAR — multi-dimensional market context (participation + leadership) */}
-      <div className="mb-4">
+      <div className="mb-4 space-y-2">
         <MarketContextBar />
+        <SectorRotationCallout />
       </div>
 
       {/* PRIMARY PANEL — top actionable setups, full width */}

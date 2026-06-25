@@ -88,6 +88,35 @@ async def building_bases_queue(db: AsyncSession = Depends(get_db)):
     return _with_context_envelope("building-bases", results, participation, leadership)
 
 
+@router.get("/rs-leaders")
+async def rs_leaders_queue(
+    sort: str = Query("rs", pattern="^(rs|momentum)$"),
+    window: int = Query(5),
+    db: AsyncSession = Depends(get_db),
+):
+    """Minervini leaders ranked by RS vs SPY — down-day watchlist to position from on the turn.
+
+    sort='rs' (default): trailing 13-week RS desc — who has been strongest.
+    sort='momentum': where RS is flowing now — RS line slope over `window` sessions
+    plus resilience while the SPY falls. `window` ∈ {3,5,10} (default 5).
+
+    Never suppressed: this is the tool the operator reaches for precisely when
+    breadth is COLLAPSING/NARROWING, so it must remain visible in adverse context.
+    ("rs-leaders" is intentionally absent from every suppress_lenses set.)
+    """
+    if window not in (3, 5, 10):
+        window = 5
+    results = await SetupQueueService(db).list_rs_leaders(sort=sort, window=window)
+    participation, leadership = await fetch_current_context(db)
+    group_perfs = await fetch_current_group_strengths(db)
+    _enrich_with_group_strength(results, group_perfs)
+    multiplier = compute_context_multiplier(participation, leadership)
+    assert "rs-leaders" not in multiplier.suppress_lenses, (
+        "rs-leaders must never be suppressed — it is the down-day positioning tool"
+    )
+    return _with_context_envelope("rs-leaders", results, participation, leadership)
+
+
 @router.get("/symbol/{symbol}/history")
 async def symbol_history(
     symbol: str,

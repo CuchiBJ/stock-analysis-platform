@@ -25,7 +25,7 @@ services:
     container_name: stock-analysis-backend
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/stock_analysis
-      POLYGON_API_KEY: ${POLYGON_API_KEY}
+      POLYGON_API_KEY: ${POLYGON_API_KEY:-}
       CORS_ORIGINS: http://localhost:3000
     ports:
       - "8000:8000"

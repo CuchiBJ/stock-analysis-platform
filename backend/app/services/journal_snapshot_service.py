@@ -40,6 +40,27 @@ async def _snapshot_regime(db: AsyncSession) -> Optional[str]:
         return None
 
 
+async def reconstruct_regime_at_entry(
+    db: AsyncSession, entry_date: date
+) -> Optional[str]:
+    """Rebuild the objective market regime as it stood on `entry_date`.
+
+    Used to backfill `regime_at_entry` on trades that predate the snapshot
+    feature (CSV-imported historicals) or partial-sell children that never
+    captured one. Returns None when the date predates the StockMetrics history,
+    in which case the caller should leave the field as "sin data".
+    """
+    try:
+        from app.services.market_context_engine import MarketContextEngine
+        ctx = await MarketContextEngine(db).analyze_as_of(entry_date)
+        if ctx is None:
+            return None
+        return f"{ctx.participation.descriptor}/{ctx.leadership.descriptor}"
+    except Exception as exc:
+        logger.warning("reconstruct_regime_at_entry failed @ %s: %s", entry_date, exc)
+        return None
+
+
 async def _snapshot_group_strength(db: AsyncSession, symbol: str) -> Optional[str]:
     try:
         from app.services.group_strength_service import (

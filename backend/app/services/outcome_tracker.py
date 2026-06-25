@@ -9,6 +9,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 PRE_RECLAIM = {'entering_pullback', 'volume_dry_up', 'compressing', 'flush_and_recover', 'support_holding'}
+BREAKOUT = {'breakout'}
 RECLAIM_CONT = {'reclaiming', 'continuation_holding', 'stabilizing'}
 DETERIORATION = {'weakening', 'distribution', 'failing'}
 
@@ -153,6 +154,15 @@ class OutcomeTracker:
             if obs.broke_ema50_within_10d or (dd_atr is not None and dd_atr < -3.0):
                 return 'FAILURE'
             if obs.reached_ema21_within_10d and (dd_atr or 0) > -2.5:
+                return 'SUCCESS'
+            return 'NEUTRAL'
+
+        if t in BREAKOUT:
+            # Breakout (coiling) ya está sobre las EMAs: éxito = el quiebre se
+            # materializa (avanza ≥1.5 ATR) sin perder estructura.
+            if obs.broke_ema50_within_10d or (dd_atr is not None and dd_atr < -2.0):
+                return 'FAILURE'
+            if gain_atr is not None and gain_atr >= 1.5 and (dd_atr or 0) > -2.0:
                 return 'SUCCESS'
             return 'NEUTRAL'
 

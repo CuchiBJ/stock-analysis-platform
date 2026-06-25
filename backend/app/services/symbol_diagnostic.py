@@ -36,6 +36,40 @@ class ListCheck:
     cutoff: Optional[dict] = None  # {kind: "top_n", n: 12, ranked_by: "priority_score"} when list applies a top-N cutoff after filtering
 
 
+# Stable machine keys per criterion. Keyed on the raw `name` so the diagnose_*
+# call sites stay untouched; the human-readable labels live in the frontend
+# (CRITERION_LABELS in app/stock/[symbol]/page.tsx). A name missing here
+# serializes key="" and the frontend falls back to the raw name.
+_CRITERION_KEYS: dict[str, str] = {
+    "avg_volume_10d ≥ 800k":                                                    "min_volume",
+    "avg_volume_10d ≥ 700k (extra)":                                            "min_volume_extra",
+    "adr_percent ≥ 4%":                                                          "min_adr",
+    "adr_percent ≥ 3% (extra)":                                                  "min_adr_extra",
+    "current_price ≥ $5":                                                        "min_price",
+    "perf_1y > 30%":                                                             "perf_1y",
+    "perf_13w > 20%":                                                            "perf_13w",
+    "price > EMA50":                                                             "price_above_ema50",
+    "price > EMA200":                                                            "price_above_ema200",
+    "price > SMA150":                                                            "price_above_sma150",
+    "SMA150 > SMA200":                                                           "sma150_above_sma200",
+    "distance to 52W high ≥ -3 ATR":                                             "near_52w_high",
+    "price ≥ 52W low × 1.5":                                                     "above_52w_low",
+    "EMA9 distance ∈ [-1.0, +0.5] ATR  OR  EMA21 distance ∈ [-1.0, +0.5] ATR":   "ema_trigger",
+    "EMA9 OR EMA21 distance ∈ [-1.0, +0.5] ATR":                                 "ema_trigger",
+    "pullback_quality_score ≥ 55":                                               "min_pullback_quality",
+    "Recent non-stable transition observation exists":                           "recent_transition",
+    "Non-stable transition observation in last 2 days":                          "recent_transition_2d",
+    "Minervini quality leader (8 SEPA criteria)":                                "minervini_leader",
+    "Minervini quality leader":                                                  "minervini_leader",
+    "NOT fully Minervini quality leader":                                        "not_minervini_leader",
+    "distance_to_ema21 ∈ [-0.5, +1.5] ATR":                                      "ema21_band",
+    '"From above" rule: max d21_atr in days 5-10 ago > 0.5':                     "from_above",
+    '"No broke EMA50" rule: min d50_atr in last 25d ≥ 0':                        "no_broke_ema50",
+    "relative_strength_spy > 105":                                              "rs_spy_gt_105",
+    "weeks_in_base ≥ 6":                                                         "min_weeks_in_base",
+}
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def _ge(name: str, actual: Optional[float], threshold: float) -> Criterion:
@@ -271,8 +305,15 @@ def diagnose_emerging_leaders(m: StockMetrics) -> ListCheck:
     )
 
 
-def diagnose_building_bases(m: StockMetrics, d21_history_30d: list[float]) -> ListCheck:
-    """Mirrors setup_queue_service.list_building_bases filter."""
+def diagnose_building_bases(m: StockMetrics) -> ListCheck:
+    """Mirrors setup_queue_service.list_building_bases membership gate.
+
+    Membership is RANK-based, not threshold-based: the structural gate is just
+    quality universe + Minervini leader + 6+ weeks in base; the list then ranks
+    those by range contraction (recent vs prior half, ATR-normalized) and shows
+    the top N. Absolute tightness is NOT gated — in an ADR≥4% universe genuinely
+    tight bases barely exist, so we surface the most-contracted available.
+    """
     crit: list[Criterion] = []
 
     # QUALITY_FILTERS — institutional liquidity prerequisite
@@ -280,8 +321,7 @@ def diagnose_building_bases(m: StockMetrics, d21_history_30d: list[float]) -> Li
     crit.append(_ge("current_price ≥ $5",      m.current_price, 5.0))
     crit.append(_ge("adr_percent ≥ 4%",         m.adr_percent, 4.0))
 
-    # VCP + weeks in base
-    crit.append(_ge("vcp_score ≥ 70",           m.vcp_score, 70.0))
+    # Multi-week base
     crit.append(_ge("weeks_in_base ≥ 6",        m.weeks_in_base, 6.0))
 
     # Must be quality leader
@@ -291,21 +331,39 @@ def diagnose_building_bases(m: StockMetrics, d21_history_30d: list[float]) -> Li
         "pass" if is_quality_leader(m) else "fail (see Minervini detail)",
     ))
 
-    # ATR oscillation: max-min of d21_atr in last 20 days ≤ 2.0, need ≥10 data points
-    if len(d21_history_30d) < 10:
-        crit.append(Criterion(
-            "ATR oscillation has ≥10 data points",
-            len(d21_history_30d), 10, False, "numeric",
-        ))
-    else:
-        atr_range = max(d21_history_30d) - min(d21_history_30d)
-        crit.append(Criterion(
-            "ATR oscillation (max-min d21_atr last ~20d) ≤ 2.0",
-            atr_range, 2.0, atr_range <= 2.0, "numeric",
-        ))
+    passes = all(c.passes for c in crit)
+    return ListCheck(
+        "building_bases", "Queue · Building Bases", passes, crit,
+        cutoff={"kind": "top_n", "n": 8, "ranked_by": "vcp_quality (band + volume dry-up − event gap)"},
+    )
+
+
+def diagnose_rs_leaders(m: StockMetrics) -> ListCheck:
+    """Mirrors setup_queue_service.list_rs_leaders filter.
+
+    Membership is just the Minervini leader gate over the quality universe;
+    the list then ranks by RS vs SPY (top 40). RS is the sort key, not a filter,
+    so it is surfaced as context rather than a pass/fail criterion.
+    """
+    crit: list[Criterion] = []
+
+    # QUALITY_FILTERS — institutional liquidity prerequisite
+    crit.append(_ge("avg_volume_10d ≥ 800k",   m.avg_volume_10d, 800_000))
+    crit.append(_ge("current_price ≥ $5",      m.current_price, 5.0))
+    crit.append(_ge("adr_percent ≥ 4%",         m.adr_percent, 4.0))
+
+    # Must be quality leader (the only membership gate)
+    crit.append(_bool(
+        "Minervini quality leader",
+        is_quality_leader(m),
+        "pass" if is_quality_leader(m) else "fail (see Minervini detail)",
+    ))
 
     passes = all(c.passes for c in crit)
-    return ListCheck("building_bases", "Queue · Building Bases", passes, crit)
+    return ListCheck(
+        "rs_leaders", "Queue · RS Leaders", passes, crit,
+        cutoff={"kind": "top_n", "n": 40, "ranked_by": "rs_spy"},
+    )
 
 
 # ─── Assembly ────────────────────────────────────────────────────────────────
@@ -315,6 +373,9 @@ def list_check_to_dict(lc: ListCheck) -> dict:
         "key": lc.key,
         "name": lc.name,
         "passes": lc.passes,
-        "criteria": [asdict(c) for c in lc.criteria],
+        "criteria": [
+            {**asdict(c), "key": _CRITERION_KEYS.get(c.name, "")}
+            for c in lc.criteria
+        ],
         "cutoff": lc.cutoff,
     }

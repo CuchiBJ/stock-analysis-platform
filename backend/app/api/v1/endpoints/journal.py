@@ -6,11 +6,14 @@ calibration loop with verified outcomes.
 """
 from __future__ import annotations
 
+import csv
+import io
 from dataclasses import asdict
 from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, delete as sql_delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db
 from app.models.stock import JournalTrade, JournalStopEvent, TransitionObservation
 from app.services.journal_importer import JournalImporter
-from app.services.journal_snapshot_service import take_entry_snapshot
+from app.services.journal_snapshot_service import (
+    reconstruct_regime_at_entry,
+    take_entry_snapshot,
+)
 
 router = APIRouter(prefix="/journal", tags=["journal"])
 
@@ -497,6 +503,258 @@ async def journal_stats(db: AsyncSession = Depends(get_db)):
         "linked_to_observations": linked_count,
         "underpowered_buckets": underpowered,
         "provenance_capture_rate": provenance_capture_rate,
+    }
+
+
+def _fmt_csv_num(v: Optional[float]) -> str:
+    """Render a number for CSV export: None → '', integers without a trailing
+    '.0', floats trimmed to 4 decimals without trailing zeros. Dot-decimal —
+    Google Sheets and the importer's _parse_number both accept it.
+    """
+    if v is None:
+        return ""
+    s = f"{v:.4f}".rstrip("0").rstrip(".")
+    return s if s not in ("", "-") else "0"
+
+
+# Column order mirrors the broker/Google-Sheets "Operaciones" tab the importer
+# reads, so an export is round-trip compatible with POST /journal/import.
+_EXPORT_HEADERS = [
+    "Fecha", "Ticker", "Tipo", "Cantidad", "Precio Unitario", "Costo Total",
+    "Stop", "Retorno", "R", "Duracion (d)", "Retorno %", "Setup", "Contexto",
+    "Error/Nota", "Post Venta",
+]
+
+
+@router.get("/export.csv")
+async def export_csv(db: AsyncSession = Depends(get_db)):
+    """Export the journal as a broker-leg CSV (Compra/Venta rows).
+
+    The app is the source of truth; this keeps the operator's spreadsheet an
+    up-to-date, restorable backup without re-typing trades. The format is
+    round-trip compatible with POST /journal/import.
+
+    One Compra row per decision (original entry, total qty across all legs)
+    followed by one Venta row per closed leg. An open remainder is left unsold,
+    so a re-import reopens it. Rows are ordered chronologically with the Compra
+    ahead of its Ventas, matching the importer's FIFO pairing.
+
+    Caveat: overlapping positions in the same symbol re-pair by FIFO on import
+    (the broker format is inherently FIFO), so entry→exit linkage can shuffle in
+    that uncommon case. Per-leg P&L / R are preserved either way.
+    """
+    rows = (await db.execute(select(JournalTrade))).scalars().all()
+
+    # Group legs into decisions (the original Compra + its partial-sell children).
+    decisions: dict[int, list[JournalTrade]] = {}
+    for t in rows:
+        did = t.parent_trade_id if t.parent_trade_id is not None else t.id
+        decisions.setdefault(did, []).append(t)
+
+    # (sort_key, record) — sort_key orders by date, then Compra(0)<Venta(1), then id.
+    out: list[tuple[tuple, dict]] = []
+    for legs in decisions.values():
+        rep = next((l for l in legs if l.parent_trade_id is None), None) \
+            or min(legs, key=lambda l: l.id)
+        total_qty = sum((l.qty or 0) for l in legs)
+        entry_stop = rep.initial_stop_price if rep.initial_stop_price is not None else rep.stop_price
+        out.append((
+            (rep.entry_date or date.min, 0, rep.id),
+            {
+                "Fecha": rep.entry_date.isoformat() if rep.entry_date else "",
+                "Ticker": rep.symbol,
+                "Tipo": "Compra",
+                "Cantidad": _fmt_csv_num(total_qty),
+                "Precio Unitario": _fmt_csv_num(rep.entry_price),
+                "Costo Total": _fmt_csv_num(rep.entry_price * total_qty) if rep.entry_price is not None else "",
+                "Stop": _fmt_csv_num(entry_stop),
+                "Setup": rep.setup or "",
+                "Contexto": rep.context or "",
+            },
+        ))
+        for l in legs:
+            if l.exit_date is None:
+                continue
+            out.append((
+                (l.exit_date, 1, l.id),
+                {
+                    "Fecha": l.exit_date.isoformat(),
+                    "Ticker": l.symbol,
+                    "Tipo": "Venta",
+                    "Cantidad": _fmt_csv_num(l.qty),
+                    "Precio Unitario": _fmt_csv_num(l.exit_price),
+                    "Retorno": _fmt_csv_num(_derive_pnl(l)),
+                    "R": _fmt_csv_num(_derive_r(l)),
+                    "Duracion (d)": _fmt_csv_num(_derive_duration(l)),
+                    "Retorno %": _fmt_csv_num(l.pnl_pct),
+                    "Setup": l.setup or "",
+                    "Contexto": l.context or "",
+                    "Error/Nota": l.error_note or "",
+                    "Post Venta": l.post_venta or "",
+                },
+            ))
+
+    out.sort(key=lambda x: x[0])
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=_EXPORT_HEADERS, extrasaction="ignore")
+    writer.writeheader()
+    for _, record in out:
+        writer.writerow(record)
+
+    filename = f"journal_{date.today().isoformat()}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/ibkr-status")
+async def ibkr_status():
+    """Whether IBKR Flex auto-sync is configured (drives the UI button state)."""
+    from app.core.config import settings
+    return {
+        "configured": bool(settings.ibkr_flex_token and settings.ibkr_flex_query_id),
+    }
+
+
+@router.get("/ibkr-debug")
+async def ibkr_debug():
+    """Diagnose a Flex sync that returned 0 trades — shows what IBKR actually
+    sent back (sections, date range, trade counts by category) without dumping
+    raw account data."""
+    from app.core.config import settings
+    from app.services.ibkr_flex_service import (
+        IbkrFlexError, diagnose_flex, fetch_flex_statement,
+    )
+    if not (settings.ibkr_flex_token and settings.ibkr_flex_query_id):
+        raise HTTPException(status_code=400, detail="IBKR Flex no configurado.")
+    try:
+        xml = await fetch_flex_statement(
+            settings.ibkr_flex_token, settings.ibkr_flex_query_id
+        )
+        return diagnose_flex(xml)
+    except IbkrFlexError as exc:
+        raise HTTPException(status_code=502, detail=f"IBKR Flex: {exc}")
+
+
+@router.post("/sync-ibkr")
+async def sync_ibkr(db: AsyncSession = Depends(get_db)):
+    """Pull executed trades from IBKR Flex and upsert them into the journal.
+
+    Idempotent: re-running skips already-imported executions and preserves any
+    manual annotations. Requires IBKR_FLEX_TOKEN and IBKR_FLEX_QUERY_ID to be set.
+    """
+    from app.core.config import settings
+    from app.services.ibkr_flex_service import (
+        IbkrFlexError,
+        diagnose_flex,
+        fetch_flex_statement,
+        parse_executions,
+        sync_executions_to_journal,
+    )
+
+    if not (settings.ibkr_flex_token and settings.ibkr_flex_query_id):
+        raise HTTPException(
+            status_code=400,
+            detail="IBKR Flex no configurado. Definí IBKR_FLEX_TOKEN e IBKR_FLEX_QUERY_ID en backend/.env",
+        )
+    try:
+        xml = await fetch_flex_statement(
+            settings.ibkr_flex_token, settings.ibkr_flex_query_id
+        )
+        executions = parse_executions(xml)
+        stats = await sync_executions_to_journal(db, executions)
+    except IbkrFlexError as exc:
+        raise HTTPException(status_code=502, detail=f"IBKR Flex: {exc}")
+
+    result = {
+        "fetched_executions": stats.fetched_executions,
+        "closed_inserted": stats.closed_inserted,
+        "open_upserted": stats.open_upserted,
+        "skipped_existing": stats.skipped_existing,
+        "open_closed_out": stats.open_closed_out,
+        "errors": stats.errors,
+    }
+    # Self-diagnose a 0-trades pull from the XML we already fetched (no extra
+    # IBKR call) so the operator sees *why* nothing came back — usually the Flex
+    # query lacks the Trades section or its period has no executions.
+    if stats.fetched_executions == 0:
+        diag = diagnose_flex(xml)
+        result["diagnostic"] = diag
+        result["hint"] = _ibkr_zero_hint(diag)
+    return result
+
+
+def _ibkr_zero_hint(diag: dict) -> str:
+    if not diag.get("ok"):
+        return f"IBKR devolvió un error: {diag.get('error_message') or diag.get('status')}"
+    sections = diag.get("sections_present") or {}
+    if "Trades" not in sections:
+        return ("El Flex Query no incluye la sección Trades. Editá el query en IBKR "
+                "y agregá la sección 'Trades' (con detalle Execution).")
+    if diag.get("trade_elements_total", 0) == 0:
+        stmts = diag.get("statements") or [{}]
+        rng = stmts[0]
+        return (f"El query incluye Trades pero no hay operaciones en el período "
+                f"{rng.get('fromDate')}–{rng.get('toDate')}. Ampliá el período del Flex Query "
+                f"(ej. 'Last 365 Calendar Days').")
+    if diag.get("parsed_stk_executions", 0) == 0:
+        total = diag.get("trade_elements_total", 0)
+        sample = diag.get("sample_trade") or {}
+        present = sample.get("attribute_names") or []
+        needed = ["symbol", "buySell", "tradeDate", "quantity", "tradePrice", "tradeID"]
+        missing = [f for f in needed if f not in present]
+        return (f"Hay {total} trades pero les faltan campos para parsearlos. "
+                f"Faltan: {missing or '—'}. Editá el Flex Query y agregá esas columnas "
+                f"a la sección Trades (campos presentes hoy: {present}).")
+    return "No se reconocieron ejecuciones; revisá el diagnóstico."
+
+
+@router.post("/backfill-regime")
+async def backfill_regime(
+    force: bool = Query(
+        False,
+        description="Recompute even trades that already have a regime_at_entry.",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reconstruct the objective market regime at entry for journal trades.
+
+    Targets trades that never captured one (CSV-imported historicals and
+    partial-sell children show "sin data" in the Setup × Regime matrix). The
+    regime is rebuilt from StockMetrics as it stood on each trade's entry_date,
+    so the matrix reflects the real market context instead of a gap.
+
+    Results are cached per entry_date within the run — many trades share dates,
+    and the engine is the expensive part. `out_of_range` counts trades whose
+    entry predates the StockMetrics history (left untouched).
+    """
+    q = select(JournalTrade).where(JournalTrade.entry_date.is_not(None))
+    if not force:
+        q = q.where(JournalTrade.regime_at_entry.is_(None))
+    trades = (await db.execute(q)).scalars().all()
+
+    regime_by_date: dict[date, Optional[str]] = {}
+    updated = 0
+    out_of_range = 0
+    for t in trades:
+        if t.entry_date not in regime_by_date:
+            regime_by_date[t.entry_date] = await reconstruct_regime_at_entry(db, t.entry_date)
+        regime = regime_by_date[t.entry_date]
+        if regime is None:
+            out_of_range += 1
+            continue
+        t.regime_at_entry = regime
+        updated += 1
+
+    await db.commit()
+    return {
+        "considered": len(trades),
+        "updated": updated,
+        "out_of_range": out_of_range,
+        "distinct_dates": len(regime_by_date),
     }
 
 

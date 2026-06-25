@@ -6,7 +6,7 @@ import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import {
   TrendingUp, TrendingDown, Activity, Clock,
-  Eye, Volume2, Minimize2, RefreshCw, Shield, ArrowDown, AlertTriangle,
+  Eye, Volume2, Minimize2, RefreshCw, Shield, ArrowDown, AlertTriangle, Rocket,
 } from 'lucide-react'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { API_URL, getTimeAgo, getSeverityColor, getSeverityText } from '@/lib/utils'
@@ -17,6 +17,8 @@ interface TransitionEvent {
   direction: string
   strength: number
   observation_priority: number
+  pullback_quality_score?: number | null
+  setup_score?: number | null
   is_pre_reclaim: boolean
   timestamp: string
   narrative: string
@@ -36,6 +38,8 @@ const TRANSITION_ICON: Record<string, JSX.Element> = {
   compressing:          <Minimize2 className="w-3 h-3 text-purple-400" />,
   flush_and_recover:    <RefreshCw className="w-3 h-3 text-green-300" />,
   support_holding:      <Shield className="w-3 h-3 text-blue-400" />,
+  // Pre-breakout (coiling en máximos)
+  breakout:             <Rocket className="w-3 h-3 text-green-400" />,
   // Reclaim (existe, no domina)
   reclaiming:           <TrendingUp className="w-3 h-3 text-green-300 opacity-70" />,
   continuation_holding: <Activity className="w-3 h-3 text-green-400" />,
@@ -50,6 +54,21 @@ const TRANSITION_ICON: Record<string, JSX.Element> = {
 
 function getIcon(transition: string): JSX.Element {
   return TRANSITION_ICON[transition] ?? <Activity className="w-3 h-3 text-white/30" />
+}
+
+// Score unificado de ranking: breakouts traen setup_score; pullbacks caen al
+// pullback_quality_score. El Feed ordena best-first por este valor.
+function rankScore(event: TransitionEvent): number | null | undefined {
+  return event.setup_score ?? event.pullback_quality_score
+}
+
+// Quality tier from the rank score — the Feed is ordered best-first, so the
+// badge lets you read tradeability at a glance (≥70 fuerte, 55–70 ok, <55 débil).
+function qualityTier(score?: number | null): { label: string; cls: string } | null {
+  if (score == null) return null
+  if (score >= 70) return { label: 'fuerte', cls: 'text-green-400 bg-green-400/10 border-green-400/20' }
+  if (score >= 55) return { label: 'ok',     cls: 'text-amber-400 bg-amber-400/10 border-amber-400/20' }
+  return { label: 'débil', cls: 'text-red-400 bg-red-400/10 border-red-400/20' }
 }
 
 function getRowAccent(event: TransitionEvent): string {
@@ -87,8 +106,10 @@ export default function LiveTransitionFeed() {
   useEffect(() => {
     if (!wsEvent) return
     setTransitions(prev => {
-      const next = [wsEvent, ...prev.filter(t => t.symbol !== wsEvent.symbol)]
-      return next.slice(0, 50)
+      const merged = [wsEvent, ...prev.filter(t => t.symbol !== wsEvent.symbol)]
+      // Keep quality-first ordering even as live events arrive.
+      merged.sort((a, b) => (rankScore(b) ?? 0) - (rankScore(a) ?? 0))
+      return merged.slice(0, 50)
     })
   }, [wsEvent])
 
@@ -153,12 +174,14 @@ export default function LiveTransitionFeed() {
       </div>
 
       <div className="space-y-2 max-h-96 overflow-y-auto">
-        {transitions.map((event, index) => (
+        {transitions.map((event, index) => {
+          const qt = qualityTier(rankScore(event))
+          return (
           <Link
             key={`${event.symbol}-${index}`}
             href={`/stock/${event.symbol}`}
             className={`block p-3 rounded ${getSeverityColor(event.severity)} ${getRowAccent(event)} transition-all hover:opacity-90`}
-            style={{ opacity: index >= 8 ? 0.4 : 1 }}
+            style={{ opacity: (index >= 8 && event.transition !== 'breakout') ? 0.4 : 1 }}
           >
             {/* Row 1: symbol + badges + price context + time */}
             <div className="flex items-start justify-between mb-1">
@@ -177,6 +200,16 @@ export default function LiveTransitionFeed() {
                 <span className={`text-[10px] px-1.5 py-0.5 rounded ${getSeverityText(event.severity)} uppercase`}>
                   {event.transition}
                 </span>
+
+                {/* Quality badge — Feed is ordered best-first by setup quality */}
+                {qt && (
+                  <span
+                    className={`text-[9px] px-1 py-0.5 rounded border ${qt.cls} uppercase tracking-wide shrink-0`}
+                    title={`${event.transition === 'breakout' ? 'Breakout' : 'Pullback'} quality ${rankScore(event)?.toFixed(0)}/100`}
+                  >
+                    {qt.label}
+                  </span>
+                )}
 
                 {/* Price context — inline */}
                 {event.current_price != null && (
@@ -223,7 +256,8 @@ export default function LiveTransitionFeed() {
               )}
             </div>
           </Link>
-        ))}
+          )
+        })}
       </div>
     </Card>
   )

@@ -10,6 +10,49 @@ interface GroupStrength {
   multiplier?: number
 }
 
+interface ScoreBreakdownComponent {
+  name: string
+  kind: string
+  contribution: number
+  max_contribution: number
+}
+
+interface ScoreBreakdown {
+  components: ScoreBreakdownComponent[]
+}
+
+// Splits the priority score into its drivers by `kind` so the operator sees how
+// much of the ranking is the stock's own quality vs. market regime (not
+// controllable) vs. freshness. Segment widths are fractions of 1.0, so the
+// empty remainder = points the setup did NOT earn (e.g. regime drag in a weak tape).
+function ScoreKindBar({ components }: { components: ScoreBreakdownComponent[] }) {
+  const sumKind = (k: string) =>
+    components.filter(c => c.kind === k).reduce((a, c) => a + (c.contribution || 0), 0)
+  const quality = sumKind('symbol_controllable')
+  const regime  = sumKind('market_wide')
+  const fresh   = sumKind('time_dependent')
+  const total   = quality + regime + fresh
+  if (total <= 0) return null
+
+  const pct = (x: number) => Math.round(x * 100)
+  const w   = (x: number) => `${(x * 100).toFixed(1)}%`
+
+  return (
+    <div title="Composición del score de prioridad — el vacío es lo no ganado (ej. drag de régimen)">
+      <div className="flex h-1 rounded-full overflow-hidden bg-white/10">
+        <div className="bg-emerald-400/80" style={{ width: w(quality) }} title={`Calidad propia ${pct(quality)}% · controlable`} />
+        <div className="bg-amber-400/80"   style={{ width: w(regime) }}  title={`Régimen ${pct(regime)}% · mercado, no controlable`} />
+        <div className="bg-sky-400/70"     style={{ width: w(fresh) }}   title={`Freshness ${pct(fresh)}% · tiempo en estado`} />
+      </div>
+      <div className="flex justify-between text-[9px] text-white/40 mt-0.5 leading-none">
+        <span>tú {pct(quality)}%</span>
+        <span className="text-amber-400/70">mercado {pct(regime)}%</span>
+        <span>fresh {pct(fresh)}%</span>
+      </div>
+    </div>
+  )
+}
+
 interface CompactSetupCardProps {
   symbol: string
   state: string
@@ -36,6 +79,7 @@ interface CompactSetupCardProps {
   sampleSize?: number
   contextWarnings?: string[]
   groupStrength?: GroupStrength | null
+  scoreBreakdown?: ScoreBreakdown | null
 }
 
 const FRESHNESS: Record<string, { label: string; cls: string }> = {
@@ -60,6 +104,7 @@ export default function CompactSetupCard({
   sampleSize,
   contextWarnings,
   groupStrength,
+  scoreBreakdown,
 }: CompactSetupCardProps) {
   const contPct = continuationProb !== undefined ? Math.round(continuationProb * 100) : null
 
@@ -131,6 +176,9 @@ export default function CompactSetupCard({
           <span className="text-[10px] font-mono text-white/60 text-right">{priceLabel}</span>
         )}
       </div>
+
+      {/* Row 2b: Score composition by kind — quality vs regime vs freshness */}
+      {scoreBreakdown?.components && <ScoreKindBar components={scoreBreakdown.components} />}
 
       {/* Row 3: Narrative */}
       <p className="text-xs text-white/75 leading-snug">{narrative}</p>

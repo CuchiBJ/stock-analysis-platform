@@ -33,6 +33,18 @@ interface ActionableSetup {
   dist_to_setup_pct?: number
   context_warnings?: string[]
   group_strength?: GroupStrength | null
+  score_breakdown?: ScoreBreakdown | null
+}
+
+interface ScoreBreakdownComponent {
+  name: string
+  kind: string
+  contribution: number
+  max_contribution: number
+}
+
+interface ScoreBreakdown {
+  components: ScoreBreakdownComponent[]
 }
 
 interface ActionableEnvelope {
@@ -158,6 +170,7 @@ export default function TopActionableSetups() {
               }}
               isPriority={index === 0}
               groupStrength={setup.group_strength}
+              scoreBreakdown={setup.score_breakdown}
             />
           )
         })}

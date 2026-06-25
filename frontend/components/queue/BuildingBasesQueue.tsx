@@ -16,11 +16,15 @@ interface GroupStrength {
 
 interface BaseRow {
   symbol: string
-  vcp_score: number
+  vcp_quality: number
+  band_contraction: number
+  volume_dryup: number
+  max_gap_atr: number
+  recent_range_atr: number
+  is_contracting: boolean
   weeks_in_base: number
-  atr_range_last_20d: number
   current_distance_to_ema21_atr: number | null
-  volume_contraction_trend: string
+  vcp_score: number | null
   tradingview_url: string
   market_group?: string | null
   group_strength?: GroupStrength | null
@@ -42,16 +46,17 @@ interface Props {
   refreshKey: number
 }
 
-function trendColor(t: string) {
-  if (t === 'declining') return 'text-green-400'
-  if (t === 'mild') return 'text-yellow-400'
-  return 'text-muted-foreground'
+function qualityTier(q: number): { label: string; cls: string } {
+  if (q >= 0.5) return { label: 'VCP limpio', cls: 'text-green-400' }
+  if (q >= 0.3) return { label: 'en desarrollo', cls: 'text-yellow-400' }
+  return { label: 'flojo', cls: 'text-orange-400' }
 }
 
-function tightnessColor(r: number) {
-  if (r < 1.0) return 'text-green-400'
-  if (r < 1.5) return 'text-yellow-400'
-  return 'text-orange-400'
+// component scores 0–1: higher = better (more contraction / more dry-up)
+function compColor(v: number) {
+  if (v >= 0.5) return 'text-green-400'
+  if (v >= 0.25) return 'text-yellow-400'
+  return 'text-muted-foreground'
 }
 
 export default function BuildingBasesQueue({ refreshKey }: Props) {
@@ -85,7 +90,7 @@ export default function BuildingBasesQueue({ refreshKey }: Props) {
       <div className="space-y-2">
         <Card className="p-6">
           <p className="text-sm text-muted-foreground">
-            No tight VCP bases right now. Criteria: Minervini leader + VCP ≥ 70 + 6+ weeks in base + ATR oscillation ≤ 2.0 over 20 days.
+            No hay líderes Minervini con 6+ semanas en base ahora mismo.
           </p>
         </Card>
       </div>
@@ -94,7 +99,16 @@ export default function BuildingBasesQueue({ refreshKey }: Props) {
 
   return (
     <div className="space-y-2">
-      {rows.map(r => (
+      <p className="text-xs text-muted-foreground px-1">
+        Líderes Minervini (6+ semanas en base) ordenados por <strong className="text-foreground">calidad de VCP</strong>:
+        combina contracción de banda (rango cerrándose) + secado de volumen, penalizando gaps de evento
+        (un salto de noticia no es un VCP). En este universo de alto ADR no existen bases apretadas en
+        absoluto — son las <strong className="text-foreground">8 de mayor calidad disponibles</strong>. Score bajo
+        en toda la lista = no hay VCPs limpios ahora mismo.
+      </p>
+      {rows.map(r => {
+        const tier = qualityTier(r.vcp_quality)
+        return (
         <Card key={r.symbol} className="p-3 hover:bg-muted/30 cursor-pointer transition-colors">
           <div className="flex items-center justify-between gap-4">
             <Link href={`/stock/${r.symbol}`} className="flex items-center gap-3 min-w-0 flex-1">
@@ -103,21 +117,26 @@ export default function BuildingBasesQueue({ refreshKey }: Props) {
                 <GroupStrengthBadge group={r.group_strength.group} badge={r.group_strength.badge} />
               )}
               <div className="text-xs text-muted-foreground">{r.weeks_in_base}w base</div>
-              <div className={`text-xs ${trendColor(r.volume_contraction_trend)}`}>
-                vol {r.volume_contraction_trend}
-              </div>
+              <span className={`text-[10px] px-2 py-0.5 rounded border border-white/10 ${tier.cls}`}>{tier.label}</span>
+              {r.max_gap_atr >= 1.5 && (
+                <span className="text-[10px] text-orange-400" title={`Gap de evento de ${r.max_gap_atr} ATR en la ventana — penaliza la calidad`}>
+                  ⚠ gap {r.max_gap_atr}ATR
+                </span>
+              )}
             </Link>
 
             <div className="flex items-center gap-4 text-xs">
-              <div>
+              <div title="Calidad de VCP 0–1: banda + volumen − gap de evento">
                 <span className="text-muted-foreground">VCP: </span>
-                <span className="font-mono text-foreground">{r.vcp_score.toFixed(0)}</span>
+                <span className={`font-mono font-semibold ${tier.cls}`}>{r.vcp_quality.toFixed(2)}</span>
               </div>
-              <div>
-                <span className="text-muted-foreground">ATR range 20d: </span>
-                <span className={`font-mono ${tightnessColor(r.atr_range_last_20d)}`}>
-                  {r.atr_range_last_20d.toFixed(2)}
-                </span>
+              <div title="Contracción de banda: 1 − rango_reciente/rango_previo (0=plano, 1=cerrando fuerte)">
+                <span className="text-muted-foreground">banda: </span>
+                <span className={`font-mono ${compColor(r.band_contraction)}`}>{r.band_contraction.toFixed(2)}</span>
+              </div>
+              <div title="Secado de volumen: 1 − vol_reciente/vol_previo (0=volumen subiendo, 1=secándose)">
+                <span className="text-muted-foreground">vol seca: </span>
+                <span className={`font-mono ${compColor(r.volume_dryup)}`}>{r.volume_dryup.toFixed(2)}</span>
               </div>
               {r.current_distance_to_ema21_atr != null && (
                 <div>
@@ -140,7 +159,8 @@ export default function BuildingBasesQueue({ refreshKey }: Props) {
             </div>
           </div>
         </Card>
-      ))}
+        )
+      })}
     </div>
   )
 }

@@ -1,3 +1,4 @@
+import statistics
 from datetime import date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +14,7 @@ from app.services.symbol_diagnostic import (
     diagnose_u_and_r,
     diagnose_emerging_leaders,
     diagnose_building_bases,
+    diagnose_rs_leaders,
     list_check_to_dict,
 )
 from app.services.group_strength_service import (
@@ -23,6 +25,7 @@ from app.services.context_decision_filter import (
     fetch_current_context,
     compute_context_multiplier,
 )
+from app.services.benchmarks import is_benchmark, compute_index_trend
 
 router = APIRouter()
 
@@ -76,10 +79,87 @@ async def get_stock_metrics(symbol: str, db: AsyncSession = Depends(get_db)):
     return metrics
 
 
+@router.get("/{symbol}/sector-strength")
+async def get_sector_strength(symbol: str, db: AsyncSession = Depends(get_db)):
+    """The stock's strength *within its own sector* (market_group).
+
+    Ranks the symbol against its sector peers by relative_strength_spy on the
+    latest metrics date — answering "is this a leader or a laggard among its
+    own peers?", which RS-vs-SPY alone can't tell you. Also reports the sector's
+    own strength vs the whole market, so a stock can be read as e.g. "leader of
+    a sector that is itself weak vs market".
+    """
+    sym = symbol.upper()
+    stock = (await db.execute(select(Stock).where(Stock.symbol == sym))).scalar_one_or_none()
+    if not stock:
+        raise HTTPException(status_code=404, detail=f"Symbol {sym} not found")
+
+    group = stock.market_group
+    if not group:
+        return {"available": False, "reason": "El símbolo no tiene sector/grupo asignado."}
+
+    latest_date = (await db.execute(select(func.max(StockMetrics.date)))).scalar()
+    if latest_date is None:
+        return {"available": False, "reason": "No hay métricas cargadas."}
+
+    rows = (await db.execute(
+        select(StockMetrics.symbol, StockMetrics.relative_strength_spy)
+        .join(Stock, Stock.symbol == StockMetrics.symbol)
+        .where(
+            Stock.market_group == group,
+            StockMetrics.date == latest_date,
+            StockMetrics.relative_strength_spy.is_not(None),
+        )
+    )).all()
+
+    peers = [(r.symbol, r.relative_strength_spy) for r in rows]
+    if len(peers) < 2:
+        return {"available": False,
+                "reason": f"Sector '{group}' con muy pocos pares ({len(peers)}) para comparar."}
+
+    mine = next((rs for s, rs in peers if s == sym), None)
+    if mine is None:
+        return {"available": False, "reason": "El símbolo no tiene RS en la última fecha."}
+
+    rs_values = [rs for _, rs in peers]
+    n = len(rs_values)
+    rank = sum(1 for rs in rs_values if rs > mine) + 1           # 1 = strongest
+    percentile = sum(1 for rs in rs_values if rs <= mine) / n     # 0..1, higher = stronger
+
+    if percentile >= 0.75:
+        verdict = "leader"
+    elif percentile >= 0.5:
+        verdict = "strong"
+    elif percentile >= 0.25:
+        verdict = "average"
+    else:
+        verdict = "laggard"
+
+    group_perfs = await fetch_current_group_strengths(db)
+    group_badge = compute_group_multiplier(group, group_perfs).badge
+
+    return {
+        "available": True,
+        "as_of": latest_date.isoformat(),
+        "group": group,
+        "sector": stock.sector,
+        "metric": "relative_strength_spy",
+        "stock_rs": round(mine, 2),
+        "sector_median_rs": round(statistics.median(rs_values), 2),
+        "sector_best_rs": round(max(rs_values), 2),
+        "peer_count": n,
+        "rank": rank,
+        "percentile": round(percentile, 3),
+        "verdict": verdict,
+        "group_vs_market": group_badge,
+    }
+
+
 @router.get("/{symbol}/diagnostic")
 async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db)):
     """Explain pass/fail per system list for any active ticker."""
     sym = symbol.upper()
+    benchmark = is_benchmark(sym)
     stock = (await db.execute(select(Stock).where(Stock.symbol == sym))).scalar_one_or_none()
     if not stock:
         raise HTTPException(status_code=404, detail=f"Symbol {sym} not found")
@@ -102,6 +182,7 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
         "has_metrics": metrics is not None,
         "metrics_date": metrics.date.isoformat() if metrics and metrics.date else None,
         "is_latest": (metrics is not None and latest_date is not None and metrics.date == latest_date),
+        "is_benchmark": benchmark,
     }
 
     if not metrics:
@@ -115,23 +196,27 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
             "minervini_status": None,
         }
 
-    # 25-day metrics history for stateful checks (U&R, building bases)
+    # Metrics history for stateful checks. Fetch 30 days (superset) and slice per
+    # consumer so each diagnostic mirrors its service EXACTLY:
+    #   - U&R uses a 25-day window (list_u_and_r)
+    #   - Building Bases uses a 30-day window (list_building_bases)
+    # Using one shared 25-day window here previously made building_bases disagree
+    # with the live endpoint (passes=True but appears=False).
     today = date.today()
-    hist_start = today - timedelta(days=25)
     history_rows = (await db.execute(
         select(
             StockMetrics.date,
             StockMetrics.distance_to_ema21_atr,
             StockMetrics.distance_to_ema50_atr,
         )
-        .where(StockMetrics.symbol == sym, StockMetrics.date >= hist_start)
+        .where(StockMetrics.symbol == sym, StockMetrics.date >= today - timedelta(days=30))
         .order_by(StockMetrics.date)
     )).all()
-    history_25d = [
+    history_30d = [
         {"date": d, "d21": d21, "d50": d50}
         for d, d21, d50 in history_rows
     ]
-    d21_history_nonnull = [h["d21"] for h in history_25d if h["d21"] is not None]
+    history_25d = [h for h in history_30d if h["date"] >= today - timedelta(days=25)]
 
     # Recent observations (last 30d) for transition_history + boolean checks
     obs_cutoff = today - timedelta(days=30)
@@ -182,8 +267,29 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
         list_check_to_dict(diagnose_live(metrics, has_recent_non_stable)),
         list_check_to_dict(diagnose_u_and_r(metrics, history_25d, has_recent_2d_obs)),
         list_check_to_dict(diagnose_emerging_leaders(metrics)),
-        list_check_to_dict(diagnose_building_bases(metrics, d21_history_nonnull)),
+        list_check_to_dict(diagnose_building_bases(metrics)),
+        list_check_to_dict(diagnose_rs_leaders(metrics)),
     ]
+
+    # Benchmarks (SPY/QQQ/IWM/DIA) are reference instruments, not momentum
+    # setups. Short-circuit the leader-gate framing: mark every list as
+    # not-applicable, skip rank/score augmentation, and return an index-trend
+    # assessment instead of the "Setup roto" narrative.
+    if benchmark:
+        for lst in lists:
+            lst["not_applicable"] = True
+            lst["na_reason"] = "Índice de referencia — no se evalúa como setup de momentum"
+        assessment, benchmark_context = _build_benchmark_assessment(stock, metrics)
+        return {
+            "header": header,
+            "lists": lists,
+            "transition_history": transition_history,
+            "market_context_applied": market_context_applied,
+            "group_strength": group_strength_payload,
+            "minervini_status": None,
+            "assessment": assessment,
+            "benchmark_context": benchmark_context,
+        }
 
     # Compute actual inclusion + rank by hitting the same endpoints/services the UI uses.
     # ALSO captures the sort-key signature so we can explain WHY this symbol is at its rank.
@@ -234,6 +340,10 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
         from app.services.setup_queue_service import SetupQueueService
         return await SetupQueueService(db).list_building_bases()
 
+    async def _fetch_rs_leaders_rows():
+        from app.services.setup_queue_service import SetupQueueService
+        return await SetupQueueService(db).list_rs_leaders()
+
     await _augment_with_rank("actionable", _fetch_actionable_rows, [
         {"field": "priority_score", "direction": "desc", "label": "priority_score"},
     ])
@@ -252,8 +362,10 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
         {"field": "perf_13w", "direction": "desc", "label": "perf_13w"},
     ])
     await _augment_with_rank("building_bases", _fetch_bases_rows, [
-        {"field": "atr_range_last_20d", "direction": "asc", "label": "ATR range 20d (más apretado primero)"},
-        {"field": "vcp_score", "direction": "desc", "label": "VCP score"},
+        {"field": "vcp_quality", "direction": "desc", "label": "VCP quality (banda + volumen − gap)"},
+    ])
+    await _augment_with_rank("rs_leaders", _fetch_rs_leaders_rows, [
+        {"field": "rs_spy", "direction": "desc", "label": "RS vs SPY"},
     ])
 
     # Per-symbol priority_score breakdown for /actionable — works even when the symbol
@@ -421,6 +533,82 @@ def _build_rank_explanation(
         "deciding_factor": deciding_factor["label"] if deciding_factor else None,
         "narrative": " ".join(parts),
     }
+
+
+def _build_benchmark_assessment(stock, m):
+    """Index-appropriate read for benchmarks (SPY/QQQ/IWM/DIA).
+
+    Reads trend against the index's OWN moving averages — NOT against
+    leader thresholds (>30% YoY, ADR≥4%). Never says "roto". Returns
+    (assessment, benchmark_context).
+    """
+    price = m.current_price
+    ema50, ema200 = m.ema50, m.ema200
+    sma150, sma200 = m.sma150, m.sma200
+
+    above_ema50 = price is not None and ema50 is not None and price > ema50
+    above_ema200 = price is not None and ema200 is not None and price > ema200
+    below_ema200 = price is not None and ema200 is not None and price < ema200
+    ma_stack_up = sma150 is not None and sma200 is not None and sma150 > sma200
+    ma_stack_down = sma150 is not None and sma200 is not None and sma150 < sma200
+
+    trend = compute_index_trend(price, ema50, ema200, sma150, sma200)
+
+    headline = (
+        f"Índice de referencia (benchmark). No se evalúa como setup de momentum; "
+        f"se lee como proxy de régimen de mercado. Tendencia actual: {trend}."
+    )
+
+    strengths: list[str] = []
+    gaps: list[dict] = []
+
+    if above_ema50 and above_ema200:
+        strengths.append("Precio sobre EMA50 y EMA200 — estructura de precio constructiva")
+    elif above_ema200:
+        strengths.append("Precio sobre EMA200 — soporte de largo plazo intacto")
+    if ma_stack_up:
+        strengths.append("SMA150 > SMA200 — estructura de medias alcista")
+    if m.perf_1y is not None:
+        strengths.append(f"perf_1y {m.perf_1y:+.0f}% (contexto, no umbral)")
+    if m.perf_13w is not None:
+        strengths.append(f"perf_13w {m.perf_13w:+.0f}% (contexto, no umbral)")
+
+    if below_ema200:
+        gaps.append({
+            "name": "Mercado bajo EMA200",
+            "severity": "medium",
+            "what_to_do": "Contexto de riesgo para los setups individuales — reducir exposición o exigir más calidad.",
+        })
+    elif not above_ema50:
+        gaps.append({
+            "name": "Precio bajo EMA50",
+            "severity": "low",
+            "what_to_do": "Debilidad de corto plazo en el índice — vigilar si pierde la EMA200.",
+        })
+    if ma_stack_down:
+        gaps.append({
+            "name": "SMA150 < SMA200",
+            "severity": "low",
+            "what_to_do": "Estructura de medias en deterioro — régimen frágil.",
+        })
+
+    assessment = {
+        "verdict": "benchmark",
+        "headline": headline,
+        "strengths": strengths,
+        "gaps": gaps,
+    }
+    benchmark_context = {
+        "trend": trend,
+        "current_price": price,
+        "ema50": ema50,
+        "ema200": ema200,
+        "sma150": sma150,
+        "sma200": sma200,
+        "perf_1y": m.perf_1y,
+        "perf_13w": m.perf_13w,
+    }
+    return assessment, benchmark_context
 
 
 def _build_quality_assessment(stock, m, lists, ctx_mult, group_mult) -> dict:

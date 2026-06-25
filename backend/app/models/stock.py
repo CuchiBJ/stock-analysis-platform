@@ -278,10 +278,19 @@ class JournalTrade(Base):
     source_row: Mapped[int] = mapped_column(Integer, nullable=False)
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
+    # Broker auto-sync provenance (IBKR Flex). `broker_exec_id` is the stable
+    # idempotency key — the closing execution's tradeID for a closed leg, or
+    # "<buyExecId>:open" for an open remainder. NULL for manual/CSV trades.
+    # `broker_open_exec_id` is the opening (buy) execution's tradeID, used to
+    # carry manual annotations across the open→closed transition on re-sync.
+    broker_exec_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    broker_open_exec_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
     __table_args__ = (
         Index('ix_journal_symbol_entry', 'symbol', 'entry_date'),
         Index('ix_journal_setup_context', 'setup', 'context'),
         Index('ix_journal_parent_trade_id', 'parent_trade_id'),
+        Index('ix_journal_broker_exec_id', 'broker_exec_id', unique=True),
     )
 
 

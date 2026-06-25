@@ -5,7 +5,7 @@ import { API_URL } from '@/lib/utils'
 import DashboardLayout from '@/components/layout/DashboardLayout'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
-import { Upload, AlertTriangle, Link2, Plus, X, Pencil, Trash2 } from 'lucide-react'
+import { Upload, Download, AlertTriangle, Link2, Plus, X, Pencil, Trash2, RefreshCw } from 'lucide-react'
 import { NewTradeModal, CloseTradeModal, EditTradeModal, type Trade, type Vocab } from './TradeForms'
 
 interface Aggregate {
@@ -98,6 +98,9 @@ export default function JournalPage() {
   const [showNew, setShowNew] = useState(false)
   const [closeTarget, setCloseTarget] = useState<Trade | null>(null)
   const [editTarget, setEditTarget] = useState<Trade | null>(null)
+  const [backfilling, setBackfilling] = useState(false)
+  const [ibkrConfigured, setIbkrConfigured] = useState(false)
+  const [syncing, setSyncing] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
   async function reload() {
@@ -123,6 +126,33 @@ export default function JournalPage() {
 
   useEffect(() => { reload() }, [])
 
+  useEffect(() => {
+    fetch(`${API_URL}/api/v1/journal/ibkr-status`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => setIbkrConfigured(!!d.configured))
+      .catch(() => setIbkrConfigured(false))
+  }, [])
+
+  async function syncIbkr() {
+    setSyncing(true); setImportResult(null)
+    try {
+      const res = await fetch(`${API_URL}/api/v1/journal/sync-ibkr`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
+      setImportResult(
+        `IBKR sincronizado: ${data.closed_inserted} cerradas + ${data.open_upserted} abiertas nuevas · ` +
+        `${data.skipped_existing} sin cambios` +
+        (data.fetched_executions != null ? ` · ${data.fetched_executions} ejecuciones leídas` : '') +
+        (data.hint ? `\n⚠ ${data.hint}` : '')
+      )
+      await reload()
+    } catch (err: any) {
+      setImportResult(`Error: ${err.message}`)
+    } finally {
+      setSyncing(false)
+    }
+  }
+
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
@@ -145,6 +175,24 @@ export default function JournalPage() {
     }
   }
 
+  async function backfillRegime() {
+    setBackfilling(true); setImportResult(null)
+    try {
+      const res = await fetch(`${API_URL}/api/v1/journal/backfill-regime`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
+      setImportResult(
+        `Contexto reconstruido: ${data.updated} trades actualizados` +
+        (data.out_of_range ? ` · ${data.out_of_range} fuera del rango de datos (sin métricas en esa fecha)` : '')
+      )
+      await reload()
+    } catch (err: any) {
+      setImportResult(`Error: ${err.message}`)
+    } finally {
+      setBackfilling(false)
+    }
+  }
+
   async function deleteTrade(id: number) {
     if (!confirm('¿Borrar este trade? No se puede deshacer.')) return
     const res = await fetch(`${API_URL}/api/v1/journal/trades/${id}`, { method: 'DELETE' })
@@ -163,6 +211,26 @@ export default function JournalPage() {
             </p>
           </div>
           <div className="flex gap-2">
+            {ibkrConfigured ? (
+              <button
+                onClick={syncIbkr}
+                disabled={syncing}
+                className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded bg-green-500/20 border border-green-500/40 text-green-300 hover:bg-green-500/30 disabled:opacity-50"
+                title="Trae las operaciones ejecutadas en IBKR automáticamente (deduplica, no pisa tus anotaciones)."
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+                {syncing ? 'Sincronizando…' : 'Sync IBKR'}
+              </button>
+            ) : (
+              <button
+                disabled
+                className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border border-border bg-card text-muted-foreground/60 cursor-not-allowed"
+                title="IBKR no conectado. Definí IBKR_FLEX_TOKEN e IBKR_FLEX_QUERY_ID en backend/.env y reiniciá el backend para habilitar el auto-import."
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Sync IBKR (sin conectar)
+              </button>
+            )}
             <button
               onClick={() => setShowNew(true)}
               disabled={!vocab}
@@ -170,6 +238,13 @@ export default function JournalPage() {
             >
               <Plus className="w-3.5 h-3.5" /> Nuevo trade
             </button>
+            <a
+              href={`${API_URL}/api/v1/journal/export.csv`}
+              className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border border-border bg-card hover:bg-muted/40 transition-colors"
+              title="Descarga el journal como CSV (mismo formato que tu sheet). La app es la fuente de verdad; esto mantiene tu Excel como respaldo actualizado."
+            >
+              <Download className="w-3.5 h-3.5" /> Exportar CSV
+            </a>
             <label className="cursor-pointer inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border border-border bg-card hover:bg-muted/40 transition-colors">
               <Upload className="w-3.5 h-3.5" />
               {uploading ? 'Subiendo…' : 'Importar CSV'}
@@ -179,8 +254,8 @@ export default function JournalPage() {
         </div>
 
         {importResult && (
-          <Card className="p-3 text-xs text-muted-foreground border-amber-400/30 bg-amber-400/5 flex items-center justify-between">
-            <span>{importResult}</span>
+          <Card className="p-3 text-xs text-muted-foreground border-amber-400/30 bg-amber-400/5 flex items-start justify-between gap-2">
+            <span className="whitespace-pre-line">{importResult}</span>
             <button onClick={() => setImportResult(null)} className="text-muted-foreground hover:text-foreground"><X className="w-3 h-3" /></button>
           </Card>
         )}
@@ -315,13 +390,18 @@ export default function JournalPage() {
               <ClosedTradesTable trades={closedTrades} onEdit={setEditTarget} onDelete={deleteTrade} />
             </details>
 
-            <details className="group">
+            <details className="group" open>
               <summary className="cursor-pointer list-none px-4 py-2 bg-muted/30 border border-border rounded text-[10px] uppercase tracking-widest text-muted-foreground hover:bg-muted/50 select-none flex items-center justify-between">
-                <span>Performance Matrix · Setup × Regime (engine)</span>
+                <span>¿Qué setup funciona en qué contexto? · Setup × Régimen (engine)</span>
                 <span className="text-muted-foreground/60 group-open:rotate-90 transition-transform">▸</span>
               </summary>
-              <Card className="p-0 overflow-hidden mt-2">
-                <SetupRegimeMatrixTable rows={stats.by_setup_regime_matrix} />
+              <Card className="p-3 mt-2 space-y-3">
+                <SetupRegimeToolbar
+                  rows={stats.by_setup_regime_matrix}
+                  onBackfill={backfillRegime}
+                  backfilling={backfilling}
+                />
+                <SetupRegimeHeatmap rows={stats.by_setup_regime_matrix} />
               </Card>
             </details>
 
@@ -647,34 +727,147 @@ function RiskEvolutionTable({ rows }: { rows: RiskEvolutionRow[] }) {
   )
 }
 
-function SetupRegimeMatrixTable({ rows }: { rows: SetupRegimeMatrixRow[] }) {
+// Descriptor rankings (best → worst) for ordering regime columns so the heatmap
+// reads naturally: favorable contexts on the left, deteriorating ones to the
+// right. Composite regime is "<participation>/<leadership>".
+const PARTICIPATION_ORDER = ['EXPANDING', 'STABLE', 'NARROWING', 'COLLAPSING']
+const LEADERSHIP_ORDER = ['EXPANDING', 'HEALTHY', 'THINNING', 'EXHAUSTED', 'COLLAPSING']
+
+function regimeFavorability(regime: string): number {
+  const [part, lead] = regime.split('/')
+  const p = PARTICIPATION_ORDER.indexOf(part)
+  const l = LEADERSHIP_ORDER.indexOf(lead)
+  return (p === -1 ? 99 : p) * 10 + (l === -1 ? 9 : l)
+}
+
+// Diverging color scale on avg R (the system's decision unit — comparable across
+// setups). Green = the combination paid; red = it bled.
+function avgRCell(r: number | null): string {
+  if (r == null) return 'bg-muted/20 text-muted-foreground/70'
+  if (r >= 0.75) return 'bg-green-500/30 text-green-100'
+  if (r >= 0.25) return 'bg-green-500/15 text-green-300'
+  if (r > -0.25) return 'bg-muted/40 text-muted-foreground'
+  if (r > -0.75) return 'bg-red-500/15 text-red-300'
+  return 'bg-red-500/30 text-red-100'
+}
+
+function SetupRegimeToolbar({
+  rows, onBackfill, backfilling,
+}: {
+  rows: SetupRegimeMatrixRow[]
+  onBackfill: () => void
+  backfilling: boolean
+}) {
+  const sinData = rows.filter(r => r.regime_at_entry === 'sin data').reduce((s, r) => s + r.n, 0)
   return (
-    <table className="w-full text-xs">
-      <thead className="border-b border-border">
-        <tr className="text-left text-[10px] uppercase tracking-widest text-muted-foreground">
-          <th className="px-3 py-2 font-medium">Setup</th>
-          <th className="px-3 py-2 font-medium">Regime (engine)</th>
-          <th className="px-3 py-2 font-medium text-right">N</th>
-          <th className="px-3 py-2 font-medium text-right">WR</th>
-          <th className="px-3 py-2 font-medium text-right">Avg R</th>
-          <th className="px-3 py-2 font-medium text-right">Total R</th>
-          <th className="px-3 py-2 font-medium text-right">Total P&L</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map(r => (
-          <tr key={`${r.setup}-${r.regime_at_entry}`} className="border-b border-border/50 last:border-0 hover:bg-muted/20">
-            <td className="px-3 py-2 font-mono text-foreground">{r.setup}</td>
-            <td className={`px-3 py-2 font-mono text-xs ${r.regime_at_entry === 'sin data' ? 'text-muted-foreground/50 italic' : 'text-muted-foreground'}`}>{r.regime_at_entry}</td>
-            <td className={`px-3 py-2 text-right tabular-nums ${r.n < 5 ? 'text-amber-400' : 'text-muted-foreground'}`}>{r.n}</td>
-            <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtPct(r.win_rate)}</td>
-            <td className={`px-3 py-2 text-right tabular-nums ${colorPnl(r.avg_r)}`}>{fmtNum(r.avg_r)}</td>
-            <td className={`px-3 py-2 text-right tabular-nums ${colorPnl(r.total_r)}`}>{r.total_r != null ? `${r.total_r >= 0 ? '+' : ''}${r.total_r.toFixed(2)}R` : '—'}</td>
-            <td className={`px-3 py-2 text-right tabular-nums ${colorPnl(r.total_pnl)}`}>{fmtMoney(r.total_pnl)}</td>
+    <div className="flex items-center justify-between gap-3 flex-wrap">
+      <div className="flex items-center gap-2 text-[10px] text-muted-foreground flex-wrap">
+        <span>avg R por celda:</span>
+        <span className="px-1.5 py-0.5 rounded bg-red-500/30 text-red-100">≤ -0.75</span>
+        <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-300">&lt; 0</span>
+        <span className="px-1.5 py-0.5 rounded bg-muted/40 text-muted-foreground">≈ 0</span>
+        <span className="px-1.5 py-0.5 rounded bg-green-500/15 text-green-300">&gt; 0</span>
+        <span className="px-1.5 py-0.5 rounded bg-green-500/30 text-green-100">≥ +0.75</span>
+        <span className="text-muted-foreground/50">· celda con borde ámbar = n &lt; 5 (poca evidencia)</span>
+      </div>
+      {sinData > 0 && (
+        <button
+          onClick={onBackfill}
+          disabled={backfilling}
+          className="inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded bg-blue-500/20 border border-blue-500/40 text-blue-300 hover:bg-blue-500/30 disabled:opacity-50 whitespace-nowrap"
+          title="Reconstruye el régimen objetivo del mercado en la fecha de entrada de los trades que hoy figuran 'sin data'."
+        >
+          {backfilling ? 'Reconstruyendo…' : `Reconstruir contexto (${sinData} sin data)`}
+        </button>
+      )}
+    </div>
+  )
+}
+
+function SetupRegimeHeatmap({ rows }: { rows: SetupRegimeMatrixRow[] }) {
+  const { setups, regimes, cells } = useMemo(() => {
+    const setupN = new Map<string, number>()
+    const regimeSet = new Set<string>()
+    const cells = new Map<string, SetupRegimeMatrixRow>()
+    for (const r of rows) {
+      setupN.set(r.setup, (setupN.get(r.setup) ?? 0) + r.n)
+      regimeSet.add(r.regime_at_entry)
+      cells.set(`${r.setup}|||${r.regime_at_entry}`, r)
+    }
+    const setups = [...setupN.entries()].sort((a, b) => b[1] - a[1]).map(e => e[0])
+    const regimes = [...regimeSet].sort((a, b) => {
+      const sa = a === 'sin data' ? 9999 : regimeFavorability(a)
+      const sb = b === 'sin data' ? 9999 : regimeFavorability(b)
+      return sa - sb
+    })
+    return { setups, regimes, cells }
+  }, [rows])
+
+  if (rows.length === 0) {
+    return <div className="px-1 py-3 text-xs text-muted-foreground">Sin trades cerrados — nada que mostrar todavía.</div>
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="text-xs border-separate border-spacing-1">
+        <thead>
+          <tr>
+            <th className="px-2 py-1 text-left text-[9px] uppercase tracking-widest text-muted-foreground/70 sticky left-0 bg-card z-10">
+              Setup ╲ Régimen
+            </th>
+            {regimes.map(rg => {
+              const [part, lead] = rg.split('/')
+              return (
+                <th key={rg} className="px-2 py-1 text-center font-mono align-bottom" title={rg}>
+                  {rg === 'sin data' ? (
+                    <span className="text-[9px] italic text-muted-foreground/40">sin data</span>
+                  ) : (
+                    <div className="leading-tight text-[9px]">
+                      <div className="text-muted-foreground">{part}</div>
+                      <div className="text-muted-foreground/50">{lead}</div>
+                    </div>
+                  )}
+                </th>
+              )
+            })}
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {setups.map(s => (
+            <tr key={s}>
+              <td className="px-2 py-1 font-mono text-foreground whitespace-nowrap sticky left-0 bg-card z-10">{s}</td>
+              {regimes.map(rg => {
+                const cell = cells.get(`${s}|||${rg}`)
+                if (!cell) {
+                  return <td key={rg} className="px-2 py-1 text-center text-muted-foreground/20">·</td>
+                }
+                const under = cell.n < 5
+                const tooltip =
+                  `${s} · ${rg}\n` +
+                  `N: ${cell.n}\n` +
+                  `Win rate: ${fmtPct(cell.win_rate)}\n` +
+                  `Avg R: ${fmtNum(cell.avg_r)}\n` +
+                  `Total R: ${cell.total_r != null ? (cell.total_r >= 0 ? '+' : '') + cell.total_r.toFixed(2) : '—'}\n` +
+                  `Expectancy: ${fmtMoney(cell.expectancy)}\n` +
+                  `Total P&L: ${fmtMoney(cell.total_pnl)}`
+                return (
+                  <td
+                    key={rg}
+                    title={tooltip}
+                    className={`px-2 py-1 text-center rounded tabular-nums cursor-default ${avgRCell(cell.avg_r)} ${under ? 'ring-1 ring-amber-400/40' : ''}`}
+                  >
+                    <div className="font-semibold">
+                      {cell.avg_r != null ? `${cell.avg_r >= 0 ? '+' : ''}${cell.avg_r.toFixed(2)}R` : '—'}
+                    </div>
+                    <div className="text-[9px] opacity-60">n={cell.n}</div>
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 

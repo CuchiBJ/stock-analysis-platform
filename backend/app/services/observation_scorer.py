@@ -81,6 +81,80 @@ def score_observation_priority(metrics: StockMetrics) -> float:
     return min(100.0, max(0.0, score))
 
 
+def score_breakout_quality(metrics: StockMetrics) -> float:
+    """
+    Score (0-100): qué tan maduro está un setup de breakout (coiling).
+
+    A diferencia de `score_observation_priority` (orientado a pullbacks),
+    este premia el coiling cerca de máximos con volumen seco — la fase
+    anticipatoria del punto de compra de Minervini.
+
+    Buckets calibrados a la distribución real del universo institucional
+    (igual filosofía que `pullback_quality_score`: el máximo es alcanzable y
+    la escala es comparable, para que un breakout fuerte pueda rankear por
+    encima de un pullback). Los ~45 pts que en pullbacks da la proximidad a
+    EMA9/21 acá se reasignan a las dimensiones propias del breakout.
+
+    Components:
+    - Proximidad al pivote 52w (30): cuanto más cerca del máximo, mejor
+    - Tightness semanal        (25): base apretada (techo real ~0.48)
+    - Dry-up de volumen        (20): volume_contraction + rvol bajo
+    - Calidad de tendencia      (15): higher highs/lows semanales
+    - Madurez de la base        (10): semanas en base
+    """
+    score = 0.0
+
+    # 1. Proximidad al pivote / máximo 52w (max 30)
+    if metrics.distance_to_high_52w_atr is not None:
+        d = metrics.distance_to_high_52w_atr
+        if d >= -0.3:    score += 30   # pegado al pivote
+        elif d >= -0.6:  score += 25
+        elif d >= -1.0:  score += 20
+        elif d >= -1.5:  score += 12
+
+    # 2. Tightness semanal (max 25) — buckets por percentil (techo real ~0.48)
+    if metrics.weekly_tightness is not None:
+        t = metrics.weekly_tightness
+        if t >= 0.45:   score += 25
+        elif t >= 0.40: score += 22
+        elif t >= 0.37: score += 18
+        elif t >= 0.34: score += 12
+        elif t >= 0.30: score += 6
+
+    # 3. Dry-up de volumen (max 20)
+    dry = 0.0
+    if metrics.volume_contraction is not None:
+        vc = metrics.volume_contraction
+        if vc >= 0.60:   dry += 12
+        elif vc >= 0.40: dry += 9
+        elif vc >= 0.20: dry += 5
+        elif vc >= 0.05: dry += 2
+    if metrics.relative_volume is not None:
+        rvol = metrics.relative_volume
+        if rvol < 0.4:   dry += 8
+        elif rvol < 0.6: dry += 6
+        elif rvol < 0.8: dry += 3
+    score += min(20, dry)
+
+    # 4. Calidad de tendencia semanal (max 15)
+    if metrics.weekly_trend_quality is not None:
+        wtq = metrics.weekly_trend_quality
+        if wtq >= 0.70:   score += 15
+        elif wtq >= 0.60: score += 11
+        elif wtq >= 0.50: score += 7
+        else:             score += 3
+
+    # 5. Madurez de la base (max 10)
+    if metrics.weeks_in_base is not None:
+        w = metrics.weeks_in_base
+        if w >= 10:  score += 10
+        elif w >= 7: score += 7
+        elif w >= 5: score += 5
+        elif w >= 4: score += 3
+
+    return min(100.0, max(0.0, score))
+
+
 def is_pre_reclaim_candidate(metrics: StockMetrics) -> bool:
     """Quick boolean: stock just lost EMA9/EMA21 (in the trigger zone).
 

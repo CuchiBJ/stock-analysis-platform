@@ -8,9 +8,10 @@ import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import GroupStrengthBadge from '@/components/shared/GroupStrengthBadge'
 import TakeFromQueueButton from '@/components/queue/TakeFromQueueButton'
-import { CheckCircle2, XCircle, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react'
+import { CheckCircle2, XCircle, ChevronDown, ChevronRight, AlertTriangle, Minus } from 'lucide-react'
 
 interface Criterion {
+  key?: string
   name: string
   actual: any
   threshold: any
@@ -52,10 +53,21 @@ interface AssessmentGap {
 }
 
 interface Assessment {
-  verdict: 'elite' | 'strong' | 'mid' | 'weak' | 'disqualified'
+  verdict: 'elite' | 'strong' | 'mid' | 'weak' | 'disqualified' | 'benchmark'
   headline: string
   strengths: string[]
   gaps: AssessmentGap[]
+}
+
+interface BenchmarkContext {
+  trend: string
+  current_price: number | null
+  ema50: number | null
+  ema200: number | null
+  sma150: number | null
+  sma200: number | null
+  perf_1y: number | null
+  perf_13w: number | null
 }
 
 interface MultiplierInfo {
@@ -105,6 +117,8 @@ interface ListCheck {
   total_in_endpoint?: number
   score_breakdown?: ScoreBreakdown | null
   rank_explanation?: RankExplanation | null
+  not_applicable?: boolean
+  na_reason?: string
 }
 
 interface TransitionEntry {
@@ -124,6 +138,7 @@ interface DiagnosticResponse {
     has_metrics: boolean
     metrics_date: string | null
     is_latest: boolean
+    is_benchmark?: boolean
   }
   note?: string
   lists: ListCheck[]
@@ -142,6 +157,7 @@ interface DiagnosticResponse {
   } | null
   minervini_status: Record<string, any> | null
   assessment?: Assessment | null
+  benchmark_context?: BenchmarkContext | null
 }
 
 // ─── Human-readable labels ───────────────────────────────────────────────────
@@ -163,8 +179,43 @@ const SCORE_COMPONENT_LABELS: Record<string, string> = {
   leader_quality:    'Calidad de líder',
 }
 
+// Human-readable labels for list criteria — keyed on the backend's stable
+// criterion `key` (symbol_diagnostic._CRITERION_KEYS). The raw threshold is
+// shown in its own column, so labels carry only the concept.
+const CRITERION_LABELS: Record<string, string> = {
+  min_volume:           'Volumen medio 10d',
+  min_volume_extra:     'Volumen medio 10d (extra)',
+  min_adr:              'ADR',
+  min_adr_extra:        'ADR (extra)',
+  min_price:            'Precio',
+  perf_1y:              'Performance 1 año',
+  perf_13w:             'Performance 13 semanas',
+  price_above_ema50:    'Precio sobre EMA50',
+  price_above_ema200:   'Precio sobre EMA200',
+  price_above_sma150:   'Precio sobre SMA150',
+  sma150_above_sma200:  'SMA150 sobre SMA200',
+  near_52w_high:        'Cercanía al máximo 52s',
+  above_52w_low:        'Sobre mínimo 52s × 1.5',
+  ema_trigger:          'Gatillo EMA9/21 (en banda)',
+  ema21_band:           'Distancia a EMA21 (en banda)',
+  min_pullback_quality: 'Calidad de pullback',
+  recent_transition:    'Transición reciente (no estable)',
+  recent_transition_2d: 'Transición no estable (últimos 2d)',
+  minervini_leader:     'Líder Minervini (SEPA)',
+  not_minervini_leader: 'Aún no líder Minervini',
+  from_above:           'Regla "desde arriba"',
+  no_broke_ema50:       'No rompió EMA50 (25d)',
+  rs_spy_gt_105:        'RS vs SPY > 105',
+  min_weeks_in_base:    'Semanas en base',
+}
+
 function componentLabel(name: string): string {
   return SCORE_COMPONENT_LABELS[name] ?? name
+}
+
+function criterionLabel(c: Criterion): string {
+  if (c.key && CRITERION_LABELS[c.key]) return CRITERION_LABELS[c.key]
+  return c.name
 }
 
 function minerviniLabel(key: string): string {
@@ -174,7 +225,11 @@ function minerviniLabel(key: string): string {
 function formatValue(v: any): string {
   if (v === null || v === undefined) return 'null'
   if (typeof v === 'number') {
-    if (Math.abs(v) >= 10_000) return Math.round(v).toLocaleString()
+    if (Math.abs(v) >= 1_000_000) {
+      const m = v / 1_000_000
+      return (Number.isInteger(m) ? m.toFixed(0) : m.toFixed(1)) + 'M'
+    }
+    if (Math.abs(v) >= 10_000) return Math.round(v / 1000) + 'k'
     if (Number.isInteger(v)) return String(v)
     return v.toFixed(2)
   }
@@ -183,6 +238,22 @@ function formatValue(v: any): string {
 }
 
 function ListRow({ lst }: { lst: ListCheck }) {
+  // Benchmarks aren't momentum setups — show a neutral "no aplica" row
+  // instead of pass/fail coloring and criteria expansion.
+  if (lst.not_applicable) {
+    return (
+      <div className="border-b border-border/50 last:border-0">
+        <div className="w-full flex items-center gap-3 px-4 py-3 text-left opacity-70">
+          <Minus className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+          <span className="text-sm text-foreground flex-1">{lst.name}</span>
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            {lst.na_reason ?? 'No aplica'}
+          </span>
+        </div>
+      </div>
+    )
+  }
+
   // Three states:
   //   "in_list":     passes criteria AND appears in endpoint (or no cutoff)   → green
   //   "below_cutoff": passes criteria but ranks below cutoff                  → amber
@@ -251,7 +322,7 @@ function ListRow({ lst }: { lst: ListCheck }) {
                       ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400/70" />
                       : <XCircle className="w-3.5 h-3.5 text-red-400" />}
                   </td>
-                  <td className="py-1.5 pr-3 text-foreground/80">{c.name}</td>
+                  <td className="py-1.5 pr-3 text-foreground/80" title={c.name}>{criterionLabel(c)}</td>
                   <td className="py-1.5 pr-3 font-mono tabular-nums text-right text-muted-foreground">
                     {formatValue(c.actual)}
                   </td>
@@ -350,6 +421,43 @@ function RankExplanationBlock({ rx }: { rx: RankExplanation }) {
   )
 }
 
+function BenchmarkContextCard({ ctx }: { ctx: BenchmarkContext }) {
+  const trendStyle: Record<string, string> = {
+    alcista: 'text-green-400',
+    lateral: 'text-amber-400',
+    bajista: 'text-red-400',
+  }
+  const fmt = (v: number | null) => (v == null ? '—' : v.toFixed(2))
+  const fmtPct = (v: number | null) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`)
+  const rows: { label: string; value: string }[] = [
+    { label: 'Precio', value: fmt(ctx.current_price) },
+    { label: 'EMA50', value: fmt(ctx.ema50) },
+    { label: 'EMA200', value: fmt(ctx.ema200) },
+    { label: 'SMA150', value: fmt(ctx.sma150) },
+    { label: 'SMA200', value: fmt(ctx.sma200) },
+    { label: 'perf_1y', value: fmtPct(ctx.perf_1y) },
+    { label: 'perf_13w', value: fmtPct(ctx.perf_13w) },
+  ]
+  return (
+    <Card className="p-4">
+      <div className="flex items-center gap-3 mb-3">
+        <h2 className="text-xs uppercase tracking-widest text-muted-foreground">Lectura de índice</h2>
+        <span className={`text-[10px] uppercase tracking-wider ${trendStyle[ctx.trend] ?? 'text-muted-foreground'}`}>
+          Tendencia: {ctx.trend}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+        {rows.map(r => (
+          <div key={r.label}>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wider">{r.label}</div>
+            <div className="font-mono tabular-nums text-foreground mt-1">{r.value}</div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  )
+}
+
 function AssessmentCard({ a }: { a: Assessment }) {
   const verdictStyle: Record<Assessment['verdict'], { label: string; pill: string; bg: string }> = {
     elite:         { label: 'Élite',         pill: 'bg-green-500/20 text-green-300 border-green-500/40',  bg: 'border-green-500/30 bg-green-500/5'   },
@@ -357,6 +465,7 @@ function AssessmentCard({ a }: { a: Assessment }) {
     mid:           { label: 'Mid-tier',      pill: 'bg-amber-500/20 text-amber-300 border-amber-500/40', bg: 'border-amber-500/30 bg-amber-500/5'   },
     weak:          { label: 'Débil',         pill: 'bg-orange-500/20 text-orange-300 border-orange-500/40', bg: 'border-orange-500/30 bg-orange-500/5' },
     disqualified:  { label: 'Descalificado', pill: 'bg-red-500/20 text-red-300 border-red-500/40',       bg: 'border-red-500/30 bg-red-500/5'       },
+    benchmark:     { label: 'Benchmark',     pill: 'bg-slate-500/20 text-slate-200 border-slate-400/40', bg: 'border-slate-400/30 bg-slate-500/5'   },
   }
   const v = verdictStyle[a.verdict]
   const severityStyle: Record<AssessmentGap['severity'], string> = {
@@ -393,7 +502,11 @@ function AssessmentCard({ a }: { a: Assessment }) {
       {a.gaps.length > 0 && (
         <div>
           <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">
-            {a.verdict === 'elite' || a.verdict === 'strong' ? 'Áreas marginales' : 'Qué le falta para ser top'}
+            {a.verdict === 'benchmark'
+              ? 'Lectura de tendencia'
+              : a.verdict === 'elite' || a.verdict === 'strong'
+                ? 'Áreas marginales'
+                : 'Qué le falta para ser top'}
           </p>
           <ul className="space-y-2">
             {a.gaps.map((g, i) => (
@@ -580,10 +693,99 @@ function outcomeBadge(status: string) {
   )
 }
 
+interface SectorStrength {
+  available: boolean
+  reason?: string
+  group?: string
+  sector?: string | null
+  stock_rs?: number
+  sector_median_rs?: number
+  sector_best_rs?: number
+  peer_count?: number
+  rank?: number
+  percentile?: number
+  verdict?: 'leader' | 'strong' | 'average' | 'laggard'
+  group_vs_market?: 'leader' | 'neutral' | 'weak'
+}
+
+function SectorStrengthCard({ s }: { s: SectorStrength }) {
+  const verdictMap: Record<string, { label: string; cls: string; bar: string }> = {
+    leader:  { label: 'Líder del sector',          cls: 'bg-green-500/15 text-green-300 border-green-500/40', bar: 'bg-green-400' },
+    strong:  { label: 'Por encima del promedio',   cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40', bar: 'bg-emerald-400' },
+    average: { label: 'En el promedio',            cls: 'bg-amber-500/15 text-amber-300 border-amber-500/40', bar: 'bg-amber-400' },
+    laggard: { label: 'Rezagada del sector',       cls: 'bg-red-500/15 text-red-300 border-red-500/40', bar: 'bg-red-400' },
+  }
+  const v = verdictMap[s.verdict ?? 'average'] ?? verdictMap.average
+  const pct = Math.round((s.percentile ?? 0) * 100)
+  const groupVsMarket: Record<string, string> = {
+    leader: 'sector fuerte vs el mercado',
+    neutral: 'sector neutral vs el mercado',
+    weak: 'sector débil vs el mercado',
+  }
+  return (
+    <Card className="p-4">
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <h2 className="text-xs uppercase tracking-widest text-muted-foreground">Fuerza vs su sector</h2>
+        <span className={`text-[10px] uppercase tracking-widest px-2 py-1 rounded border ${v.cls}`}>{v.label}</span>
+      </div>
+
+      <div className="flex items-baseline gap-2 mb-1">
+        <span className="text-2xl font-bold tabular-nums text-foreground">#{s.rank}</span>
+        <span className="text-sm text-muted-foreground">de {s.peer_count} en <span className="text-foreground/80">{s.group}</span></span>
+        <span className="ml-auto text-sm tabular-nums text-muted-foreground">percentil {pct}</span>
+      </div>
+
+      {/* Percentile bar — where the stock sits within its sector */}
+      <div className="h-2 w-full rounded-full bg-muted/40 overflow-hidden mb-3">
+        <div className={`h-full ${v.bar}`} style={{ width: `${Math.max(2, pct)}%` }} />
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 text-center">
+        <SectorStat label="Esta acción" rs={s.stock_rs} />
+        <SectorStat label="Par típico" rs={s.sector_median_rs} reference />
+        <SectorStat label="Mejor del sector" rs={s.sector_best_rs} reference />
+      </div>
+      <p className="text-[10px] text-muted-foreground/70 mt-2 leading-snug">
+        RS vs SPY · 100 = igual al índice (13 semanas). Si <span className="text-foreground/70">esta acción</span> supera
+        al <span className="text-foreground/70">par típico</span>, es de las fuertes del sector.
+      </p>
+
+      {s.group_vs_market && (
+        <p className="text-[11px] text-muted-foreground mt-3">
+          Contexto: el {s.group} es <span className="text-foreground/80">{groupVsMarket[s.group_vs_market]}</span>.
+          {s.group_vs_market === 'weak' && s.verdict === 'leader' && ' Líder de un grupo flojo — vigilá la rotación.'}
+        </p>
+      )}
+    </Card>
+  )
+}
+
+// Renders RS as "% vs SPY" (RS 100 = parity, so RS − 100 is the relative
+// over/under-performance) — far more intuitive than the raw 0–500 figure.
+function SectorStat({ label, rs, reference }: { label: string; rs?: number; reference?: boolean }) {
+  // Muestra el RS como índice (100 = SPY), no como delta — evita leer "-4%"
+  // como una pérdida. Solo "esta acción" se colorea (verde/rojo vs 100); las
+  // referencias (par típico, mejor) quedan neutras para no parecer alarmas.
+  const cls = rs == null
+    ? 'text-muted-foreground'
+    : reference
+      ? 'text-foreground/70'
+      : rs >= 100 ? 'text-green-400' : 'text-red-400'
+  return (
+    <div className="rounded bg-muted/20 py-2">
+      <div className={`text-base font-mono tabular-nums ${cls}`}>
+        {rs == null ? '—' : rs.toFixed(0)}
+      </div>
+      <div className="text-[9px] uppercase tracking-widest text-muted-foreground mt-0.5">{label}</div>
+    </div>
+  )
+}
+
 export default function SymbolPage() {
   const params = useParams()
   const symbol = String(params?.symbol ?? '').toUpperCase()
   const [data, setData] = useState<DiagnosticResponse | null>(null)
+  const [sector, setSector] = useState<SectorStrength | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -599,6 +801,16 @@ export default function SymbolPage() {
       .then(d => { if (!cancelled) { setData(d); setError(null) } })
       .catch(e => { if (!cancelled) setError(e.message) })
       .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [symbol])
+
+  useEffect(() => {
+    let cancelled = false
+    setSector(null)
+    fetch(`${API_URL}/api/v1/stocks/${symbol}/sector-strength`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => { if (!cancelled) setSector(d) })
+      .catch(() => { /* non-blocking — card just hides */ })
     return () => { cancelled = true }
   }, [symbol])
 
@@ -621,7 +833,12 @@ export default function SymbolPage() {
                 <div className="min-w-0">
                   <div className="flex items-center gap-3">
                     <h1 className="text-2xl font-bold text-foreground">{data.header.symbol}</h1>
-                    {data.group_strength && (
+                    {data.header.is_benchmark && (
+                      <span className="text-[10px] uppercase tracking-widest px-2 py-1 rounded border bg-slate-500/20 text-slate-200 border-slate-400/40">
+                        Índice / benchmark
+                      </span>
+                    )}
+                    {!data.header.is_benchmark && data.group_strength && (
                       <GroupStrengthBadge group={data.group_strength.group} badge={data.group_strength.badge} />
                     )}
                   </div>
@@ -662,6 +879,12 @@ export default function SymbolPage() {
 
             {/* Quality Assessment — top-level "why is this where it is + what's missing" */}
             {data.assessment && <AssessmentCard a={data.assessment} />}
+
+            {/* Benchmark trend context — factual read vs the index's own MAs */}
+            {data.benchmark_context && <BenchmarkContextCard ctx={data.benchmark_context} />}
+
+            {/* Strength within its own sector (peers in the same market_group) */}
+            {sector?.available && <SectorStrengthCard s={sector} />}
 
             {/* Status across lists */}
             {data.lists.length > 0 && (

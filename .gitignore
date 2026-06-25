@@ -64,6 +64,9 @@ Thumbs.db
 *.log
 logs/
 
+# Runtime PIDs (start.sh / stop.sh)
+.run/
+
 # Jupyter Notebook
 .ipynb_checkpoints
 

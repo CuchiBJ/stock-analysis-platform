@@ -13,7 +13,7 @@ from collections import defaultdict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_
 
-from app.models.stock import Stock, StockMetrics, TransitionObservation
+from app.models.stock import Stock, StockMetrics, StockPrice, TransitionObservation
 from app.services.quality_leader_gate import is_quality_leader, evaluate_minervini_criteria
 from app.services.universe_filters import QUALITY_FILTERS
 
@@ -31,6 +31,72 @@ def _clean(v):
 
 def _tv_url(symbol: str) -> str:
     return f"https://www.tradingview.com/chart/?symbol={symbol}"
+
+
+# Building Bases — ranked by a composite VCP-QUALITY score (relative to each stock),
+# not absolute tightness. In an ADR≥4% universe absolute "tight bases" barely exist
+# (median 20-day price range ≈ 4.4 ATR), so we score the QUALITY of contraction:
+#
+#   vcp_quality = (W_BAND·band_contraction + W_VOL·volume_dryup) · gap_penalty
+#
+#   band_contraction = 1 − recent_half_envelope / prior_half_envelope   (range coiling)
+#   volume_dryup     = 1 − recent_avg_vol / prior_avg_vol               (volume drying)
+#   gap_penalty      = down-weights names whose window contains a large overnight
+#                      close-to-close move (event/news), since that corrupts the
+#                      contraction reading and is not a real VCP.
+#
+# This is what earlier attempts missed: vcp_score>=70 floored long bases at 0; a raw
+# envelope-contraction ratio got fooled by (a) pullbacks where EMA21 falls with price
+# and (b) post-gap settling (e.g. IMVT gapped +35% then went quiet → fake "contraction").
+# Volume confirmation + the gap penalty fix both. Weights are tunable.
+_BB_RANGE_BARS  = 20         # OHLC window, split into prior/recent halves
+_BB_MIN_BARS    = 14         # need at least this many bars to score
+_BB_TOP_N       = 8          # ranked watchlist size (no threshold cutoff)
+_BB_W_BAND      = 0.55       # weight: range/band contraction
+_BB_W_VOLUME    = 0.45       # weight: volume dry-up
+_BB_GAP_FREE_ATR = 1.5       # max close-to-close move (ATR) before the gap penalty bites
+_BB_GAP_FLOOR    = 0.2       # penalty floor for event-driven names
+
+
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, x))
+
+
+def _vcp_quality(bars: list[tuple], atr: float) -> Optional[dict]:
+    """Composite VCP-quality from a list of (high, low, close, volume) bars, oldest→newest.
+
+    Returns dict with vcp_quality + components, or None if insufficient/degenerate data.
+    """
+    if len(bars) < _BB_MIN_BARS or not atr:
+        return None
+    half = len(bars) // 2
+    prior, recent = bars[:half], bars[half:]
+
+    env_p = max(h for h, _, _, _ in prior) - min(l for _, l, _, _ in prior)
+    env_r = max(h for h, _, _, _ in recent) - min(l for _, l, _, _ in recent)
+    if env_p <= 0:
+        return None
+    band = _clamp01(1 - env_r / env_p)
+
+    vol_p = sum(v for *_, v in prior) / len(prior)
+    vol_r = sum(v for *_, v in recent) / len(recent)
+    volume_dryup = _clamp01(1 - vol_r / vol_p) if vol_p > 0 else 0.0
+
+    closes = [c for _, _, c, _ in bars]
+    max_gap_atr = max(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes))) / atr
+    if max_gap_atr < _BB_GAP_FREE_ATR:
+        gap_penalty = 1.0
+    else:
+        gap_penalty = max(_BB_GAP_FLOOR, 1 - (max_gap_atr - _BB_GAP_FREE_ATR) / 2.0)
+
+    quality = (_BB_W_BAND * band + _BB_W_VOLUME * volume_dryup) * gap_penalty
+    return {
+        'vcp_quality': round(quality, 3),
+        'band_contraction': round(band, 2),
+        'volume_dryup': round(volume_dryup, 2),
+        'max_gap_atr': round(max_gap_atr, 1),
+        'recent_range_atr': round(env_r / atr, 2),
+    }
 
 
 class SetupQueueService:
@@ -178,6 +244,184 @@ class SetupQueueService:
             r['market_group'] = market_groups.get(r['symbol'])
         return [_clean(r) for r in results]
 
+    async def _spy_perf_1w(self) -> Optional[float]:
+        """SPY's trailing 1-week (~5 trading days) performance %, from price history."""
+        result = await self.db.execute(
+            select(StockPrice.close)
+            .where(StockPrice.symbol == 'SPY')
+            .order_by(StockPrice.date.desc())
+            .limit(6)
+        )
+        closes = [row[0] for row in result.fetchall()]
+        if len(closes) < 6 or not closes[5]:
+            return None
+        return ((closes[0] - closes[5]) / closes[5]) * 100
+
+    async def _spy_return_between(self, start_date, end_date) -> Optional[float]:
+        """SPY % return from start_date close to end_date close (None if either missing)."""
+        result = await self.db.execute(
+            select(StockPrice.date, StockPrice.close).where(
+                StockPrice.symbol == 'SPY',
+                StockPrice.date.in_([start_date, end_date]),
+            )
+        )
+        by_date = {row[0]: row[1] for row in result.fetchall()}
+        s, e = by_date.get(start_date), by_date.get(end_date)
+        if not s or not e:
+            return None
+        return ((e - s) / s) * 100
+
+    @staticmethod
+    def _holding_status(m: StockMetrics) -> str:
+        """How well a leader is holding up in the pullback — down-day context.
+
+        Ordered strongest → weakest:
+          at_highs      — within 2 ATR of the 52w high, barely pulled back
+          above_ema21   — still above fast support (EMA21)
+          testing_ema50 — already lost EMA21, now holding/testing EMA50
+          deep_pullback — below EMA50, extended retrace
+        """
+        d_high = m.distance_to_high_52w_atr
+        d21 = m.distance_to_ema21_atr
+        d50 = m.distance_to_ema50_atr
+        if d_high is not None and d_high >= -2.0:
+            return 'at_highs'
+        if d21 is not None and d21 > 0:
+            return 'above_ema21'
+        if d50 is not None and d50 > 0:
+            return 'testing_ema50'
+        return 'deep_pullback'
+
+    async def list_rs_leaders(self, sort: str = 'rs', window: int = 5) -> list[dict]:
+        """RS Leaders — Minervini leaders ranked by relative strength vs SPY.
+
+        Two ranking modes over the same leader pool (gate unchanged):
+
+        - sort='rs' (default): trailing 13-week RS (relative_strength_spy) desc.
+          The "who has been strongest" watchlist for down days.
+
+        - sort='momentum': where relative strength is flowing RIGHT NOW. Ranks by
+          rs_momentum_score = rs_delta_pct + (resilience if SPY fell over the window).
+          rs_delta_pct is the % slope of the RS line over the last `window` sessions
+          (scale-free, so it surfaces names whose RS is *accelerating*, not just the
+          ones with the highest absolute RS). resilience = stock_return − spy_return
+          over the window, added only while the SPY is falling — rewarding leaders
+          that hold up during the correction.
+
+        `window` is the number of trading sessions for the momentum lookback (3/5/10).
+        Momentum fields are computed in both modes so the UI can show them either way.
+        """
+        if window not in (3, 5, 10):
+            window = 5
+
+        latest_date = await self._latest_date()
+        if not latest_date:
+            return []
+
+        q = select(StockMetrics).where(
+            StockMetrics.date == latest_date,
+            *QUALITY_FILTERS,
+            StockMetrics.relative_strength_spy.isnot(None),
+        )
+        rows = (await self.db.execute(q)).scalars().all()
+
+        leaders = [m for m in rows if is_quality_leader(m)]
+        if not leaders:
+            return []
+
+        symbols = [m.symbol for m in leaders]
+
+        # Session calendar from distinct metric dates (desc). baseline = `window` sessions back.
+        dates_rows = (await self.db.execute(
+            select(StockMetrics.date)
+            .where(StockMetrics.date <= latest_date)
+            .distinct()
+            .order_by(StockMetrics.date.desc())
+            .limit(window + 5)
+        )).scalars().all()
+        baseline_date = dates_rows[window] if len(dates_rows) > window else None
+
+        # Bulk baseline metrics (RS + price) at baseline_date for all leaders, one query.
+        baseline_by_sym: dict[str, tuple] = {}
+        spy_return_n: Optional[float] = None
+        if baseline_date is not None:
+            base_rows = (await self.db.execute(
+                select(
+                    StockMetrics.symbol,
+                    StockMetrics.relative_strength_spy,
+                    StockMetrics.current_price,
+                ).where(
+                    StockMetrics.symbol.in_(symbols),
+                    StockMetrics.date == baseline_date,
+                )
+            )).all()
+            baseline_by_sym = {sym: (rs, px) for sym, rs, px in base_rows}
+            spy_return_n = await self._spy_return_between(baseline_date, latest_date)
+
+        spy_perf_1w = await self._spy_perf_1w()
+
+        results = []
+        for m in leaders:
+            rel_1w = None
+            if m.perf_1w is not None and spy_perf_1w is not None:
+                rel_1w = round(m.perf_1w - spy_perf_1w, 1)
+
+            # Momentum block (None when no baseline / missing data)
+            rs_delta = rs_delta_pct = stock_return_n = resilience = rs_momentum_score = None
+            held_up = False
+            base = baseline_by_sym.get(m.symbol)
+            if base is not None:
+                rs_base, px_base = base
+                if rs_base is not None:
+                    rs_delta = m.relative_strength_spy - rs_base
+                    if rs_base != 0:
+                        rs_delta_pct = rs_delta / rs_base * 100
+                if px_base and m.current_price is not None:
+                    stock_return_n = (m.current_price - px_base) / px_base * 100
+                if stock_return_n is not None and spy_return_n is not None:
+                    resilience = stock_return_n - spy_return_n
+                    held_up = spy_return_n < 0 and stock_return_n >= 0
+                if rs_delta_pct is not None:
+                    bonus = resilience if (resilience is not None and spy_return_n is not None and spy_return_n < 0) else 0.0
+                    rs_momentum_score = rs_delta_pct + bonus
+
+            results.append({
+                'symbol': m.symbol,
+                'rs_spy': round(m.relative_strength_spy, 1),
+                'rs_qqq': round(m.relative_strength_qqq, 1) if m.relative_strength_qqq is not None else None,
+                'perf_1w': round(m.perf_1w, 1) if m.perf_1w is not None else None,
+                'rel_strength_1w': rel_1w,
+                'perf_4w': round(m.perf_4w, 1) if m.perf_4w is not None else None,
+                'perf_13w': round(m.perf_13w, 1) if m.perf_13w is not None else None,
+                'distance_to_high_52w_atr': round(m.distance_to_high_52w_atr, 2) if m.distance_to_high_52w_atr is not None else None,
+                'distance_to_ema21_atr': round(m.distance_to_ema21_atr, 2) if m.distance_to_ema21_atr is not None else None,
+                'distance_to_ema50_atr': round(m.distance_to_ema50_atr, 2) if m.distance_to_ema50_atr is not None else None,
+                'current_price': round(m.current_price, 2) if m.current_price else None,
+                'holding_status': self._holding_status(m),
+                # momentum block
+                'window': window,
+                'rs_delta': round(rs_delta, 1) if rs_delta is not None else None,
+                'rs_delta_pct': round(rs_delta_pct, 1) if rs_delta_pct is not None else None,
+                'stock_return_n': round(stock_return_n, 1) if stock_return_n is not None else None,
+                'spy_return_n': round(spy_return_n, 1) if spy_return_n is not None else None,
+                'resilience': round(resilience, 1) if resilience is not None else None,
+                'held_up': held_up,
+                'rs_momentum_score': round(rs_momentum_score, 1) if rs_momentum_score is not None else None,
+                'tradingview_url': _tv_url(m.symbol),
+            })
+
+        if sort == 'momentum':
+            # Momentum desc; rows without a score (no baseline) sink to the bottom.
+            results.sort(key=lambda r: (r['rs_momentum_score'] is None, -(r['rs_momentum_score'] or 0)))
+        else:
+            results.sort(key=lambda r: -(r['rs_spy'] or 0))
+
+        top = results[:40]
+        market_groups = await self._fetch_market_groups([r['symbol'] for r in top])
+        for r in top:
+            r['market_group'] = market_groups.get(r['symbol'])
+        return [_clean(r) for r in top]
+
     async def list_emerging_leaders(self) -> list[dict]:
         latest_date = await self._latest_date()
         if not latest_date:
@@ -246,79 +490,64 @@ class SetupQueueService:
         if not latest_date:
             return []
 
-        # Initial filter on current metrics
+        # Structural gate only: quality universe + Minervini leader + has been basing
+        # 6+ weeks. NO absolute tightness cutoff — we RANK by range contraction below.
         q = select(StockMetrics).where(
             StockMetrics.date == latest_date,
             *QUALITY_FILTERS,
-            StockMetrics.vcp_score >= 70,
             StockMetrics.weeks_in_base >= 6,
         )
         rows = (await self.db.execute(q)).scalars().all()
-
-        if not rows:
-            return []
-
-        # Filter by is_quality_leader (pure function, no extra query)
         candidates = [m for m in rows if is_quality_leader(m)]
         if not candidates:
             return []
 
-        symbols = [m.symbol for m in candidates]
+        atr_by_sym = {m.symbol: m.atr for m in candidates}
+        symbols = list(atr_by_sym.keys())
 
-        # Bulk fetch last 20 trading days of d21_atr for oscillation check
+        # Bulk fetch OHLCV for the contraction window. ~40 calendar days guarantees
+        # _BB_RANGE_BARS (20) trading bars per symbol.
         today = date.today()
-        hist_start = today - timedelta(days=30)
-        hist_q = select(
-            StockMetrics.symbol,
-            StockMetrics.distance_to_ema21_atr,
-        ).where(
-            StockMetrics.symbol.in_(symbols),
-            StockMetrics.date >= hist_start,
-            StockMetrics.distance_to_ema21_atr.isnot(None),
-        )
-        hist_rows = (await self.db.execute(hist_q)).all()
-
-        d21_by_sym: dict[str, list[float]] = defaultdict(list)
-        for sym, d21 in hist_rows:
-            d21_by_sym[sym].append(d21)
+        px_rows = (await self.db.execute(
+            select(StockPrice.symbol, StockPrice.high, StockPrice.low, StockPrice.close, StockPrice.volume)
+            .where(
+                StockPrice.symbol.in_(symbols),
+                StockPrice.date >= today - timedelta(days=40),
+            )
+            .order_by(StockPrice.symbol, StockPrice.date)
+        )).all()
+        ohlc_by_sym: dict[str, list[tuple]] = defaultdict(list)
+        for sym, hi, lo, cl, vol in px_rows:
+            ohlc_by_sym[sym].append((hi, lo, cl, vol))
 
         results = []
         for m in candidates:
-            values = d21_by_sym.get(m.symbol, [])
-            # Need at least 10 data points to be meaningful
-            if len(values) < 10:
+            bars = ohlc_by_sym.get(m.symbol, [])[-_BB_RANGE_BARS:]
+            q = _vcp_quality(bars, atr_by_sym.get(m.symbol))
+            if q is None:
                 continue
-            atr_range = max(values) - min(values)
-            if atr_range > 2.0:
-                continue
-
-            # Volume contraction trend (simple: current value)
-            vc = m.volume_contraction
-            if vc is None:
-                trend = 'unknown'
-            elif vc > 25:
-                trend = 'declining'
-            elif vc > 10:
-                trend = 'mild'
-            else:
-                trend = 'flat'
 
             results.append({
                 'symbol': m.symbol,
-                'vcp_score': round(m.vcp_score, 1),
+                'vcp_quality': q['vcp_quality'],
+                'band_contraction': q['band_contraction'],
+                'volume_dryup': q['volume_dryup'],
+                'max_gap_atr': q['max_gap_atr'],
+                'recent_range_atr': q['recent_range_atr'],
+                'is_contracting': q['band_contraction'] > 0,
                 'weeks_in_base': m.weeks_in_base,
-                'atr_range_last_20d': round(atr_range, 2),
                 'current_distance_to_ema21_atr': round(m.distance_to_ema21_atr, 2) if m.distance_to_ema21_atr is not None else None,
-                'volume_contraction_trend': trend,
+                'vcp_score': round(m.vcp_score, 1) if m.vcp_score is not None else None,  # reference only
                 'tradingview_url': _tv_url(m.symbol),
             })
 
-        # Sort by tightest range first, then highest vcp_score
-        results.sort(key=lambda r: (r['atr_range_last_20d'], -r['vcp_score']))
-        market_groups = await self._fetch_market_groups([r['symbol'] for r in results])
-        for r in results:
+        # Rank by composite VCP quality (higher = cleaner contraction + volume + no event gap).
+        results.sort(key=lambda r: -r['vcp_quality'])
+        top = results[:_BB_TOP_N]
+        market_groups = await self._fetch_market_groups([r['symbol'] for r in top])
+        for r in top:
             r['market_group'] = market_groups.get(r['symbol'])
-        return [_clean(r) for r in results]
+        return [_clean(r) for r in top]
 
     async def get_symbol_history(self, symbol: str, days: int = 30) -> dict:
         symbol = symbol.upper()

@@ -39,9 +39,13 @@ class SectorService:
               AND s.market_group IS NOT NULL
               AND l.avg_volume_10d  >= 800000
               AND l.current_price   >= 5.0
-              AND l.adr_percent     >= 4.0
               AND l.perf_1w         IS NOT NULL
         """))
+        # NB: NO se filtra por ADR aquí. El ADR es un criterio de TRADEO, no de
+        # representatividad del sector. Filtrarlo achicaba los grupos de baja
+        # volatilidad (Banks/Real Estate/Utilities a ~4 acciones) y sesgaba el
+        # agregado. Sin ADR todos los grupos quedan ≥16 → la señal no miente.
+        # El filtro de tradeo (ADR≥4%) vive en get_group_constituents.
         rows = result.fetchall()
 
         groups: dict = defaultdict(list)
@@ -86,7 +90,163 @@ class SectorService:
 
         sector_performance.sort(key=lambda x: x["performance_monthly"], reverse=True)
         return sector_performance
-    
+
+    @cache_sectors
+    async def calculate_sector_rotation(self, lookback_sessions: int = 5) -> Dict:
+        """Sector rotation by momentum: which market_groups are GAINING leadership.
+
+        Compares each group's average relative strength (RS vs SPY) now vs
+        `lookback_sessions` trading days ago, ranks groups at both points, and
+        flags groups moving up the ranking as `rotating_in` (and down as
+        `rotating_out`). Answers "qué sectores vienen ganando".
+        """
+        # Trading dates present in stock_metrics (desc). Anchor now + lookback.
+        date_rows = (await self.db.execute(
+            select(StockMetrics.date).distinct().order_by(StockMetrics.date.desc())
+        )).scalars().all()
+        if not date_rows:
+            return {"as_of": None, "compared_to": None, "lookback_sessions": lookback_sessions,
+                    "rotating_in": [], "rotating_out": [], "groups": []}
+        date_now = date_rows[0]
+        idx = min(lookback_sessions, len(date_rows) - 1)
+        date_prev = date_rows[idx]
+
+        # One query for both snapshots. Same liquidity floor as performance, but
+        # NO ADR filter — el ADR es criterio de tradeo, no de representatividad; al
+        # excluirlo, sectores de baja volatilidad (Banks/Real Estate/Utilities) dejan
+        # de aparecer con muestras de ~4 acciones y la rotación deja de mentir.
+        rows = (await self.db.execute(text("""
+            SELECT s.market_group, l.date, l.relative_strength_spy, l.perf_4w
+            FROM stock_metrics l
+            JOIN stocks s ON s.symbol = l.symbol
+            WHERE l.date IN (:d_now, :d_prev)
+              AND s.market_group IS NOT NULL
+              AND l.avg_volume_10d >= 800000
+              AND l.current_price  >= 5.0
+        """), {"d_now": date_now, "d_prev": date_prev})).fetchall()
+
+        # Average RS (fallback perf_4w) per (group, date); count stocks per group at now.
+        sums: dict = defaultdict(lambda: defaultdict(float))
+        counts: dict = defaultdict(lambda: defaultdict(int))
+        for r in rows:
+            val = r.relative_strength_spy if r.relative_strength_spy is not None else r.perf_4w
+            if val is None or not math.isfinite(val):
+                continue
+            sums[r.market_group][r.date] += val
+            counts[r.market_group][r.date] += 1
+
+        def avg(group, d):
+            n = counts[group].get(d, 0)
+            return sums[group][d] / n if n else None
+
+        # Eligible groups: ≥5 stocks at the current snapshot and present at both dates.
+        eligible = [g for g in sums
+                    if counts[g].get(date_now, 0) >= 5
+                    and avg(g, date_now) is not None and avg(g, date_prev) is not None]
+
+        rank_now = {g: i + 1 for i, g in enumerate(
+            sorted(eligible, key=lambda g: avg(g, date_now), reverse=True))}
+        rank_prev = {g: i + 1 for i, g in enumerate(
+            sorted(eligible, key=lambda g: avg(g, date_prev), reverse=True))}
+
+        groups = []
+        for g in eligible:
+            rdelta = rank_prev[g] - rank_now[g]
+            rs_delta = round(avg(g, date_now) - avg(g, date_prev), 2)
+            direction = "rotating_in" if rdelta >= 2 else "rotating_out" if rdelta <= -2 else "stable"
+            groups.append({
+                "name": g,
+                "rank_now": rank_now[g],
+                "rank_prev": rank_prev[g],
+                "rank_delta": rdelta,
+                "rs_now": round(avg(g, date_now), 2),
+                "rs_delta": rs_delta,
+                "stock_count": counts[g].get(date_now, 0),
+                "direction": direction,
+            })
+
+        def _summary(items):
+            return [{"name": x["name"], "rank_delta": x["rank_delta"],
+                     "rs_delta": x["rs_delta"], "rank_now": x["rank_now"]} for x in items]
+
+        rotating_in = sorted([g for g in groups if g["direction"] == "rotating_in"],
+                             key=lambda x: (x["rank_delta"], x["rs_delta"]), reverse=True)
+        rotating_out = sorted([g for g in groups if g["direction"] == "rotating_out"],
+                              key=lambda x: (x["rank_delta"], x["rs_delta"]))
+
+        return {
+            "as_of": date_now.isoformat() if date_now else None,
+            "compared_to": date_prev.isoformat() if date_prev else None,
+            "lookback_sessions": idx,
+            "rotating_in": _summary(rotating_in[:3]),
+            "rotating_out": _summary(rotating_out[:3]),
+            "groups": sorted(groups, key=lambda x: x["rank_now"]),
+        }
+
+    async def get_group_constituents(self, group: str, limit: int = 60) -> Dict:
+        """Stocks within a market_group, ranked by score + structure.
+
+        Uses the same composite the heatmap leaders use
+        (pullback_quality_score * 0.6 + relative_strength_spy * 0.4), over the
+        institutional-quality universe, so the order matches what's surfaced
+        elsewhere. Returns puntaje (pullback_quality), structure (weekly trend
+        quality) and RS per stock so the UI can show why each ranks where it does.
+        """
+        latest_date = (await self.db.execute(select(func.max(StockMetrics.date)))).scalar()
+        if latest_date is None:
+            return {"group": group, "as_of": None, "count": 0, "stocks": []}
+
+        rows = (await self.db.execute(
+            select(
+                Stock.symbol, Stock.name,
+                StockMetrics.current_price,
+                StockMetrics.pullback_quality_score,
+                StockMetrics.weekly_trend_quality,
+                StockMetrics.relative_strength_spy,
+                StockMetrics.distance_to_ema21_atr,
+                StockMetrics.adr_percent,
+                StockMetrics.perf_1w,
+            )
+            .join(Stock, Stock.symbol == StockMetrics.symbol)
+            .where(
+                Stock.market_group == group,
+                StockMetrics.date == latest_date,
+                StockMetrics.avg_volume_10d >= 800000,
+                StockMetrics.current_price >= 5.0,
+                StockMetrics.adr_percent >= 4.0,
+            )
+        )).all()
+
+        stocks = []
+        for r in rows:
+            pq = r.pullback_quality_score or 0.0
+            rs = r.relative_strength_spy or 100.0
+            structure = (r.weekly_trend_quality or 0) * 100  # 0-100
+            # Orden por PUNTAJE + ESTRUCTURA (ambos 0-100, comparables). El RS NO
+            # entra en el orden: en escala ~100-300 dominaría el ranking. Puntaje
+            # pesa más que estructura porque es la señal principal de calidad.
+            composite = pq * 0.7 + structure * 0.3
+            stocks.append({
+                "symbol": r.symbol,
+                "name": r.name,
+                "current_price": round(r.current_price, 2) if r.current_price else None,
+                "score": round(pq, 1),                # puntaje
+                "structure": round(structure, 0),     # estructura 0-100
+                "rs": round(rs, 1),
+                "dist_ema21_atr": round(r.distance_to_ema21_atr, 2) if r.distance_to_ema21_atr is not None else None,
+                "adr_percent": round(r.adr_percent, 1) if r.adr_percent else None,
+                "perf_1w": round(r.perf_1w, 1) if r.perf_1w is not None else None,
+                "composite": round(composite, 1),
+            })
+
+        stocks.sort(key=lambda x: x["composite"], reverse=True)
+        return {
+            "group": group,
+            "as_of": latest_date.isoformat(),
+            "count": len(stocks),
+            "stocks": stocks[:limit],
+        }
+
     async def _get_spy_performance(self) -> float:
         """Get SPY monthly performance for comparison"""
         try:

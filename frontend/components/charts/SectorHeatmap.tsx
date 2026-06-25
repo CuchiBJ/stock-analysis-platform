@@ -5,6 +5,7 @@ import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import { TrendingUp, TrendingDown, Activity, Flame, ArrowDown } from 'lucide-react'
 import { API_URL } from '@/lib/utils'
+import SectorConstituentsDrawer from '@/components/dashboard/SectorConstituentsDrawer'
 
 type ViewMode = 'daily' | 'weekly' | 'monthly' | 'rs_spy' | 'momentum' | 'rvol'
 
@@ -57,6 +58,7 @@ export default function SectorHeatmap() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('weekly')
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(null)
 
   useEffect(() => {
     const fetchData = async () => {
@@ -195,8 +197,9 @@ export default function SectorHeatmap() {
           return (
             <div
               key={sector.name}
+              onClick={() => setSelectedGroup(sector.name)}
               className={`${colors.bg} border-l-2 ${familyBorder(sector.name)} p-3 rounded cursor-pointer hover:opacity-80 transition-opacity relative group`}
-              title={`${sector.name}: ${viewModeLabels[viewMode]} = ${value.toFixed(2)}% | Trend: ${sector.trend} | Strength: ${sector.strength}`}
+              title={`${sector.name}: ${viewModeLabels[viewMode]} = ${value.toFixed(2)}% | Trend: ${sector.trend} | Strength: ${sector.strength} — clic para ver acciones`}
             >
               <div className="flex items-start justify-between mb-1">
                 <div className={`font-bold text-xs truncate flex-1 ${colors.text}`}>{sector.name}</div>
@@ -216,6 +219,8 @@ export default function SectorHeatmap() {
           )
         })}
       </div>
+
+      <SectorConstituentsDrawer group={selectedGroup} onClose={() => setSelectedGroup(null)} />
     </Card>
   )
 }

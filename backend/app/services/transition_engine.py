@@ -52,6 +52,9 @@ class OperationalTransition(Enum):
     FLUSH_AND_RECOVER   = "flush_and_recover"   # Spike bajo + recovery — undercut constructivo
     SUPPORT_HOLDING     = "support_holding"      # Bounces en zona soporte, institucional defendiendo
 
+    # Pre-breakout (coiling cerca de máximos con volumen seco — punto de compra Minervini)
+    BREAKOUT            = "breakout"             # Líder comprimido en máximos, volumen contrayendo
+
     # Reclaim / continuation (existen, no dominan)
     RECLAIMING          = "reclaiming"           # Recuperando EMA21 — señal tardía
     CONTINUATION_HOLDING = "continuation_holding" # Holding EMA21 con estructura
@@ -720,16 +723,38 @@ class TransitionEngine:
                 (prev_ema21_atr is None or prev_ema21_atr < 0)):
             return OperationalTransition.RECLAIMING
 
-        # 10. Stabilizing — quality leader with structure tightening and volume
-        # contracting above EMA21. Pre-breakout uptrend complement of COMPRESSING.
+        # 10. Breakout (coiling) — quality leader comprimido cerca de máximos con
+        # volumen seco. Anticipatorio: NO requiere quiebre confirmado ni expansión
+        # de volumen. Versión más específica de STABILIZING (cerca del pivote 52w),
+        # por eso se evalúa primero.
+        # Umbrales calibrados a la distribución empírica de weekly_tightness en
+        # este universo (techo práctico ~0.48, p75 ~0.37); 0.37 = cuartil superior.
+        # ema21 acotado por arriba: una base que coilea está PEGADA a su EMA21
+        # (la media la alcanza); muy por encima = extendido, no es coiling.
+        # La compresión de volumen se mide con volume_contraction (3d vs 20d),
+        # NO con el cambio día-a-día (ruidoso tras un spike de volumen).
+        high52 = current_metrics.distance_to_high_52w_atr
         tightness = current_metrics.weekly_tightness or 0
+        weeks_in_base = current_metrics.weeks_in_base or 0
+        vol_contraction = current_metrics.volume_contraction
+        if (self._is_quality_leader(current_metrics) and
+                0 < ema21 <= 1.5 and                         # cerca de EMA21, no extendido
+                high52 is not None and high52 >= -1.0 and    # en/cerca del pivote 52w
+                tightness >= 0.37 and                        # base apretada (cuartil sup.)
+                weeks_in_base >= 4 and                        # base de duración real
+                vol_contraction is not None and vol_contraction > 0 and  # dry-up estructural
+                rvol < 0.9):                                  # hoy sin expansión de volumen
+            return OperationalTransition.BREAKOUT
+
+        # 11. Stabilizing — quality leader with structure tightening and volume
+        # contracting above EMA21. Pre-breakout uptrend complement of COMPRESSING.
         if (self._is_quality_leader(current_metrics) and
                 0 <= ema21 <= 2.0 and
                 tightness >= 0.3 and
                 volume_change_pct < 0):
             return OperationalTransition.STABILIZING
 
-        # 11. Continuation holding — quality leader holding above EMA9 and EMA21,
+        # 12. Continuation holding — quality leader holding above EMA9 and EMA21,
         # stable or rising distance (not approaching EMA21).
         if (self._is_quality_leader(current_metrics) and
                 ema9 >= 0 and
@@ -757,6 +782,8 @@ class TransitionEngine:
             OperationalTransition.FLUSH_AND_RECOVER:    0.80,
             OperationalTransition.SUPPORT_HOLDING:      0.75,
             OperationalTransition.ENTERING_PULLBACK:    0.70,
+            # Pre-breakout (alta convicción)
+            OperationalTransition.BREAKOUT:             0.85,
             # Reclaim / continuation (lowered from 0.80)
             OperationalTransition.RECLAIMING:           0.65,
             OperationalTransition.CONTINUATION_HOLDING: 0.60,
@@ -774,6 +801,8 @@ class TransitionEngine:
             base += min(0.15, abs(volume_change_pct) / 200.0)
         elif transition == OperationalTransition.COMPRESSING:
             base += min(0.15, structure_change * 1.5)
+        elif transition == OperationalTransition.BREAKOUT:
+            base += min(0.10, structure_change * 1.5)  # más contracción de ATR = mejor
         elif transition == OperationalTransition.ENTERING_PULLBACK:
             base -= min(0.20, abs(rs_change) / 10.0)  # RS drop reduces quality
 
@@ -806,6 +835,7 @@ class TransitionEngine:
             OperationalTransition.COMPRESSING:          "Compressing. ATR contracting. Setup maturing.",
             OperationalTransition.FLUSH_AND_RECOVER:    "Undercut + recovery. Institutional level defended.",
             OperationalTransition.SUPPORT_HOLDING:      "Testing support. Holding. Watch for base.",
+            OperationalTransition.BREAKOUT:             "Coiling cerca de máximos — volumen seco. Setup de breakout madurando.",
             OperationalTransition.RECLAIMING:           "Reclaiming EMA21. Late-stage signal.",
             OperationalTransition.CONTINUATION_HOLDING: f"Holding EMA21. RS {rs:.0f}.",
             OperationalTransition.WEAKENING:            f"Weakening. RS {rs_change:.1f}. Monitor closely.",

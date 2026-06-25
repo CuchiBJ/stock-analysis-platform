@@ -9,7 +9,7 @@ Design: openspec/changes/market-context-engine-phase-1/design.md
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -68,6 +68,10 @@ class MarketContext:
     participation: ParticipationAnalysis
     leadership: LeadershipAnalysis
     engines_pending: list
+    # Short trajectory (last N trading days, ascending) so the bar can show the
+    # evolution of each engine, not just today's value + a 5d delta.
+    participation_history: list = field(default_factory=list)  # [{date, value}] breadth ratio
+    leadership_history: list = field(default_factory=list)      # [{date, value}] leader count
 
 
 # In-memory cache keyed by as_of date (Decision 9).
@@ -96,22 +100,36 @@ class MarketContextEngine:
         as_of = await self._latest_date()
         if as_of is None:
             return None
+        return await self._analyze_for(as_of, use_cache=True)
 
+    async def analyze_as_of(self, target: date) -> Optional[MarketContext]:
+        """Reconstruct the market context as it stood on `target`.
+
+        `target` is snapped to the most recent trading date with metrics (<=
+        target), so it works for weekends/holidays and for trade entry dates.
+        Returns None when no metrics exist at or before `target` — i.e. the date
+        predates the StockMetrics history, so the regime can't be reconstructed.
+
+        Caching is bypassed: historical reconstruction (e.g. journal backfill)
+        sweeps many one-shot dates and must not evict the live "today" entry.
+        """
+        as_of = await self._resolve_trading_date(target)
+        if as_of is None:
+            return None
+        return await self._analyze_for(as_of, use_cache=False)
+
+    async def _analyze_for(self, as_of: date, *, use_cache: bool) -> MarketContext:
         # Cache hit within TTL
-        if as_of in _cache:
+        if use_cache and as_of in _cache:
             ctx, cached_at = _cache[as_of]
             age = (datetime.utcnow() - cached_at).total_seconds()
             if age < _CACHE_TTL_SECONDS:
                 return ctx
 
-        # Evict stale entries for older dates
-        for k in list(_cache.keys()):
-            if k != as_of:
-                del _cache[k]
-
         universe_size = await self._universe_size(as_of)
         participation = await self._participation(as_of)
         leadership = await self._leadership(as_of)
+        part_hist, lead_hist = await self._history(as_of)
 
         ctx = MarketContext(
             as_of=as_of,
@@ -119,8 +137,16 @@ class MarketContextEngine:
             participation=participation,
             leadership=leadership,
             engines_pending=list(self.ENGINES_PENDING),
+            participation_history=part_hist,
+            leadership_history=lead_hist,
         )
-        _cache[as_of] = (ctx, datetime.utcnow())
+        if use_cache:
+            # Evict stale entries for older dates — only the live path caches, so
+            # this keeps a single hot "today" entry without thrashing on backfill.
+            for k in list(_cache.keys()):
+                if k != as_of:
+                    del _cache[k]
+            _cache[as_of] = (ctx, datetime.utcnow())
         return ctx
 
     @classmethod
@@ -162,6 +188,35 @@ class MarketContextEngine:
             .where(StockMetrics.date == as_of, *QUALITY_FILTERS, *extra_filters)
         )
         return result.scalar_one() or 0
+
+    async def _recent_trading_dates(self, as_of: date, n: int) -> list:
+        """Last n distinct trading dates (<= as_of) with metrics, ascending."""
+        result = await self._db.execute(
+            select(StockMetrics.date)
+            .where(StockMetrics.date <= as_of)
+            .distinct()
+            .order_by(StockMetrics.date.desc())
+            .limit(n)
+        )
+        dates = [r[0] for r in result.all()]
+        return list(reversed(dates))
+
+    async def _history(self, as_of: date, n: int = 10) -> tuple:
+        """Build the short trajectory for participation (breadth ratio) and
+        leadership (leader count) over the last n trading days.
+
+        Cheap and cached: runs once per as_of inside analyze() (5-min TTL),
+        reusing the same breadth/leader definitions as the live values.
+        """
+        dates = await self._recent_trading_dates(as_of, n)
+        part_hist: list = []
+        lead_hist: list = []
+        for d in dates:
+            ratio, _ = await self._breadth_above_ema21(d)
+            leaders = await self._fetch_leaders(d)
+            part_hist.append({"date": d.isoformat(), "value": round(ratio, 4)})
+            lead_hist.append({"date": d.isoformat(), "value": len(leaders)})
+        return part_hist, lead_hist
 
     async def _breadth_above_ema21(self, as_of: date) -> tuple:
         """Return (ratio [0,1], universe_size) for breadth above EMA21 at as_of."""

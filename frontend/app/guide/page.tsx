@@ -258,15 +258,70 @@ export default function GuidePage() {
             </p>
           </Block>
 
-          <Block title="Building Bases">
+          <Block title="Building Bases — líderes contrayendo rango">
             <p className="text-xs text-white/60">
-              Líderes Minervini activos que están construyendo una base —
-              semanas de lateralización ordenada con contracción de volumen.
-              Son los candidatos a la próxima ruptura.
+              Líderes Minervini con 6+ semanas en base, ordenados por <strong className="text-white/80">contracción
+              de rango</strong> (la idea real del VCP). Son los candidatos a la próxima ruptura: el rango se está
+              cerrando, la volatilidad entrando.
             </p>
             <p className="text-xs text-white/40 mt-1">
-              Busca: líderes Minervini + semanas_en_base + tightness + contracción de
-              volatilidad semanal + sin sobreextensión.
+              Gate estructural: líder Minervini + <code className="text-white/50">weeks_in_base ≥ 6</code>. Sin cutoff
+              absoluto. Ranking por <strong className="text-white/60">vcp_quality</strong> (0–1):
+            </p>
+            <p className="text-xs font-mono text-white/60 bg-white/5 rounded px-3 py-2 my-1">
+              vcp_quality = (0.55·band + 0.45·volume_dryup) × gap_penalty
+            </p>
+            <p className="text-xs text-white/40">
+              <code className="text-white/50">band</code> = 1 − rango_reciente/rango_previo (la banda cerrándose).
+              {' '}<code className="text-white/50">volume_dryup</code> = 1 − vol_reciente/vol_previo (volumen secándose
+              — un VCP real necesita las dos cosas). <code className="text-white/50">gap_penalty</code> castiga
+              nombres con un salto overnight grande (&gt;1.5 ATR close-to-close): un gap de noticia infla el rango
+              previo y simula contracción sin ser un VCP. Top 8 por quality. Tiers: ≥0.5 limpio, 0.3–0.5 en desarrollo, &lt;0.3 flojo.
+            </p>
+            <p className="text-xs text-white/30 mt-1">
+              <strong className="text-white/50">Por qué compuesto y no rango solo:</strong> el universo exige ADR ≥ 4%,
+              así que bases apretadas <em>absolutas</em> casi no existen (mediana ~4.4 ATR de rango en 20d). Iteraciones
+              previas fallaron: <code className="text-white/50">vcp_score≥70</code> (detector de pivotes 20d) dejaba bases
+              largas en 0; la oscilación d21_atr colaba pullbacks (EMA21 cae con el precio); la contracción de rango sola
+              se dejaba engañar por gaps de evento (IMVT saltó +35% y luego quedó quieto → falsa "contracción"). El score
+              con volumen + gap penalty resuelve los tres. Si toda la lista tiene quality bajo, es que no hay VCPs limpios.
+            </p>
+          </Block>
+
+          <Block title="RS Leaders — watchlist para días de caída">
+            <p className="text-xs text-white/60">
+              El pool de líderes Minervini ordenado por <strong className="text-white/80">fuerza relativa
+              vs SPY (RS) descendente</strong>. En una corrección, los líderes que más aguantan son los
+              que lideran el próximo rebote — esta lente los ordena para armar la watchlist desde la cual
+              posicionarse cuando el mercado gira.
+            </p>
+            <p className="text-xs text-white/40 mt-1">
+              Membership: solo el gate Minervini (8 criterios) sobre el universo de calidad. RS es la
+              clave de orden, no un filtro. Cada fila muestra <code className="text-white/50">vs SPY 1w</code>
+              {' '}(cuánto le sacó o cedió al SPY esta semana) y un estado de holding:
+              <span className="text-green-400"> en máximos</span> /
+              <span className="text-emerald-300"> sobre EMA21</span> /
+              <span className="text-amber-300"> testea EMA50</span> (ya perdió la EMA21) /
+              <span className="text-red-400"> pullback profundo</span>. Top 40.
+            </p>
+            <p className="text-xs text-white/40 mt-1">
+              <strong className="text-white/60">Nunca se suprime por contexto</strong> — es la herramienta
+              que necesitás justo cuando la participation está NARROWING o COLLAPSING.
+            </p>
+            <p className="text-xs text-white/50 mt-2 pt-2 border-t border-white/5">
+              <strong className="text-white/70">Dos modos (toggle):</strong> el orden por RS de 13 semanas
+              es <em>acumulado</em> — una acción puede rankear alto por subas de hace 2 meses y estar
+              cediendo hoy. El modo <strong className="text-white/70">RS Momentum</strong> responde
+              &quot;¿hacia dónde fluye la fuerza relativa <em>ahora</em>?&quot;.
+            </p>
+            <p className="text-xs text-white/40 mt-1">
+              Ordena por <code className="text-white/50">rs_momentum_score</code> = pendiente del RS line
+              en las últimas N sesiones (<code className="text-white/50">rs_delta_pct</code>, % scale-free
+              para no premiar solo a los de RS ya altísimo) <strong className="text-white/60">+</strong>{' '}
+              resiliencia (<code className="text-white/50">retorno_stock − retorno_SPY</code>) sumada solo
+              cuando el SPY cae en la ventana. Ventana configurable: 3 / 5 / 10 sesiones. El badge
+              <span className="text-sky-300"> aguantó</span> marca los que cerraron planos o positivos
+              mientras el SPY bajó — la señal de mayor calidad para anticipar al líder del rebote.
             </p>
           </Block>
         </Section>
@@ -323,9 +378,11 @@ export default function GuidePage() {
             <Row label="Narrowing score (max 40)"    value="(% pairs donde depth(i) > depth(i+1)) × 40" note="contracciones que se achican secuencialmente — patrón clásico VCP" />
             <Row label="Volume score (max 20)"       value="(1 - vol_second_half/vol_first_half) × 40, capped en 20" note="volumen segunda mitad de los 20d / volumen primera mitad" />
             <p className="text-xs text-white/40 mt-2">
-              <code className="text-white/50">vcp_score ≥ 70</code> es el threshold para entrar a Building Bases queue.
-              VCP detecta consolidaciones técnicas con clusters de contracción — distinto de pullback_quality
-              que mide la retracción contra EMAs.
+              <strong className="text-amber-300/80">Limitación conocida:</strong> al medir sobre solo 20 velas
+              diarias con piso duro en 0 si no hay 2+ contracciones, deja en cero la mayoría de las bases
+              multi-semana (el ápice apretado tiene pocos swings). Por eso <strong className="text-white/60">ya
+              NO es el gate de Building Bases</strong> (que ahora rankea por contracción de rango relativa:
+              rango reciente ÷ previo). El vcp_score se conserva como dato de referencia/secundario, no como filtro.
             </p>
           </Block>
 
@@ -429,7 +486,8 @@ export default function GuidePage() {
             <Row label="/live"                 value="top 10 — entering_pullback FIRST, luego pre_reclaim por observation_priority desc, tiebreak por strength" note="cutoff estricto en 10" />
             <Row label="/queue/u-and-r"        value="todos los que pasan filtro — ordenados por (event_age asc, |d21_atr| asc, rs_spy desc)" note="sin cutoff numérico — el filtro es estricto, todos los survivors aparecen" />
             <Row label="/queue/emerging-leaders" value="top 30 por perf_13w desc" note="solo los 30 con mejor performance trimestral" />
-            <Row label="/queue/building-bases"  value="todos los que pasan filtro — ordenados por (atr_range_last_20d asc, vcp_score desc)" note="primero la base más apretada" />
+            <Row label="/queue/building-bases"  value="líderes Minervini con 6+ sem en base → top 8 por vcp_quality desc (banda + volumen − gap de evento)" note="ranking, no umbral; primero el VCP de mayor calidad" />
+            <Row label="/queue/rs-leaders"       value="líderes Minervini → top 40; orden por rs_spy desc (modo RS 13w) o rs_momentum_score desc (modo RS Momentum)" note="watchlist de días de caída — nunca suprimida por contexto" />
           </Block>
 
           <Block title="Por qué un setup puede pasar TODO y no aparecer">
@@ -471,14 +529,49 @@ export default function GuidePage() {
             en stocks que ya cumplen criterios de calidad.
           </p>
 
-          <Block title="Tipos de transición">
-            <Row label="ENTERING_PULLBACK"    value="El stock empieza a retraerse desde zona de fuerza"    note="primer día de pullback desde zona extendida o breakout" />
-            <Row label="PULLBACK_DEEPENING"   value="El pullback continúa y se profundiza"                 note="segunda o tercera jornada de retroceso" />
-            <Row label="HOLDING_SUPPORT"      value="El stock llegó a una zona de soporte y está aguantando" note="precio tocó EMA21 o zona de base y no cedió" />
-            <Row label="TRIGGER_READY"        value="Setup maduro listo para entrada"                      note="pullback ordenado + compresión + soporte aguantando" />
-            <Row label="BREAKING_OUT"         value="Ruptura sobre la zona de resistencia o base"         note="cierre sobre el pivot con expansión de rango" />
-            <Row label="FAILED_BREAKOUT"      value="La ruptura no se sostuvo"                             note="precio volvió bajo el pivot dentro de los 3 días" />
-            <Row label="RECOVERY_ATTEMPT"     value="El stock intenta recuperar soporte perdido"           note="bounce desde mínimos pero sin confirmación aún" />
+          <Block title="Tipos de transición — pre-reclaim (foco operacional)">
+            <p className="text-xs text-white/50 mb-2">
+              Son las que aparecen primero en el feed: el setup nace acá, antes del reclaim.
+              El reclaim es la consecuencia, no el setup.
+            </p>
+            <Row label="entering_pullback"  value="Líder retrocediendo hacia una EMA clave (EMA9/EMA21)" note="primera pérdida de EMA con estructura intacta — quality setup formándose" />
+            <Row label="volume_dry_up"      value="El volumen se contrae mientras el precio está bajo las EMAs" note="señal clave: oferta secándose en el pullback" />
+            <Row label="compressing"        value="El ATR se contrae bajo las EMAs"                       note="rango achicándose — el setup madura" />
+            <Row label="flush_and_recover"  value="Spike a la baja + recuperación en el día"              note="undercut constructivo — nivel institucional defendido" />
+            <Row label="support_holding"    value="Rebotes en zona de soporte, el nivel aguanta"          note="institucional defendiendo — watch for base" />
+            <Row label="breakout"           value="Líder comprimido cerca de máximos con volumen seco"    note="coiling pre-breakout (SEPA Minervini) — punto de compra madurando" />
+          </Block>
+
+          <Block title="Tipos de transición — reclaim / continuación (existen, no dominan)">
+            <Row label="reclaiming"           value="Recuperando la EMA21"                                note="señal tardía — el movimiento ya empezó" />
+            <Row label="continuation_holding" value="Holding sobre EMA21 con estructura sana"             note="posición abierta sosteniendo tendencia" />
+            <Row label="stabilizing"          value="Estabilizándose sin señal direccional clara"        note="neutral con sesgo de recuperación" />
+          </Block>
+
+          <Block title="Tipos de transición — deterioro (eliminar)">
+            <Row label="weakening"     value="RS bajando, estructura deteriorándose"  note="monitorear de cerca — el setup se está degradando" />
+            <Row label="distribution"  value="Volumen expandiendo en la baja, RS colapsa" note="distribución institucional — evitar" />
+            <Row label="failing"       value="EMA50 perdida con volumen, estructura rota" note="salir — ya no es un setup" />
+          </Block>
+
+          <Block title="stable — no se registra">
+            <p className="text-xs text-white/60">
+              <code className="text-white/50">stable</code> ("monitoring, sin cambio") es el estado por defecto y
+              <strong className="text-white/80"> nunca genera una observación</strong>. El feed y la base de
+              transition_observations solo guardan transiciones non-stable. Por eso no aparece en ninguna cola
+              ni en las cohorts empíricas.
+            </p>
+          </Block>
+
+          <Block title="Por qué estos nombres importan — son la cohort key empírica">
+            <p className="text-xs text-white/60">
+              El <code className="text-white/50">transition_type</code> que ves acá es exactamente la primera
+              mitad de la clave que usa la probabilidad de continuación empírica:
+              <code className="text-white/50"> (transition_type, rs_bucket)</code>. Cada vez que el sistema reporta
+              "empirical (N=…)", está agrupando todas las observaciones resueltas del mismo transition_type y rango
+              de RS. Por eso un tipo raro como <code className="text-white/50">flush_and_recover</code> tarda más en
+              tener suficiente N para salir de rule-based que uno común como <code className="text-white/50">entering_pullback</code>.
+            </p>
           </Block>
 
           <Block title="Qué NO es el feed de transitions">
@@ -631,12 +724,24 @@ export default function GuidePage() {
             </p>
           </Block>
 
-          <Block title="RS — Relative Strength vs SPY">
+          <Block title="RS — Relative Strength vs SPY (Mansfield, 13 semanas)">
             <p className="text-xs text-white/60">
-              Compara la performance del stock contra el ETF del S&P 500. Un RS de 115
-              significa que el stock superó al SPY en un 15% en el período medido.
-              RS &gt; 100 indica outperformance. Los líderes Minervini suelen tener RS
-              entre 110 y 150+ en el momento de sus mejores setups.
+              Mide la performance del stock contra el SPY sobre las últimas 13 semanas
+              (65 sesiones), normalizada a 100 con la fórmula Mansfield:
+            </p>
+            <p className="text-xs font-mono text-white/50 bg-white/5 rounded px-3 py-2 mt-2">
+              RS = ((1 + retorno_stock_13w) / (1 + retorno_SPY_13w)) × 100
+            </p>
+            <p className="text-xs text-white/60 mt-2">
+              <strong className="text-white/80">100 = paridad</strong> con el SPY · &gt;100 lo superó ·
+              &lt;100 quedó debajo. Es un <strong className="text-white/80">cociente de factores de
+              crecimiento, no una resta</strong>: con retornos chicos, RS 115 ≈ ~15% de outperformance,
+              pero la aproximación se rompe con retornos grandes.
+            </p>
+            <p className="text-xs text-white/40 mt-1">
+              La escala <strong className="text-white/60">no tiene techo</strong>: un líder de momentum
+              fuerte que subió +350% en el trimestre da RS ≈ 400+ (≠ el RS-Rating percentil 1–99 tipo IBD,
+              que <em>no</em> es lo que se calcula acá). SPY y QQQ quedan con RS nulo (se excluyen).
             </p>
           </Block>
 

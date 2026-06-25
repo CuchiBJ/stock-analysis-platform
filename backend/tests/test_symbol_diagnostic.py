@@ -136,18 +136,109 @@ class TestEmergingLeaders:
 
 
 class TestBuildingBases:
-    def test_passes_with_tight_consolidation(self):
-        # ATR oscillation: 12 points all within range
-        d21_history = [0.3, 0.4, 0.2, 0.1, 0.3, 0.4, 0.5, 0.2, 0.3, 0.1, 0.4, 0.3]
-        check = diagnose_building_bases(_passing_metrics(), d21_history)
+    """Membership gate: quality universe + Minervini leader + weeks_in_base ≥ 6.
+    (Ranking by VCP-quality is endpoint-side, not a pass/fail criterion here.)"""
+
+    def test_passes_with_quality_base(self):
+        # Quality leader, 8 weeks in base, passes the liquidity universe
+        check = diagnose_building_bases(_passing_metrics())
         assert check.passes, f"failing: {[c.name for c in check.criteria if not c.passes]}"
 
-    def test_fails_when_oscillation_too_wide(self):
-        d21_history = [2.5, -0.5, 2.0, -1.0, 1.5, -0.8, 2.0, 0.0, 1.5, 0.5]  # range > 2.0
-        check = diagnose_building_bases(_passing_metrics(), d21_history)
+    def test_fails_when_base_too_short(self):
+        m = _passing_metrics()
+        m.weeks_in_base = 4  # below the 6-week minimum
+        check = diagnose_building_bases(m)
         assert not check.passes
+        names = [c.name for c in check.criteria if not c.passes]
+        assert any("weeks_in_base" in n for n in names)
 
-    def test_fails_without_enough_history(self):
-        d21_history = [0.3, 0.4, 0.2]  # < 10 points
-        check = diagnose_building_bases(_passing_metrics(), d21_history)
+    def test_fails_when_not_quality_leader(self):
+        m = _passing_metrics()
+        m.perf_1y = 25.0  # breaks a Minervini SEPA criterion → not a leader
+        check = diagnose_building_bases(m)
         assert not check.passes
+        names = [c.name for c in check.criteria if not c.passes]
+        assert any("Minervini" in n for n in names)
+
+
+# ─── Benchmark handling ──────────────────────────────────────────────────────
+
+from app.services.benchmarks import is_benchmark, BENCHMARK_SYMBOLS
+from app.api.v1.endpoints.stocks import _build_benchmark_assessment
+
+
+def _spy_like_metrics():
+    """SPY-like: low ADR, perf_1y below 30% — would be branded 'roto' by the
+    leader gate, but is a benchmark and must NOT be."""
+    return SimpleNamespace(
+        symbol="SPY",
+        current_price=520.0,
+        ema50=510.0,
+        ema200=480.0,
+        sma150=495.0,
+        sma200=475.0,
+        perf_1y=12.0,
+        perf_13w=5.0,
+        adr_percent=1.1,
+    )
+
+
+class TestIsBenchmark:
+    def test_known_benchmarks(self):
+        for s in ("SPY", "QQQ", "IWM", "DIA"):
+            assert is_benchmark(s)
+            assert s in BENCHMARK_SYMBOLS
+
+    def test_case_insensitive(self):
+        assert is_benchmark("spy")
+        assert is_benchmark("Qqq")
+
+    def test_non_benchmark(self):
+        assert not is_benchmark("AAPL")
+        assert not is_benchmark(None)
+        assert not is_benchmark("")
+
+
+class TestBenchmarkAssessment:
+    def test_verdict_is_benchmark_not_roto(self):
+        stock = SimpleNamespace(symbol="SPY", name="SPDR S&P 500", market_group="ETF")
+        assessment, ctx = _build_benchmark_assessment(stock, _spy_like_metrics())
+        assert assessment["verdict"] == "benchmark"
+        assert "roto" not in assessment["headline"].lower()
+        assert "Setup roto" not in assessment["headline"]
+        # No blocker-severity gaps for a healthy uptrending benchmark
+        assert all(g["severity"] != "blocker" for g in assessment["gaps"])
+
+    def test_trend_alcista_when_above_mas(self):
+        stock = SimpleNamespace(symbol="SPY", name="SPDR S&P 500", market_group="ETF")
+        _, ctx = _build_benchmark_assessment(stock, _spy_like_metrics())
+        assert ctx["trend"] == "alcista"
+
+    def test_trend_bajista_when_below_ema200(self):
+        m = _spy_like_metrics()
+        m.current_price = 450.0   # below EMA200=480
+        m.sma150 = 470.0          # SMA150 < SMA200=475
+        stock = SimpleNamespace(symbol="SPY", name="SPDR S&P 500", market_group="ETF")
+        assessment, ctx = _build_benchmark_assessment(stock, m)
+        assert ctx["trend"] == "bajista"
+        assert "roto" not in assessment["headline"].lower()
+
+
+from app.services.benchmarks import compute_index_trend
+
+
+class TestComputeIndexTrend:
+    def test_alcista(self):
+        # price above EMA50/EMA200, SMA150 > SMA200
+        assert compute_index_trend(728.0, 724.0, 683.0, 691.0, 683.0) == "alcista"
+
+    def test_bajista(self):
+        # price below EMA200, SMA150 < SMA200
+        assert compute_index_trend(450.0, 470.0, 480.0, 470.0, 475.0) == "bajista"
+
+    def test_lateral_mixed(self):
+        # above EMA200 but below EMA50 → neither alcista nor bajista
+        assert compute_index_trend(485.0, 490.0, 480.0, 485.0, 478.0) == "lateral"
+
+    def test_lateral_on_missing_inputs(self):
+        assert compute_index_trend(None, 724.0, 683.0, 691.0, 683.0) == "lateral"

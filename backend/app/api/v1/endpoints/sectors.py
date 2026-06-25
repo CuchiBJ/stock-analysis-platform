@@ -28,6 +28,39 @@ async def get_sector_performance(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/rotation")
+async def get_sector_rotation(
+    lookback: int = Query(5, ge=2, le=20, description="Trading sessions to look back"),
+    db: AsyncSession = Depends(get_db)
+):
+    """Sector rotation by momentum — which market_groups are gaining/losing leadership."""
+    try:
+        sector_service = SectorService(db)
+        return await sector_service.calculate_sector_rotation(lookback)
+    except Exception as e:
+        import traceback
+        print(f"Error in get_sector_rotation: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/group-stocks")
+async def get_group_stocks(
+    group: str = Query(..., description="market_group name, e.g. 'Mining & Metals'"),
+    limit: int = Query(60, ge=1, le=200),
+    db: AsyncSession = Depends(get_db)
+):
+    """Constituent stocks of a market_group, ranked by score + structure."""
+    try:
+        sector_service = SectorService(db)
+        return await sector_service.get_group_constituents(group, limit)
+    except Exception as e:
+        import traceback
+        print(f"Error in get_group_stocks: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/leaders")
 async def get_sector_leaders(
     sector: str = Query(..., description="Sector name"),
