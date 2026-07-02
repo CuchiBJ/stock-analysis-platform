@@ -1,3 +1,12 @@
+# Pin the process timezone to UTC before anything else. asyncpg binds a naive
+# datetime to a TIMESTAMPTZ column using the OS-local zone, so on a non-UTC host
+# every naive datetime.utcnow() write is shifted by the local offset. Forcing the
+# process zone to UTC makes "naive == UTC" true, matching how the codebase uses
+# utcnow() everywhere.
+import os as _os_boot, time as _time_boot
+_os_boot.environ["TZ"] = "UTC"
+_time_boot.tzset()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager

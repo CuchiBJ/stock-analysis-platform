@@ -1,3 +1,12 @@
+# Pin the process timezone to UTC before anything else. asyncpg binds a naive
+# datetime to a TIMESTAMPTZ column using the OS-local zone, so on a non-UTC host
+# every naive datetime.utcnow() write is shifted by the local offset. Forcing the
+# process zone to UTC makes "naive == UTC" true, matching how the codebase uses
+# utcnow() everywhere.
+import os as _os_boot, time as _time_boot
+_os_boot.environ["TZ"] = "UTC"
+_time_boot.tzset()
+
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from app.data.ingestors.stock_ingestor import StockIngestor
 from app.data.ingestors.price_ingestor import PriceIngestor

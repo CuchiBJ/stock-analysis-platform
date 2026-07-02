@@ -9,7 +9,7 @@ data" stays meaningful.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -33,7 +33,10 @@ async def record_cycle(
     error_message: Optional[str] = None,
 ) -> None:
     """Upsert a heartbeat row. Failure to persist is logged, never raised."""
-    now = datetime.utcnow()
+    # Timezone-aware UTC: asyncpg binds a naive datetime to TIMESTAMPTZ using the
+    # machine's local zone, shifting every stored timestamp by the local offset.
+    # An aware datetime is stored as true UTC regardless of the OS zone.
+    now = datetime.now(timezone.utc)
     try:
         stmt = pg_insert(PipelineHeartbeat).values(
             cycle_name=cycle_name,
