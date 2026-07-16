@@ -52,6 +52,10 @@ class DataScheduler:
             self.async_session_maker = None
         self._running = False
         self._slow_running = False
+        # Symbols the most recent SLOW run attempted (its single snapshot). Read by
+        # the heartbeat so processed/expected come from the same set. See
+        # trigger_metrics_update.
+        self._slow_last_attempted = 0
 
         # Initialize UniverseEngine for discovery and health monitoring
         self.universe_engine = UniverseEngine(polygon_api_key=settings.polygon_api_key)
@@ -100,16 +104,6 @@ class DataScheduler:
         logger.info(f"SLOW cycle: {len(symbols)} symbols with price for {today}")
         return symbols, today
 
-    async def _count_slow_expected(self) -> Optional[int]:
-        """Symbols expected to be processed by the next SLOW cycle (= those with
-        a stock_price for the latest available date). Used to decide ok vs partial."""
-        try:
-            async with self._get_db() as db:
-                symbols, _ = await self._get_slow_symbols_and_date(db)
-                return len(symbols) if symbols else None
-        except Exception:
-            return None
-
     async def trigger_metrics_update(self, limit=None, symbols=None):
         """SLOW metrics calculation — covers all symbols with today's price.
 
@@ -125,6 +119,7 @@ class DataScheduler:
             return 0
         self._slow_running = True
         count = 0
+        self._slow_last_attempted = 0
         try:
             snapshot_date = None
             if symbols is None:
@@ -145,8 +140,13 @@ class DataScheduler:
 
             semaphore = asyncio.Semaphore(15)
 
-            async def _process_one(sym: str) -> bool:
-                """Process one symbol with its own session. Returns True if metrics were written."""
+            async def _process_one(sym: str) -> str:
+                """Process one symbol with its own session.
+
+                Returns 'written' if metrics were recalculated, 'skipped' if the row
+                was already fresh (write-protection window — still covered, just not
+                rewritten), or 'failed' on error.
+                """
                 async with semaphore:
                     try:
                         async with self._get_db() as db:
@@ -161,19 +161,32 @@ class DataScheduler:
                                     .limit(1)
                                 )
                                 if existing.scalar():
-                                    return False
+                                    return 'skipped'
                             calculator = MetricsCalculator(db)
                             await calculator.calculate_metrics_for_symbol(sym)
                             await db.commit()
-                            return True
+                            return 'written'
                     except Exception:
-                        return False
+                        return 'failed'
 
             results = await asyncio.gather(*(_process_one(sym) for sym in symbols), return_exceptions=True)
-            count = sum(1 for r in results if r is True)
+            written = sum(1 for r in results if r == 'written')
+            skipped = sum(1 for r in results if r == 'skipped')
+            # "Covered" = up-to-date after this cycle, whether we rewrote it or found it
+            # already fresh. Only genuine failures don't count. This is what the heartbeat
+            # reports so a healthy cycle isn't flagged partial just for skipping fresh rows.
+            covered = written + skipped
+            # Expose the attempted workload (this run's single snapshot) so the caller
+            # records processed/expected from the SAME set — no second max(date) query.
+            self._slow_last_attempted = len(symbols)
+            count = covered
             duration = round(_time.monotonic() - t0, 2)
-            logger.info(f"SLOW metrics calculated for {count} symbols in {duration}s ({count/duration:.0f}/s)")
-            asyncio.create_task(self._broadcast_metrics_updated(count, tier='all'))
+            logger.info(
+                f"SLOW metrics: {covered}/{len(symbols)} covered "
+                f"({written} written, {skipped} fresh-skip, {len(symbols) - covered} failed) "
+                f"in {duration}s ({covered/duration:.0f}/s)"
+            )
+            asyncio.create_task(self._broadcast_metrics_updated(written, tier='all'))
             # Evaluate pending outcomes after each successful SLOW cycle
             asyncio.create_task(self._evaluate_pending_outcomes())
             # Batch-detect transitions over the quality universe (populates calibration data)
@@ -270,24 +283,121 @@ class DataScheduler:
         )
         return combined
 
+    async def _get_quality_symbols(self, db) -> list:
+        """Symbols in the quality universe on the last complete metrics session.
+
+        This is the exact set the coverage metric measures (QUALITY_FILTERS on the
+        most recent COMPLETE session, i.e. strictly before today's still-filling
+        date). We resolve it here so the priority refresh targets precisely the
+        names that define coverage.
+        """
+        from sqlalchemy import select, func
+        from app.models.stock import StockMetrics, StockPrice
+        from app.services.universe_filters import QUALITY_FILTERS
+
+        price_latest = (await db.execute(select(func.max(StockPrice.date)))).scalar()
+        if not price_latest:
+            return []
+        ref_date = (
+            await db.execute(
+                select(func.max(StockMetrics.date)).where(StockMetrics.date < price_latest)
+            )
+        ).scalar()
+        if not ref_date:
+            return []
+        result = await db.execute(
+            select(StockMetrics.symbol)
+            .where(StockMetrics.date == ref_date, *QUALITY_FILTERS)
+            .distinct()
+        )
+        return [r[0] for r in result.fetchall()]
+
+    async def trigger_quality_refresh(self) -> int:
+        """Priority price + metrics refresh for the quality universe.
+
+        Why this exists: the intraday yfinance bulk pulls all ~7k symbols and gets
+        rate-limited partway (observed ~2.6k/7k updated), so a random slice of the
+        quality universe misses today's bar every cycle — which is exactly what
+        drags the coverage metric down (a real staleness, not a denominator quirk).
+        Polygon's grouped-daily fast path can't help intraday on the free tier (it
+        403s for the current day before close).
+
+        The quality set is only a few hundred names — small enough to clear the
+        yfinance rate limit reliably. Pulling their prices FIRST (before the big
+        bulk spends the rate-limit budget) and recomputing their metrics makes
+        coverage reflect real freshness within one 5-min cycle instead of waiting
+        on the 30-min SLOW pass and yfinance luck.
+
+        Returns the count of quality symbols whose metrics were recomputed.
+        """
+        async with self._get_db() as db:
+            symbols = await self._get_quality_symbols(db)
+        if not symbols:
+            logger.info("Quality refresh: no quality symbols resolved yet — skipping")
+            return 0
+
+        logger.info(f"Quality refresh: priority price pull for {len(symbols)} quality symbols")
+        # Reuse the batched/retrying sync downloader — with a few hundred symbols it
+        # stays well under the rate limit that throttles the full-universe bulk.
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                None, self._bulk_download_prices_sync, symbols
+            )
+        except Exception as e:
+            logger.error(f"Quality refresh price pull failed (continuing to metrics): {e}")
+
+        # Recompute metrics for the quality set (FAST only covers TIER1+momentum, so
+        # non-trending quality names would otherwise wait for the 30-min SLOW pass).
+        semaphore = asyncio.Semaphore(15)
+
+        async def _one(sym: str) -> bool:
+            async with semaphore:
+                try:
+                    async with self._get_db() as db:
+                        calculator = MetricsCalculator(db)
+                        # Default lookback (260d) — the calculator needs ≥50 rows to
+                        # compute EMA50 etc.; a short window silently no-ops.
+                        await calculator.calculate_metrics_for_symbol(sym)
+                        await db.commit()
+                        return True
+                except Exception:
+                    return False
+
+        results = await asyncio.gather(*(_one(s) for s in symbols), return_exceptions=True)
+        refreshed = sum(1 for r in results if r is True)
+        logger.info(f"Quality refresh: recomputed metrics for {refreshed}/{len(symbols)} quality symbols")
+        asyncio.create_task(self._broadcast_metrics_updated(refreshed, tier='quality'))
+        return refreshed
+
     async def trigger_fast_metrics_update(self):
         """Trigger FAST metrics update for TIER 1 + institutional quality stocks."""
         try:
             async with self._get_db() as db:
-                symbols = await self._get_fast_symbols(db)
-                if not symbols:
-                    logger.warning("FAST cycle: no symbols to update")
-                    return 0
+                symbols = (await self._get_fast_symbols(db))[:300]
+            if not symbols:
+                logger.warning("FAST cycle: no symbols to update")
+                return 0
 
-                calculator = MetricsCalculator(db)
-                updated_symbols = []
+            # Compute in parallel with its own session per symbol. Uses the default
+            # lookback (260d): the calculator needs ≥50 rows (and 252 for the 52w
+            # window), so the previous days=10 silently no-op'd every symbol.
+            semaphore = asyncio.Semaphore(15)
 
-                for symbol in symbols[:300]:
-                    await calculator.calculate_metrics_for_symbol(symbol, days=10)
-                    updated_symbols.append(symbol)
+            async def _one(sym: str) -> bool:
+                async with semaphore:
+                    try:
+                        async with self._get_db() as db:
+                            calculator = MetricsCalculator(db)
+                            await calculator.calculate_metrics_for_symbol(sym)
+                            await db.commit()
+                            return True
+                    except Exception:
+                        return False
 
-                count = len(updated_symbols)
-                logger.info(f"FAST metrics updated for {count} symbols")
+            results = await asyncio.gather(*(_one(s) for s in symbols), return_exceptions=True)
+            updated_symbols = [s for s, r in zip(symbols, results) if r is True]
+            count = len(updated_symbols)
+            logger.info(f"FAST metrics updated for {count}/{len(symbols)} symbols")
 
             asyncio.create_task(self._track_state_changes(updated_symbols))
             asyncio.create_task(self._broadcast_metrics_updated(count, tier='tier_1'))
@@ -391,6 +501,7 @@ class DataScheduler:
         last_price_update = None
         last_metrics_update = None
         last_fast_metrics_update = None
+        last_quality_refresh = None
         last_realtime_discovery = None
         last_discovery_scan = None
         last_tier_reevaluation = None
@@ -417,6 +528,10 @@ class DataScheduler:
         logger.info("Startup: initial SLOW metrics calculation (background)")
         asyncio.create_task(self.trigger_metrics_update())
         last_metrics_update = datetime.now(et_tz)
+
+        logger.info("Startup: initial quality-universe refresh (background)")
+        asyncio.create_task(self.trigger_quality_refresh())
+        last_quality_refresh = datetime.now(et_tz)
         
         while self._running:
             now = datetime.now(et_tz)
@@ -434,6 +549,7 @@ class DataScheduler:
                     "price": last_price_update,
                     "fast_metrics": last_fast_metrics_update,
                     "slow_metrics": last_metrics_update,
+                    "quality_refresh": last_quality_refresh,
                     "realtime_discovery": last_realtime_discovery,
                 },
                 now,
@@ -452,10 +568,27 @@ class DataScheduler:
                 last_price_update = None
                 last_fast_metrics_update = None
                 last_metrics_update = None
+                last_quality_refresh = None
                 last_realtime_discovery = None
 
             # Check if within market hours
             if market_open <= current_time <= market_close:
+                # Quality-universe refresh every 5 minutes. Runs BEFORE the big bulk
+                # so the quality set claims the yfinance rate-limit budget first —
+                # this is what keeps coverage tracking real freshness instead of
+                # yfinance luck. Small enough (few hundred names) to always complete.
+                if last_quality_refresh is None or (now - last_quality_refresh).total_seconds() >= 300:
+                    logger.info(f"Triggering quality-universe refresh (current time: {current_time})")
+                    q_t0 = _time.monotonic()
+                    q_count = await self.trigger_quality_refresh()
+                    await self._record_heartbeat(
+                        "quality_refresh",
+                        duration_seconds=_time.monotonic() - q_t0,
+                        symbols_processed=q_count or None,
+                        status="ok" if q_count else "failed",
+                    )
+                    last_quality_refresh = datetime.now(et_tz)
+
                 # Price update every 15 minutes — awaited so FAST always uses fresh prices.
                 # NB: last_price_update is set AFTER the awaits complete (fresh datetime.now)
                 # so a slow yfinance pull doesn't cause the next iteration to re-trigger before
@@ -510,8 +643,11 @@ class DataScheduler:
                 if last_metrics_update is None or (now - last_metrics_update).total_seconds() >= 1800:
                     logger.info(f"Triggering SLOW metrics update (current time: {current_time})")
                     slow_t0 = _time.monotonic()
-                    slow_expected = await self._count_slow_expected()
                     slow_count = await self.trigger_metrics_update()
+                    # Expected comes from the SAME snapshot the run used (set inside
+                    # trigger_metrics_update), so processed/expected can't disagree due
+                    # to prices loading between two separate max(date) queries.
+                    slow_expected = self._slow_last_attempted
                     slow_status = "ok"
                     if slow_expected and slow_count < slow_expected * 0.95:
                         slow_status = "partial"
