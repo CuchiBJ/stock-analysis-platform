@@ -20,8 +20,17 @@ from app.models.stock import (
     SchedulerError,
     PipelineHeartbeat,
 )
+from app.services.universe_filters import QUALITY_FILTERS
 
 router = APIRouter(prefix="/health", tags=["health"])
+
+# Cycles recorded in pipeline_heartbeats that are NOT part of the data pipeline
+# and must not drive the health chip. ibkr_sync is a best-effort nightly broker
+# journal pull — it no-ops without Flex credentials and routinely "fails" on
+# IBKR rate-limiting (code 1001), which would otherwise flip the whole pipeline
+# health to red for a reason unrelated to data freshness. Its heartbeat is still
+# persisted for ops; it's just excluded from the health snapshot.
+NON_PIPELINE_CYCLES = frozenset({"ibkr_sync"})
 
 
 MARKET_OPEN_ET = _time(9, 30)
@@ -76,21 +85,44 @@ def compute_market_state(now_et: datetime) -> dict:
 
 
 async def _coverage(db: AsyncSession, now_et: datetime) -> dict:
-    """Coverage = symbols refreshed today / total symbols with a price for today.
+    """Coverage = quality-universe symbols refreshed today / quality-universe size.
 
-    Denominator is the full processable universe (everything with a stock_price
-    row for the latest available date), not just the quality-filtered subset —
-    the operator wants to know how much of the pipeline has cycled, period.
+    Both numerator and denominator are restricted to the QUALITY universe (the
+    curated institutional set: mid/large cap, liquid, non-penny, min ADR) — the
+    same set the UI banner promises ("Quality universe symbols refreshed since
+    today's market open"). These are the TIER-1 names the pipeline refreshes
+    every cycle, so healthy coverage climbs to ~100% intraday.
+
+    Why NOT the full price universe: not every symbol with a price ever gets
+    metrics (insufficient history, filtered out), so a full-universe denominator
+    caps coverage well below 100% even on a fully-processed day. And anchoring to
+    a still-loading `max(date)` makes the denominator swing through the day.
+
+    Denominator is the quality count on the last COMPLETE session (the most
+    recent metrics date strictly before the working session). The quality set is
+    defined by per-date metrics, so today's set is still filling in; yesterday's
+    completed set is the stable, reachable target that both numerator and — once
+    the pipeline finishes — reality converge to.
     """
     latest_price_date = (await db.execute(select(func.max(StockPrice.date)))).scalar()
     if latest_price_date is None:
         return {"expected": 0, "actual": 0, "pct": 0.0}
 
-    expected_q = (
-        select(func.count(func.distinct(StockPrice.symbol)))
-        .where(StockPrice.date == latest_price_date)
-    )
-    expected = (await db.execute(expected_q)).scalar() or 0
+    # Stable denominator: quality-universe size on the last complete metrics
+    # session (strictly before today's still-filling working date).
+    ref_date = (
+        await db.execute(
+            select(func.max(StockMetrics.date)).where(StockMetrics.date < latest_price_date)
+        )
+    ).scalar()
+    expected = 0
+    if ref_date is not None:
+        expected = (
+            await db.execute(
+                select(func.count(func.distinct(StockMetrics.symbol)))
+                .where(StockMetrics.date == ref_date, *QUALITY_FILTERS)
+            )
+        ).scalar() or 0
 
     market_open_et = ET.localize(
         datetime.combine(now_et.date(), MARKET_OPEN_ET)
@@ -105,18 +137,23 @@ async def _coverage(db: AsyncSession, now_et: datetime) -> dict:
         .where(
             StockMetrics.date == latest_price_date,
             StockMetrics.updated_at >= market_open_utc,
+            *QUALITY_FILTERS,
         )
     )
     actual = (await db.execute(actual_q)).scalar() or 0
 
-    pct = (actual / expected * 100.0) if expected > 0 else 0.0
+    # Cap at 100: today's quality set can legitimately be a touch larger than the
+    # reference day's, and coverage is meant to read as "done / to-do", not >100%.
+    pct = min(100.0, actual / expected * 100.0) if expected > 0 else 0.0
     return {"expected": int(expected), "actual": int(actual), "pct": round(pct, 1)}
 
 
 async def _heartbeats(db: AsyncSession) -> list[dict]:
     rows = (
         await db.execute(
-            select(PipelineHeartbeat).order_by(PipelineHeartbeat.cycle_name)
+            select(PipelineHeartbeat)
+            .where(PipelineHeartbeat.cycle_name.notin_(NON_PIPELINE_CYCLES))
+            .order_by(PipelineHeartbeat.cycle_name)
         )
     ).scalars().all()
     now = datetime.utcnow()
