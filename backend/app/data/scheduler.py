@@ -507,7 +507,6 @@ class DataScheduler:
         last_tier_reevaluation = None
         last_health_check = None
         last_lifecycle_tracking = None
-        last_ibkr_sync = None
         last_post_close_cycle_date = None  # date — fires once per weekday after close
         post_close_window_start = time(16, 10)  # let yfinance settle for ~10 min
         
@@ -731,12 +730,6 @@ class DataScheduler:
                     await self._run_lifecycle_tracking()
                     last_lifecycle_tracking = now
 
-                # IBKR journal sync - run once daily after market close (no-op if
-                # Flex credentials aren't configured).
-                if last_ibkr_sync is None or (now - last_ibkr_sync).total_seconds() >= 86400:
-                    await self._sync_ibkr_journal()
-                    last_ibkr_sync = now
-            
             # Sleep for 30 seconds before checking again
             await asyncio.sleep(30)
 
@@ -1358,42 +1351,6 @@ class DataScheduler:
             import traceback
             traceback.print_exc()
             return 0
-
-    async def _sync_ibkr_journal(self):
-        """Pull executed trades from IBKR Flex into the journal (nightly).
-
-        No-op when Flex credentials aren't configured. Never raises — a broker
-        outage must not stall the scheduler loop.
-        """
-        from app.core.config import settings
-        if not (settings.ibkr_flex_token and settings.ibkr_flex_query_id):
-            return
-        try:
-            from app.services.ibkr_flex_service import (
-                fetch_flex_statement, parse_executions, sync_executions_to_journal,
-            )
-            logger.info("Triggering IBKR journal sync")
-            xml = await fetch_flex_statement(
-                settings.ibkr_flex_token, settings.ibkr_flex_query_id
-            )
-            executions = parse_executions(xml)
-            async with self._get_db() as db:
-                stats = await sync_executions_to_journal(db, executions)
-            logger.info(
-                f"IBKR sync: {stats.closed_inserted} closed + {stats.open_upserted} open "
-                f"new, {stats.skipped_existing} unchanged"
-            )
-            await self._record_heartbeat(
-                "ibkr_sync",
-                duration_seconds=0.0,
-                symbols_processed=stats.closed_inserted + stats.open_upserted,
-                status="ok",
-            )
-        except Exception as e:
-            logger.error(f"IBKR journal sync failed (continuing): {e}")
-            await self._record_heartbeat(
-                "ibkr_sync", duration_seconds=0.0, status="failed", error_message=str(e),
-            )
 
     async def run(self):
         """Run the scheduler loop"""
