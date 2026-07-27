@@ -162,7 +162,7 @@ class UniverseEngine:
         
         existing_query = select(InstrumentIdentityModel).where(
             InstrumentIdentityModel.current_symbol == candidate.symbol.upper()
-        )
+        ).limit(1)
         existing_result = await db.execute(existing_query)
         existing_db = existing_result.scalar_one_or_none()
         
@@ -228,7 +228,7 @@ class UniverseEngine:
         
         # Add to Stock table for scheduler processing
         existing_stock = await db.execute(
-            select(Stock).where(Stock.symbol == candidate.symbol.upper())
+            select(Stock).where(Stock.symbol == candidate.symbol.upper()).limit(1)
         )
         if not existing_stock.scalar_one_or_none():
             db_stock = Stock(

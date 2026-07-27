@@ -133,7 +133,7 @@ export default function TopActionableSetups() {
           const isEma9 = setup.setup_type === 'ema9_pullback'
           const emaDist = isEma9 ? setup.distance_to_ema9 : setup.distance_to_ema21
           const emaLabel = isEma9 ? 'EMA9' : 'EMA21'
-          // ATR-normalized value — format as e.g. "-0.13 ATR" not a pct
+          // Raw % distance to the EMA (StockMetrics.distance_to_ema21/ema9), not ATR-normalized
           const emaValue = emaDist != null ? `${emaDist >= 0 ? '+' : ''}${emaDist.toFixed(2)}%` : 'N/A'
 
           const days = setup.days_in_state ?? 1
@@ -157,9 +157,6 @@ export default function TopActionableSetups() {
               transitionStrength={setup.priority_score}
               narrative={setup.narrative}
               confidence={setup.priority_score}
-              continuationProb={setup.continuation_prob}
-              probabilitySource={setup.probability_source}
-              sampleSize={setup.sample_size}
               contextWarnings={setup.context_warnings}
               freshness={freshness}
               daysInState={days}

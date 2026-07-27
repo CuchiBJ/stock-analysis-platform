@@ -284,6 +284,48 @@ def _aggregate(trades: list[JournalTrade]) -> dict:
     }
 
 
+def _decision_rep(legs: list[JournalTrade]) -> JournalTrade:
+    """Representative leg of a decision = the original Compra (no parent),
+    falling back to the earliest-id leg when the entry itself isn't in the set."""
+    return next((l for l in legs if l.parent_trade_id is None), None) or min(legs, key=lambda l: l.id)
+
+
+def _classify_resolved_decision(legs: list[JournalTrade]) -> Optional[str]:
+    """Win/loss/breakeven for a *fully resolved* decision (every leg closed).
+
+    Returns None when the decision still has open legs or no resolvable P&L,
+    so it contributes nothing to win-rate denominators. Mirrors the exact
+    decision-level WR convention used inline in journal_stats: BE band summed
+    across closed legs, and "booked a partial gain then ended net ≥ 0" counts
+    as a win rather than a scratch.
+    """
+    closed_legs = [l for l in legs if l.exit_date is not None]
+    open_legs = [l for l in legs if l.exit_date is None]
+    if open_legs or not closed_legs:
+        return None
+    closed_pnls = [p for p in (_derive_pnl(l) for l in closed_legs) if p is not None]
+    if not closed_pnls:
+        return None
+    net_pnl = sum(closed_pnls)
+    be_band = sum(_be_band_dollars(l) for l in closed_legs)
+    booked_partial_gain = any(
+        (p := _derive_pnl(l)) is not None and p > _be_band_dollars(l)
+        for l in closed_legs
+    )
+    if net_pnl > be_band:
+        return 'win'
+    if net_pnl < -be_band:
+        return 'loss'
+    if booked_partial_gain and net_pnl >= 0:
+        return 'win'
+    return 'breakeven'
+
+
+# Trailing window (in resolved decisions) for the rolling win-rate line. Small
+# enough to show recent form, large enough that one trade doesn't swing it wildly.
+_WR_ROLLING_WINDOW = 20
+
+
 @router.get("/stats")
 async def journal_stats(db: AsyncSession = Depends(get_db)):
     """Returns overall metrics + breakdowns by setup, context, and setup×context."""
@@ -395,27 +437,17 @@ async def journal_stats(db: AsyncSession = Depends(get_db)):
         if rs_with_qty:
             tot_qty = sum(q for _, q in rs_with_qty)
             decision_total_r += sum(r * q for r, q in rs_with_qty) / tot_qty
-        # WR classification only for fully_resolved. The decision's BE band is
-        # the sum of its closed legs' bands, since net_pnl is summed across them.
-        if len(open_legs) == 0 and len(closed_legs) > 0 and closed_pnls:
-            decision_be_band = sum(_be_band_dollars(l) for l in closed_legs)
-            # "Took profits previously": a decision that booked a real partial
-            # gain on any leg and ended net non-negative is a WIN, even when the
-            # runner was stopped at BE and net_pnl lands inside the scratch band.
-            # Scaling out at a profit and giving the remainder a free shot is a
-            # won trade, not a scratch — the locked-in gain stands.
-            booked_partial_gain = any(
-                (p := _derive_pnl(l)) is not None and p > _be_band_dollars(l)
-                for l in closed_legs
-            )
-            if net_pnl > decision_be_band:
-                decision_wins += 1
-            elif net_pnl < -decision_be_band:
-                decision_losses += 1
-            elif booked_partial_gain and net_pnl >= 0:
-                decision_wins += 1
-            else:
-                decision_breakeven += 1
+        # WR classification only for fully_resolved decisions — same convention
+        # (BE band summed across legs, booked-partial-gain rescue) extracted into
+        # _classify_resolved_decision so the win-rate-evolution series below and
+        # the R-unit-Trend monthly WR all agree on what counts as a win.
+        outcome = _classify_resolved_decision(legs)
+        if outcome == 'win':
+            decision_wins += 1
+        elif outcome == 'loss':
+            decision_losses += 1
+        elif outcome == 'breakeven':
+            decision_breakeven += 1
 
     decision_resolved = decision_wins + decision_losses
     decision_overall = {
@@ -449,13 +481,69 @@ async def journal_stats(db: AsyncSession = Depends(get_db)):
         risk_pcts = [r for r in (_derive_risk_pct(t) for t in bucket) if r is not None]
         rs = [r for r in (_derive_r(t) for t in bucket) if r is not None]
         pnls = [p for p in (_derive_pnl(t) for t in bucket) if p is not None]
+        # Win rate per month — same break-even-band classification as _aggregate
+        # (WR excludes scratches from the denominator). This surfaces the learning
+        # curve alongside the falling risk size.
+        wins = losses = 0
+        for t in bucket:
+            p = _derive_pnl(t)
+            if p is None or abs(p) <= _be_band_dollars(t):
+                continue
+            if p > 0:
+                wins += 1
+            else:
+                losses += 1
+        resolved = wins + losses
         risk_evolution.append({
             "month": month,
             "n": len(bucket),
             "avg_planned_risk_dollars": (sum(eff_risks) / len(eff_risks)) if eff_risks else None,
             "avg_risk_pct_of_account": (sum(risk_pcts) / len(risk_pcts)) if risk_pcts else None,
+            "win_rate": (wins / resolved) if resolved > 0 else None,
+            "wins": wins,
+            "losses": losses,
             "total_r": sum(rs) if rs else None,
             "total_pnl": sum(pnls) if pnls else 0.0,
+        })
+
+    # Win-rate evolution — the operator's learning curve. One point per fully
+    # resolved decision, ordered by entry date (when the decision was actually
+    # taken). Two series share the single 0–100% axis:
+    #   · cumulative_win_rate — career trajectory, converges to decision WR overall.
+    #   · rolling_win_rate     — recent form over the trailing window of decisions.
+    # BE (scratch) decisions stay in the sequence but are excluded from both
+    # numerator and denominator, matching decision_win_rate's convention.
+    resolved_decisions = []
+    for did, legs in decisions.items():
+        outcome = _classify_resolved_decision(legs)
+        if outcome is None:
+            continue
+        rep = _decision_rep(legs)
+        resolved_decisions.append((rep.entry_date, did, outcome))
+    # Chronological by entry date; id tiebreak keeps same-day ordering stable.
+    resolved_decisions.sort(key=lambda x: (x[0] or date.min, x[1]))
+    outcomes_seq = [o for _, _, o in resolved_decisions]
+
+    win_rate_evolution = []
+    cum_wins = cum_losses = 0
+    for i, (entry_dt, did, outcome) in enumerate(resolved_decisions):
+        if outcome == 'win':
+            cum_wins += 1
+        elif outcome == 'loss':
+            cum_losses += 1
+        cum_resolved = cum_wins + cum_losses
+        window = outcomes_seq[max(0, i - _WR_ROLLING_WINDOW + 1): i + 1]
+        w_win = window.count('win')
+        w_loss = window.count('loss')
+        win_rate_evolution.append({
+            "i": i + 1,
+            "decision_id": did,
+            "entry_date": entry_dt.isoformat() if entry_dt else None,
+            "outcome": outcome,
+            "cumulative_win_rate": (cum_wins / cum_resolved) if cum_resolved > 0 else None,
+            "rolling_win_rate": (w_win / (w_win + w_loss)) if (w_win + w_loss) > 0 else None,
+            "cumulative_wins": cum_wins,
+            "cumulative_losses": cum_losses,
         })
 
     # Data starvation honesty: count of (setup, context) buckets with < 5 trades
@@ -499,6 +587,8 @@ async def journal_stats(db: AsyncSession = Depends(get_db)):
         "by_setup_regime_matrix": by_setup_regime_matrix,
         "decision_overall": decision_overall,
         "risk_evolution": risk_evolution,
+        "win_rate_evolution": win_rate_evolution,
+        "rolling_window": _WR_ROLLING_WINDOW,
         "open_positions": open_count,
         "linked_to_observations": linked_count,
         "underpowered_buckets": underpowered,
@@ -608,108 +698,6 @@ async def export_csv(db: AsyncSession = Depends(get_db)):
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
-
-
-@router.get("/ibkr-status")
-async def ibkr_status():
-    """Whether IBKR Flex auto-sync is configured (drives the UI button state)."""
-    from app.core.config import settings
-    return {
-        "configured": bool(settings.ibkr_flex_token and settings.ibkr_flex_query_id),
-    }
-
-
-@router.get("/ibkr-debug")
-async def ibkr_debug():
-    """Diagnose a Flex sync that returned 0 trades — shows what IBKR actually
-    sent back (sections, date range, trade counts by category) without dumping
-    raw account data."""
-    from app.core.config import settings
-    from app.services.ibkr_flex_service import (
-        IbkrFlexError, diagnose_flex, fetch_flex_statement,
-    )
-    if not (settings.ibkr_flex_token and settings.ibkr_flex_query_id):
-        raise HTTPException(status_code=400, detail="IBKR Flex no configurado.")
-    try:
-        xml = await fetch_flex_statement(
-            settings.ibkr_flex_token, settings.ibkr_flex_query_id
-        )
-        return diagnose_flex(xml)
-    except IbkrFlexError as exc:
-        raise HTTPException(status_code=502, detail=f"IBKR Flex: {exc}")
-
-
-@router.post("/sync-ibkr")
-async def sync_ibkr(db: AsyncSession = Depends(get_db)):
-    """Pull executed trades from IBKR Flex and upsert them into the journal.
-
-    Idempotent: re-running skips already-imported executions and preserves any
-    manual annotations. Requires IBKR_FLEX_TOKEN and IBKR_FLEX_QUERY_ID to be set.
-    """
-    from app.core.config import settings
-    from app.services.ibkr_flex_service import (
-        IbkrFlexError,
-        diagnose_flex,
-        fetch_flex_statement,
-        parse_executions,
-        sync_executions_to_journal,
-    )
-
-    if not (settings.ibkr_flex_token and settings.ibkr_flex_query_id):
-        raise HTTPException(
-            status_code=400,
-            detail="IBKR Flex no configurado. Definí IBKR_FLEX_TOKEN e IBKR_FLEX_QUERY_ID en backend/.env",
-        )
-    try:
-        xml = await fetch_flex_statement(
-            settings.ibkr_flex_token, settings.ibkr_flex_query_id
-        )
-        executions = parse_executions(xml)
-        stats = await sync_executions_to_journal(db, executions)
-    except IbkrFlexError as exc:
-        raise HTTPException(status_code=502, detail=f"IBKR Flex: {exc}")
-
-    result = {
-        "fetched_executions": stats.fetched_executions,
-        "closed_inserted": stats.closed_inserted,
-        "open_upserted": stats.open_upserted,
-        "skipped_existing": stats.skipped_existing,
-        "open_closed_out": stats.open_closed_out,
-        "errors": stats.errors,
-    }
-    # Self-diagnose a 0-trades pull from the XML we already fetched (no extra
-    # IBKR call) so the operator sees *why* nothing came back — usually the Flex
-    # query lacks the Trades section or its period has no executions.
-    if stats.fetched_executions == 0:
-        diag = diagnose_flex(xml)
-        result["diagnostic"] = diag
-        result["hint"] = _ibkr_zero_hint(diag)
-    return result
-
-
-def _ibkr_zero_hint(diag: dict) -> str:
-    if not diag.get("ok"):
-        return f"IBKR devolvió un error: {diag.get('error_message') or diag.get('status')}"
-    sections = diag.get("sections_present") or {}
-    if "Trades" not in sections:
-        return ("El Flex Query no incluye la sección Trades. Editá el query en IBKR "
-                "y agregá la sección 'Trades' (con detalle Execution).")
-    if diag.get("trade_elements_total", 0) == 0:
-        stmts = diag.get("statements") or [{}]
-        rng = stmts[0]
-        return (f"El query incluye Trades pero no hay operaciones en el período "
-                f"{rng.get('fromDate')}–{rng.get('toDate')}. Ampliá el período del Flex Query "
-                f"(ej. 'Last 365 Calendar Days').")
-    if diag.get("parsed_stk_executions", 0) == 0:
-        total = diag.get("trade_elements_total", 0)
-        sample = diag.get("sample_trade") or {}
-        present = sample.get("attribute_names") or []
-        needed = ["symbol", "buySell", "tradeDate", "quantity", "tradePrice", "tradeID"]
-        missing = [f for f in needed if f not in present]
-        return (f"Hay {total} trades pero les faltan campos para parsearlos. "
-                f"Faltan: {missing or '—'}. Editá el Flex Query y agregá esas columnas "
-                f"a la sección Trades (campos presentes hoy: {present}).")
-    return "No se reconocieron ejecuciones; revisá el diagnóstico."
 
 
 @router.post("/backfill-regime")

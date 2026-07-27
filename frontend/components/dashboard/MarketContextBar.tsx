@@ -48,6 +48,12 @@ interface LeadershipData {
     leader_count:                number
     leader_count_delta_5d:       number
     leader_count_delta_20d:      number
+    leader_density:              number
+    leader_density_delta_5d:     number
+    leader_density_delta_20d:    number
+    leader_density_level:        string
+    leader_density_percentile:   number | null
+    leader_density_sample_size:  number
     leader_pullback_quality_avg: number
     leader_tightness_avg:        number
     leader_vol_contraction_avg:  number
@@ -67,12 +73,64 @@ interface IndexData {
   above_ema200: boolean
 }
 
+export interface HealthDayPoint {
+  date: string
+  participation: string
+  leadership: string
+  damaged: boolean
+}
+
+export interface HealthData {
+  state: string
+  window_days: number
+  episodes: number
+  damaged_days: number
+  days_since_last_damage: number | null
+  repair_streak: number
+  series: HealthDayPoint[]
+}
+
+export interface PostureData {
+  state: string
+  instruction: string
+  reasons: string[]
+  unlock: string | null
+}
+
+export interface FollowThroughData {
+  descriptor: string
+  basis: string
+  window_days: number
+  signals: number
+  resolved: number
+  success: number
+  failure: number
+  neutral: number
+  pending: number
+  delivery_rate: number | null
+  baseline_rate: number | null
+  baseline_n: number
+  delta_pp: number | null
+  provisional_on_track: number
+  provisional_failing: number
+  provisional_unclear: number
+  per_family: Record<string, {
+    signals: number
+    success: number
+    resolved: number
+    delivery: number | null
+  }>
+}
+
 export interface MarketContextData {
   as_of: string
   universe_size: number
   participation: ParticipationData
   leadership: LeadershipData
   engines_pending: string[]
+  posture?: PostureData | null
+  health?: HealthData | null
+  follow_through?: FollowThroughData | null
   index?: IndexData | null
 }
 
@@ -105,6 +163,72 @@ export function breadthLevelColor(pct: number): string {
   if (pct >= 55) return 'text-green-400'
   if (pct >= 35) return 'text-amber-400'
   return 'text-red-400'
+}
+
+// Leadership LEVEL (density vs recent norm) — orthogonal to the trend descriptor.
+export function densityLevelColor(level: string): string {
+  if (level === 'STRONG') return 'text-green-400'
+  if (level === 'NORMAL') return 'text-amber-400'
+  if (level === 'WEAK')   return 'text-red-400'
+  return 'text-white/30'  // UNKNOWN
+}
+
+// Health persistence state — damage MEMORY over the last 20 trading days,
+// orthogonal to today's descriptors (an EXPANDING day can sit on FRAGILE health).
+export function healthStateColor(state: string): string {
+  if (state === 'ROBUST')     return 'text-green-400'
+  if (state === 'RECOVERING') return 'text-sky-400'
+  if (state === 'FRAGILE')    return 'text-amber-400'
+  if (state === 'DAMAGED')    return 'text-red-400'
+  return 'text-white/30'  // UNKNOWN
+}
+
+// Follow-through — is the market paying recent bullish signals?
+export function followThroughColor(descriptor: string): string {
+  if (descriptor === 'PAYING')     return 'text-green-400'
+  if (descriptor === 'MIXED')      return 'text-amber-400'
+  if (descriptor === 'NOT_PAYING') return 'text-red-400'
+  return 'text-white/30'  // UNKNOWN
+}
+
+// Posture — the operational verdict. DEFENSIVO (orange) is distinct from
+// FUERA (red): "minimum size" vs "no new buys".
+export function postureColor(state: string): string {
+  if (state === 'AGRESIVO')  return 'text-green-400'
+  if (state === 'NORMAL')    return 'text-white/80'
+  if (state === 'SELECTIVO') return 'text-amber-400'
+  if (state === 'DEFENSIVO') return 'text-orange-400'
+  if (state === 'FUERA')     return 'text-red-400'
+  return 'text-white/30'
+}
+
+// 20-cell damage strip: one cell per classified trading day, red = damaged.
+// The visual evidence behind the health state — shows WHERE the damage sits.
+export function DamageStrip({
+  series,
+  cellWidth = 3,
+  height = 10,
+}: { series: HealthDayPoint[]; cellWidth?: number; height?: number }) {
+  if (!series || series.length === 0) return null
+  const gap = 1
+  const width = series.length * (cellWidth + gap) - gap
+  return (
+    <svg width={width} height={height} className="shrink-0">
+      {series.map((d, i) => (
+        <rect
+          key={d.date}
+          x={i * (cellWidth + gap)}
+          y={0}
+          width={cellWidth}
+          height={height}
+          rx={0.5}
+          fill={d.damaged ? '#f87171' : 'rgba(255,255,255,0.12)'}
+        >
+          <title>{`${d.date}: participation ${d.participation} · leadership ${d.leadership}`}</title>
+        </rect>
+      ))}
+    </svg>
+  )
 }
 
 function trendColor(trend: string): string {
@@ -193,6 +317,23 @@ export default function MarketContextBar() {
         className="w-full text-left px-4 py-2.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/8 transition-colors cursor-pointer"
         onClick={() => setDrawerOpen(true)}
       >
+        {/* Line 0: the operational verdict — the one sentence that answers
+            "¿qué tan agresivo hoy?". Everything below is its evidence. */}
+        {ctx.posture && (
+          <div
+            className="flex items-baseline gap-2 mb-1.5"
+            title={[...ctx.posture.reasons, ctx.posture.unlock].filter(Boolean).join(' · ')}
+          >
+            <span className="text-[10px] uppercase tracking-widest text-white/40 shrink-0">Hoy</span>
+            <span className={`text-sm font-black tracking-wide shrink-0 ${postureColor(ctx.posture.state)}`}>
+              {ctx.posture.state}
+            </span>
+            <span className="text-xs text-white/60 truncate">
+              — {ctx.posture.instruction}
+            </span>
+          </div>
+        )}
+
         {/* Line 1: engine descriptors + deltas */}
         <div className="flex items-center gap-4 text-xs">
           {ctx.index && (
@@ -241,8 +382,52 @@ export default function MarketContextBar() {
             <span className={`text-[10px] font-semibold ${deltaColor(l.delta_5d)}`}>
               {deltaArrow(l.delta_5d)}{Math.abs(l.delta_5d).toFixed(1)}%
             </span>
+            {l.metrics.leader_density_level !== 'UNKNOWN' && (
+              <span
+                className={`text-[10px] font-bold uppercase tracking-wide ${densityLevelColor(l.metrics.leader_density_level)}`}
+                title={`Nivel de liderazgo: densidad ${(l.metrics.leader_density * 100).toFixed(1)}% del universo, percentil ${l.metrics.leader_density_percentile != null ? Math.round(l.metrics.leader_density_percentile * 100) : '—'} vs ${l.metrics.leader_density_sample_size} ruedas. El descriptor mide el delta 5d; este, el nivel — un HEALTHY plano sobre nivel WEAK sigue siendo liderazgo pobre.`}
+              >
+                {l.metrics.leader_density_level}
+              </span>
+            )}
             {l.history && <MiniSparkline data={l.history} />}
           </div>
+
+          {ctx.health && (
+            <>
+              <span className="text-white/20 shrink-0">·</span>
+              <div
+                className="flex items-center gap-1.5 shrink-0"
+                title={`Memoria ${ctx.health.window_days} ruedas: ${ctx.health.damaged_days} días dañados en ${ctx.health.episodes} episodio${ctx.health.episodes === 1 ? '' : 's'}, racha limpia ${ctx.health.repair_streak}. La salud tiene memoria: un día bueno no repara semanas de deterioro (se requieren 5 ruedas limpias para RECOVERING).`}
+              >
+                <span className="text-white/40 uppercase tracking-widest text-[10px]">Health</span>
+                <span className={`font-bold tracking-wide ${healthStateColor(ctx.health.state)}`}>
+                  {ctx.health.state}
+                </span>
+                <DamageStrip series={ctx.health.series} />
+              </div>
+            </>
+          )}
+
+          {ctx.follow_through && ctx.follow_through.descriptor !== 'UNKNOWN' && (
+            <>
+              <span className="text-white/20 shrink-0">·</span>
+              <div
+                className="flex items-center gap-1.5 shrink-0"
+                title={`¿El mercado está pagando? ${ctx.follow_through.success}/${ctx.follow_through.resolved} señales alcistas resueltas pagaron (ventana ${ctx.follow_through.window_days}d)${ctx.follow_through.baseline_rate != null ? ` vs ${Math.round(ctx.follow_through.baseline_rate * 100)}% de base histórica` : ''}. Frescas: ${ctx.follow_through.provisional_on_track} en curso, ${ctx.follow_through.provisional_failing} fallando.`}
+              >
+                <span className="text-white/40 uppercase tracking-widest text-[10px]">Follow-thru</span>
+                <span className={`font-bold tracking-wide ${followThroughColor(ctx.follow_through.descriptor)}`}>
+                  {ctx.follow_through.descriptor}
+                </span>
+                {ctx.follow_through.delivery_rate != null && (
+                  <span className={`text-[10px] font-bold tabular-nums ${followThroughColor(ctx.follow_through.descriptor)}`}>
+                    {Math.round(ctx.follow_through.delivery_rate * 100)}%
+                  </span>
+                )}
+              </div>
+            </>
+          )}
 
           <div className="ml-auto flex items-center gap-2">
             {affectedLenses.length > 0 && (
@@ -272,9 +457,9 @@ export default function MarketContextBar() {
           <span>breadth <span className={breadthLevelColor(breadthPct)}>{breadthPct}%</span></span>
           <span>momentum <span className={deltaColor(p.delta_5d)}>{p.delta_5d > 0 ? '+' : ''}{p.delta_5d.toFixed(1)}pp</span></span>
           <span>leaders <span className="text-white/70">{l.metrics.leader_count}</span>
-            {l.metrics.leader_count_delta_20d !== 0 && (
-              <span className={deltaColor(l.metrics.leader_count_delta_20d)}>
-                {' '}({l.metrics.leader_count_delta_20d > 0 ? '+' : ''}{l.metrics.leader_count_delta_20d}/20d)
+            {l.metrics.leader_density_delta_20d !== 0 && (
+              <span className={deltaColor(l.metrics.leader_density_delta_20d)}>
+                {' '}({l.metrics.leader_density_delta_20d > 0 ? '+' : ''}{l.metrics.leader_density_delta_20d.toFixed(1)}%/20d)
               </span>
             )}
           </span>

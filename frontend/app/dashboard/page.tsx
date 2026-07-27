@@ -1,11 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import DashboardLayout from '@/components/layout/DashboardLayout'
 import Card from '@/components/base/Card'
 import dynamic from 'next/dynamic'
-import { usePricePolling } from '@/hooks/usePricePolling'
-import { API_URL } from '@/lib/utils'
 
 const MarketContextBar       = dynamic(() => import('@/components/dashboard/MarketContextBar'),       { ssr: false })
 const SectorRotationCallout  = dynamic(() => import('@/components/dashboard/SectorRotationCallout'),  { ssr: false })
@@ -14,21 +12,6 @@ const LiveTransitionFeed  = dynamic(() => import('@/components/dashboard/LiveTra
 const SectorHeatmap       = dynamic(() => import('@/components/charts/SectorHeatmap'),           { ssr: false })
 
 export default function DashboardPage() {
-  const [monitoredSymbols, setMonitoredSymbols] = useState<string[]>([])
-
-  useEffect(() => {
-    fetch(`${API_URL}/api/v1/data/top-symbols?limit=10`)
-      .then(r => r.json())
-      .then(data => { if (data.symbols?.length) setMonitoredSymbols(data.symbols) })
-      .catch(() => {})
-  }, [])
-
-  const { prices } = usePricePolling({
-    symbols: monitoredSymbols,
-    pollInterval: 30000,
-    enabled: monitoredSymbols.length > 0,
-  })
-
   // Keyboard nav — only when no input/textarea/contenteditable has focus
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

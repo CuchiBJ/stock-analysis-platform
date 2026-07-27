@@ -14,7 +14,7 @@ interface GroupStrength {
   badge: 'leader' | 'neutral' | 'weak'
 }
 
-type HoldingStatus = 'at_highs' | 'above_ema21' | 'testing_ema50' | 'deep_pullback'
+type HoldingStatus = 'at_highs' | 'above_ema21' | 'testing_ema21' | 'testing_ema50' | 'deep_pullback'
 type SortMode = 'rs' | 'momentum'
 type Window = 3 | 5 | 10
 
@@ -59,6 +59,7 @@ interface Props {
 const HOLDING: Record<HoldingStatus, { label: string; cls: string }> = {
   at_highs:      { label: 'en máximos',    cls: 'border-green-500/30 bg-green-500/10 text-green-400' },
   above_ema21:   { label: 'sobre EMA21',   cls: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' },
+  testing_ema21: { label: 'testea EMA21',  cls: 'border-yellow-400/30 bg-yellow-400/10 text-yellow-300' },
   testing_ema50: { label: 'testea EMA50',  cls: 'border-amber-400/30 bg-amber-400/10 text-amber-300' },
   deep_pullback: { label: 'pullback profundo', cls: 'border-red-500/30 bg-red-500/10 text-red-400' },
 }
@@ -66,12 +67,27 @@ const HOLDING: Record<HoldingStatus, { label: string; cls: string }> = {
 const signed = (v: number, suffix = '') => `${v >= 0 ? '+' : ''}${v.toFixed(1)}${suffix}`
 const tone = (v: number) => (v >= 0 ? 'text-green-400' : 'text-red-400')
 
+// d21 (distancia a EMA21 en ATR) por encima de esto = "extendida" — mismo techo
+// que el rango accionable de la cola U&R (-0.5 ≤ d21 ≤ 1.5).
+const EXTENSION_CEILING_ATR = 1.5
+const HIDE_EXTENDED_KEY = 'rsq:hideExtended'
+
 export default function RSLeadersQueue({ refreshKey }: Props) {
   const [response, setResponse] = useState<QueueResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [sortMode, setSortMode] = useState<SortMode>('rs')
   const [window, setWindow] = useState<Window>(5)
+  const [hideExtended, setHideExtended] = useState(true)
+
+  // Restaurar preferencia del toggle (default ON) y persistirla.
+  useEffect(() => {
+    const saved = localStorage.getItem(HIDE_EXTENDED_KEY)
+    if (saved !== null) setHideExtended(saved === '1')
+  }, [])
+  useEffect(() => {
+    localStorage.setItem(HIDE_EXTENDED_KEY, hideExtended ? '1' : '0')
+  }, [hideExtended])
 
   useEffect(() => {
     let cancelled = false
@@ -107,27 +123,41 @@ export default function RSLeadersQueue({ refreshKey }: Props) {
           RS Momentum
         </button>
       </div>
-      {isMomentum && (
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-muted-foreground">ventana:</span>
-          <div className="flex rounded-md border border-border overflow-hidden">
-            {([3, 5, 10] as Window[]).map(w => (
-              <button
-                key={w}
-                onClick={() => setWindow(w)}
-                className={`px-2.5 py-1 transition-colors ${window === w ? 'bg-primary/15 text-foreground font-medium' : 'text-muted-foreground hover:text-foreground'} ${w !== 3 ? 'border-l border-border' : ''}`}
-              >
-                {w}d
-              </button>
-            ))}
+      <div className="flex items-center gap-3 text-xs flex-wrap">
+        {isMomentum && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-muted-foreground">ventana:</span>
+            <div className="flex rounded-md border border-border overflow-hidden">
+              {([3, 5, 10] as Window[]).map(w => (
+                <button
+                  key={w}
+                  onClick={() => setWindow(w)}
+                  className={`px-2.5 py-1 transition-colors ${window === w ? 'bg-primary/15 text-foreground font-medium' : 'text-muted-foreground hover:text-foreground'} ${w !== 3 ? 'border-l border-border' : ''}`}
+                >
+                  {w}d
+                </button>
+              ))}
+            </div>
+            {spyReturnN != null && (
+              <span className="text-muted-foreground/70">
+                SPY {window}d: <span className={`font-mono ${tone(spyReturnN)}`}>{signed(spyReturnN, '%')}</span>
+              </span>
+            )}
           </div>
-          {spyReturnN != null && (
-            <span className="text-muted-foreground/70">
-              SPY {window}d: <span className={`font-mono ${tone(spyReturnN)}`}>{signed(spyReturnN, '%')}</span>
-            </span>
-          )}
-        </div>
-      )}
+        )}
+        <button
+          onClick={() => setHideExtended(v => !v)}
+          title="Oculta líderes a más de 1.5 ATR sobre la EMA21 (extendidas, no accionables)"
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md border transition-colors ${
+            hideExtended
+              ? 'border-primary/40 bg-primary/15 text-foreground font-medium'
+              : 'border-border text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          <span className="font-mono">{hideExtended ? '✓' : ''}</span>
+          ocultar extendidas
+        </button>
+      </div>
     </div>
   )
 
@@ -174,11 +204,42 @@ export default function RSLeadersQueue({ refreshKey }: Props) {
     )
   }
 
+  const visibleRows = hideExtended
+    ? rows.filter(r => r.distance_to_ema21_atr == null || r.distance_to_ema21_atr <= EXTENSION_CEILING_ATR)
+    : rows
+  const hiddenCount = rows.length - visibleRows.length
+
+  if (visibleRows.length === 0) {
+    return (
+      <div className="space-y-2">
+        {controls}
+        {header}
+        <Card className="p-6">
+          <p className="text-sm text-muted-foreground">
+            Todas las líderes están extendidas (&gt;{EXTENSION_CEILING_ATR} ATR sobre la EMA21) ahora mismo.{' '}
+            <button onClick={() => setHideExtended(false)} className="text-primary hover:text-primary/80">
+              Apagá el filtro
+            </button>{' '}
+            para verlas.
+          </p>
+        </Card>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-2">
       {controls}
       {header}
-      {rows.map(r => (
+      {hiddenCount > 0 && (
+        <p className="text-[11px] text-muted-foreground/60 px-1">
+          {hiddenCount} extendida{hiddenCount === 1 ? '' : 's'} oculta{hiddenCount === 1 ? '' : 's'} (&gt;{EXTENSION_CEILING_ATR} ATR sobre EMA21).{' '}
+          <button onClick={() => setHideExtended(false)} className="text-primary/80 hover:text-primary">
+            Mostrar
+          </button>
+        </p>
+      )}
+      {visibleRows.map(r => (
         <Card key={r.symbol} className="p-3">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3 min-w-0 flex-1">

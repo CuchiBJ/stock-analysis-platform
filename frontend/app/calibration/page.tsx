@@ -13,7 +13,9 @@ interface CalibrationRow {
   n_pending: number
   success_count: number
   failure_count: number
+  neutral_count: number
   success_rate: number | null
+  delivery_rate: number | null
   status: 'empirical' | 'insufficient' | 'no_data'
 }
 
@@ -50,11 +52,11 @@ function StatusBadge({ status }: { status: CalibrationRow['status'] }) {
 
 function rowNote(row: CalibrationRow, minSamples: number): string {
   if (row.status === 'empirical') {
-    return `${row.success_count} success · ${row.failure_count} failure`
+    return `${row.success_count} success · ${row.failure_count} failure · ${row.neutral_count} neutral`
   }
   if (row.status === 'insufficient') {
     const need = minSamples - row.n_resolved
-    return `Need ${need} more · ${row.success_count}/${row.failure_count} so far`
+    return `Need ${need} more · ${row.success_count}/${row.failure_count}/${row.neutral_count} so far`
   }
   return row.n_pending > 0 ? `${row.n_pending} pending` : 'no observations yet'
 }
@@ -83,7 +85,9 @@ export default function CalibrationPage() {
         <div>
           <h1 className="text-xl font-bold text-foreground">Calibration</h1>
           <p className="text-xs text-muted-foreground mt-1">
-            Tasa de éxito empírica observada por transition type. Los outcomes se resuelven 10 días post-detección.
+            Rendimiento empírico por transition type, resuelto 10 días post-detección.
+            {' '}<span className="text-foreground/70">Win rate</span> = aciertos sobre desenlaces decisivos (success ÷ success+failure, excluye neutrals).
+            {' '}<span className="text-foreground/70">Delivered</span> = aciertos sobre <em>todas</em> las señales que cerraron (incluye neutrals en el denominador) — un neutral cerró sin entregar el recorrido ≥1.5 ATR.
           </p>
         </div>
 
@@ -136,7 +140,8 @@ export default function CalibrationPage() {
                   <tr className="text-left text-[10px] uppercase tracking-widest text-muted-foreground">
                     <th className="px-4 py-2 font-medium">Transition</th>
                     <th className="px-4 py-2 font-medium text-right">N</th>
-                    <th className="px-4 py-2 font-medium text-right">Success rate</th>
+                    <th className="px-4 py-2 font-medium text-right" title="Aciertos sobre desenlaces decisivos (success ÷ success+failure). Excluye neutrals.">Win rate</th>
+                    <th className="px-4 py-2 font-medium text-right" title="Aciertos sobre todas las señales que cerraron (success ÷ success+failure+neutral).">Delivered</th>
                     <th className="px-4 py-2 font-medium">Status</th>
                     <th className="px-4 py-2 font-medium">Detail</th>
                   </tr>
@@ -153,6 +158,11 @@ export default function CalibrationPage() {
                       <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums">
                         {row.success_rate !== null
                           ? <span className="text-foreground">{(row.success_rate * 100).toFixed(1)}%</span>
+                          : <span className="text-muted-foreground">—</span>}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums">
+                        {row.delivery_rate !== null
+                          ? <span className="text-foreground/70">{(row.delivery_rate * 100).toFixed(1)}%</span>
                           : <span className="text-muted-foreground">—</span>}
                       </td>
                       <td className="px-4 py-2.5">

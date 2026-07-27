@@ -1025,7 +1025,7 @@ class DataScheduler:
                         # Get internal_id from InstrumentIdentity
                         identity_query = select(InstrumentIdentityModel.internal_id).where(
                             InstrumentIdentityModel.current_symbol == symbol
-                        )
+                        ).limit(1)
                         identity_result = await db.execute(identity_query)
                         internal_id = identity_result.scalar_one_or_none()
                         
@@ -1140,7 +1140,7 @@ class DataScheduler:
                         # Check if already in universe
                         existing_query = select(InstrumentIdentityModel).where(
                             InstrumentIdentityModel.current_symbol == symbol.upper()
-                        )
+                        ).limit(1)
                         existing_result = await db.execute(existing_query)
                         if existing_result.scalar_one_or_none():
                             continue

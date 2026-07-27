@@ -1,4 +1,4 @@
-"""Market Context Engine — Phase 1: participation + leadership.
+"""Market Context Engine — participation + leadership + health persistence.
 
 Multi-dimensional behavior-based market read. Replaces single-label regime
 classification with orthogonal behavior dimensions.
@@ -16,7 +16,17 @@ from typing import Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.stock import StockMetrics
+from app.models.stock import StockMetrics, TransitionObservation
+from app.services.follow_through import (
+    BULLISH_TRANSITIONS,
+    FT_BASELINE_CAL_DAYS,
+    FT_FAMILIES,
+    FT_WINDOW_CAL_DAYS,
+    FollowThroughAnalysis,
+    classify_follow_through,
+    classify_provisional,
+)
+from app.services.market_posture import Posture, compute_posture
 from app.services.quality_leader_gate import is_quality_leader
 from app.services.universe_filters import QUALITY_FILTERS
 
@@ -36,13 +46,40 @@ _PARTICIPATION_THRESHOLDS = {
                             # below -15pp       → COLLAPSING
 }
 
-# Leadership descriptor thresholds — delta_5d_pct = % change in leader count.
+# Leadership descriptor thresholds — delta_5d_pct = % change in leader DENSITY
+# (leaders/universe), universe-normalized so ingest-completeness swings in the
+# universe size don't masquerade as leadership expansion/collapse. Same relative
+# % scale as the prior raw-count delta, so thresholds carry over unchanged.
 _LEADERSHIP_THRESHOLDS = {
     'expanding':           +5.0,
     'thinning':            -5.0,
     'collapsing':         -15.0,
     'climactic_ratio_warn': 0.25,  # >25% climactic leaders → EXHAUSTED override
     'extension_ratio_warn': 0.40,  # >40% extended leaders  → EXHAUSTED override
+}
+
+# Minimum density samples before a leadership LEVEL (vs recent norm) is trusted.
+_DENSITY_LEVEL_MIN_SAMPLE = 10
+
+# ─── Market health persistence (IBD distribution-day inspired) ────────────────
+# Health has MEMORY: repeated deterioration episodes over the recent window keep
+# the market unhealthy even when today's descriptors look fine. Damage
+# accumulates fast; repair is asymmetric — it requires a sustained clean streak
+# (follow-through), never a single good day.
+_HEALTH_WINDOW = 20               # trading days of memory
+_HEALTH_DELTA_LOOKBACK = 5        # trading-day index offset for per-day deltas
+_HEALTH_MIN_CLASSIFIED_DAYS = 10  # fewer classified days → state UNKNOWN
+
+_DAMAGE_PARTICIPATION = frozenset({"NARROWING", "COLLAPSING"})
+_DAMAGE_LEADERSHIP = frozenset({"THINNING", "COLLAPSING", "EXHAUSTED"})
+
+_HEALTH_THRESHOLDS = {
+    'robust_max_damaged_days': 2,   # ≤2 damaged days AND ≤1 episode → ROBUST
+    'robust_max_episodes':     1,
+    'damaged_min_days':        8,   # ≥8 of 20 damaged → DAMAGED (heavy total)
+    'damaged_recent_window':   5,   # ...or an active cluster right now:
+    'damaged_min_recent':      3,   #    ≥3 damaged of the last 5 days → DAMAGED
+    'repair_streak_min':       5,   # ≥5 trailing clean days → RECOVERING overlay
 }
 
 
@@ -57,8 +94,19 @@ class ParticipationAnalysis:
 @dataclass
 class LeadershipAnalysis:
     descriptor: str
-    delta_5d: float            # leader_count delta as % change
+    delta_5d: float            # leader DENSITY (leaders/universe) delta as % change vs 5d ago
     metrics: dict
+
+
+@dataclass
+class HealthAnalysis:
+    state: str                 # ROBUST | FRAGILE | DAMAGED | RECOVERING | UNKNOWN
+    episodes: int              # maximal runs of damaged days within the window
+    damaged_days: int
+    window_days: int           # days actually classified (≤ _HEALTH_WINDOW)
+    days_since_last_damage: Optional[int]  # None when no damage in window
+    repair_streak: int         # trailing consecutive clean days
+    series: list = field(default_factory=list)  # [{date, participation, leadership, damaged}] ascending
 
 
 @dataclass
@@ -72,6 +120,9 @@ class MarketContext:
     # evolution of each engine, not just today's value + a 5d delta.
     participation_history: list = field(default_factory=list)  # [{date, value}] breadth ratio
     leadership_history: list = field(default_factory=list)      # [{date, value}] leader count
+    health: Optional[HealthAnalysis] = None
+    follow_through: Optional[FollowThroughAnalysis] = None
+    posture: Optional[Posture] = None  # the one-sentence operational verdict
 
 
 # In-memory cache keyed by as_of date (Decision 9).
@@ -81,15 +132,15 @@ _CACHE_TTL_SECONDS = 300  # 5 minutes
 
 
 class MarketContextEngine:
-    """Behavior-based market context engine — Phase 1 (participation + leadership).
+    """Behavior-based market context engine — participation + leadership + health.
 
     See openspec/changes/market-context-engine-phase-1/ for full design and decisions.
-    The other five engines (persistence, forgiveness, rotation, volatility,
-    follow_through) come in future phases.
+    The remaining engines (forgiveness, rotation, volatility, follow_through)
+    come in future phases.
     """
 
     ENGINES_PENDING = [
-        "persistence", "forgiveness", "rotation", "volatility", "follow_through"
+        "forgiveness", "rotation", "volatility"
     ]
 
     def __init__(self, db: AsyncSession) -> None:
@@ -130,6 +181,20 @@ class MarketContextEngine:
         participation = await self._participation(as_of)
         leadership = await self._leadership(as_of)
         part_hist, lead_hist = await self._history(as_of)
+        health = await self._health(as_of)
+        follow_through = await self._follow_through(as_of)
+        posture = compute_posture(
+            participation.descriptor,
+            leadership.descriptor,
+            health.state,
+            damaged_days=health.damaged_days,
+            window_days=health.window_days,
+            repair_streak=health.repair_streak,
+            repair_streak_min=_HEALTH_THRESHOLDS['repair_streak_min'],
+            follow_through=follow_through.descriptor,
+            ft_delivery=follow_through.delivery_rate,
+            ft_baseline=follow_through.baseline_rate,
+        )
 
         ctx = MarketContext(
             as_of=as_of,
@@ -139,6 +204,9 @@ class MarketContextEngine:
             engines_pending=list(self.ENGINES_PENDING),
             participation_history=part_hist,
             leadership_history=lead_hist,
+            health=health,
+            follow_through=follow_through,
+            posture=posture,
         )
         if use_cache:
             # Evict stale entries for older dates — only the live path caches, so
@@ -398,6 +466,7 @@ class MarketContextEngine:
     async def _leadership(self, as_of: date) -> LeadershipAnalysis:
         leaders_today = await self._fetch_leaders(as_of)
         leader_count = len(leaders_today)
+        universe_today = await self._universe_size(as_of)
 
         # Snap calendar offsets to the nearest available trading date — otherwise a
         # holiday lookback (e.g. Memorial Day) returns zero leaders and corrupts
@@ -415,6 +484,22 @@ class MarketContextEngine:
 
         delta_5d = leader_count - count_5d
         delta_20d = leader_count - count_20d
+
+        # Leader DENSITY (leaders / universe) instead of raw counts: the
+        # QUALITY_FILTERS universe swings ±~20% day to day with ingest
+        # completeness, so a raw count delta conflates market leadership with
+        # how many rows landed in stock_metrics that day. Dividing each count by
+        # its own universe cancels that, mirroring the participation engine
+        # (which already classifies on breadth ratios, not counts).
+        universe_5d = await self._universe_size(date_5d)
+        universe_20d = await self._universe_size(date_20d)
+        density_today = leader_count / universe_today if universe_today else 0.0
+        density_delta_5d_pct = self._density_delta_pct(
+            leader_count, universe_today, count_5d, universe_5d
+        )
+        density_delta_20d_pct = self._density_delta_pct(
+            leader_count, universe_today, count_20d, universe_20d
+        )
 
         def safe_avg(vals: list) -> float:
             return sum(vals) / len(vals) if vals else 0.0
@@ -449,18 +534,26 @@ class MarketContextEngine:
         symbols_5d = {m.symbol for m in leaders_5d}
         leadership_turnover_5d = len(symbols_today.symmetric_difference(symbols_5d))
 
-        delta_5d_pct = (delta_5d / count_5d * 100) if count_5d > 0 else 0.0
         descriptor = self._leadership_descriptor(
-            delta_5d_pct, climactic_count, extension_count, leader_count
+            density_delta_5d_pct, climactic_count, extension_count, leader_count
         )
+        # Level (density vs recent norm) — orthogonal to the trend descriptor, so
+        # a flat "HEALTHY" delta can't be misread as "good" when the level is weak.
+        density_level, density_percentile, density_sample = await self._leadership_level(as_of)
 
         return LeadershipAnalysis(
             descriptor=descriptor,
-            delta_5d=round(delta_5d_pct, 2),
+            delta_5d=round(density_delta_5d_pct, 2),
             metrics={
                 'leader_count':                leader_count,
                 'leader_count_delta_5d':       delta_5d,
                 'leader_count_delta_20d':      delta_20d,
+                'leader_density':              round(density_today, 4),
+                'leader_density_delta_5d':     round(density_delta_5d_pct, 2),
+                'leader_density_delta_20d':    round(density_delta_20d_pct, 2),
+                'leader_density_level':        density_level,
+                'leader_density_percentile':   round(density_percentile, 2) if density_percentile is not None else None,
+                'leader_density_sample_size':  density_sample,
                 'leader_pullback_quality_avg': round(pullback_avg, 2),
                 'leader_tightness_avg':        round(tightness_avg, 4),
                 'leader_vol_contraction_avg':  round(vol_contraction_avg, 4),
@@ -513,9 +606,72 @@ class MarketContextEngine:
                 count += 1
         return count
 
+    @staticmethod
+    def _density_delta_pct(
+        count_now: int, universe_now: int, count_then: int, universe_then: int
+    ) -> float:
+        """% change in leader density (count/universe) between two dates.
+
+        Normalizing each count by its own universe before differencing cancels
+        the ±~20% day-to-day swing in universe size driven by ingest
+        completeness, so equal leadership across two differently-sized universes
+        reads as ~0% — not a phantom expansion/collapse. Returns 0.0 when either
+        universe is empty (can't form a ratio).
+        """
+        if not universe_now or not universe_then:
+            return 0.0
+        density_now = count_now / universe_now
+        density_then = count_then / universe_then
+        if density_then <= 0:
+            return 0.0
+        return (density_now - density_then) / density_then * 100
+
+    @staticmethod
+    def _classify_density_level(percentile: Optional[float], sample_size: int) -> str:
+        """Map today's leader-density percentile (vs recent history) to a LEVEL.
+
+        Orthogonal to the trend descriptor: the descriptor (EXPANDING/HEALTHY/
+        THINNING/COLLAPSING) is a 5-day DELTA, so HEALTHY only means "density
+        barely moved" — it can't tell whether the level is good or stuck-at-bad.
+        This answers the level question directly: is today's leader density high
+        or low vs its own recent norm. Returns UNKNOWN below the min sample.
+        """
+        if percentile is None or sample_size < _DENSITY_LEVEL_MIN_SAMPLE:
+            return "UNKNOWN"
+        if percentile >= 0.67:
+            return "STRONG"
+        if percentile >= 0.33:
+            return "NORMAL"
+        return "WEAK"
+
+    async def _leadership_level(self, as_of: date, n: int = 20) -> tuple:
+        """Return (level, percentile, sample_size) for leader density at as_of.
+
+        Builds the leader-density series over the last `n` trading days (reusing
+        the same is_quality_leader definition via _fetch_leaders, the single
+        source of truth) and ranks today's density within it. Cached upstream
+        per as_of (5-min TTL), so the per-date fetch cost is paid once.
+        """
+        dates = await self._recent_trading_dates(as_of, n)
+        densities: list[float] = []
+        today_density: Optional[float] = None
+        for d in dates:
+            universe = await self._universe_size(d)
+            if not universe:
+                continue
+            density = len(await self._fetch_leaders(d)) / universe
+            densities.append(density)
+            if d == as_of:
+                today_density = density
+        if today_density is None or not densities:
+            return "UNKNOWN", None, len(densities)
+        # Empirical percentile: share of the window at or below today's density.
+        percentile = sum(1 for x in densities if x <= today_density) / len(densities)
+        return self._classify_density_level(percentile, len(densities)), percentile, len(densities)
+
     def _leadership_descriptor(
         self,
-        delta_pct: float,
+        delta_pct: float,  # leader-density % change vs 5d ago (universe-normalized)
         climactic_count: int,
         extension_count: int,
         leader_count: int,
@@ -536,3 +692,339 @@ class MarketContextEngine:
         if delta_pct >= t['collapsing']:
             return "THINNING"
         return "COLLAPSING"
+
+    # ─── Health persistence engine ─────────────────────────────────────────────
+
+    async def _health(self, as_of: date) -> HealthAnalysis:
+        """Damage memory over the last _HEALTH_WINDOW trading days.
+
+        Classifies each day with the same participation/leadership thresholds
+        as the headline descriptors and runs the damaged flags through the
+        health state machine. Rides the same 5-min cache as the other engines.
+        """
+        raw = await self._daily_dimension_series(
+            as_of, _HEALTH_WINDOW + _HEALTH_DELTA_LOOKBACK
+        )
+        days = self._classify_health_days(raw)[-_HEALTH_WINDOW:]
+        verdict = self._health_state([d['damaged'] for d in days])
+        return HealthAnalysis(
+            state=verdict['state'],
+            episodes=verdict['episodes'],
+            damaged_days=verdict['damaged_days'],
+            window_days=len(days),
+            days_since_last_damage=verdict['days_since_last_damage'],
+            repair_streak=verdict['repair_streak'],
+            series=[
+                {
+                    'date':          d['date'].isoformat(),
+                    'participation': d['participation'],
+                    'leadership':    d['leadership'],
+                    'damaged':       d['damaged'],
+                }
+                for d in days
+            ],
+        )
+
+    async def _daily_dimension_series(self, as_of: date, n: int) -> list:
+        """Per-day raw inputs for the health engine over the last n trading days.
+
+        Returns ascending [{date, universe, breadth_ratio, leader_count,
+        extension_count}] in 3 grouped/bulk queries total (independent of n) —
+        cheaper per day than the per-date fetches in _history/_leadership_level.
+        A date with no universe rows yields breadth_ratio=None so the classifier
+        can skip it (a data gap must never count as damage).
+        """
+        dates = await self._recent_trading_dates(as_of, n)
+        if not dates:
+            return []
+        start = dates[0]
+
+        universe_result = await self._db.execute(
+            select(StockMetrics.date, func.count().label('cnt'))
+            .where(
+                StockMetrics.date >= start,
+                StockMetrics.date <= as_of,
+                *QUALITY_FILTERS,
+            )
+            .group_by(StockMetrics.date)
+        )
+        universe_by_date = {row.date: row.cnt for row in universe_result}
+
+        above_result = await self._db.execute(
+            select(StockMetrics.date, func.count().label('cnt'))
+            .where(
+                StockMetrics.date >= start,
+                StockMetrics.date <= as_of,
+                StockMetrics.distance_to_ema21.isnot(None),
+                StockMetrics.distance_to_ema21 >= 0,
+                *QUALITY_FILTERS,
+            )
+            .group_by(StockMetrics.date)
+        )
+        above_by_date = {row.date: row.cnt for row in above_result}
+
+        # Column projection keeps the bulk fetch narrow; is_quality_leader only
+        # does attribute access, so it works on Row objects as well as ORM rows.
+        leader_result = await self._db.execute(
+            select(
+                StockMetrics.date,
+                StockMetrics.perf_1y,
+                StockMetrics.ema200,
+                StockMetrics.current_price,
+                StockMetrics.sma50,
+                StockMetrics.sma150,
+                StockMetrics.sma200,
+                StockMetrics.low_52w,
+                StockMetrics.high_52w,
+                StockMetrics.adr_percent,
+                StockMetrics.distance_to_ema50_atr,
+                StockMetrics.distance_to_ema21_atr,
+            )
+            .where(
+                StockMetrics.date >= start,
+                StockMetrics.date <= as_of,
+                *QUALITY_FILTERS,
+            )
+        )
+        leaders_by_date: dict = {}
+        extension_by_date: dict = {}
+        for row in leader_result:
+            if is_quality_leader(row):
+                leaders_by_date[row.date] = leaders_by_date.get(row.date, 0) + 1
+                if row.distance_to_ema21_atr is not None and row.distance_to_ema21_atr > 3.0:
+                    extension_by_date[row.date] = extension_by_date.get(row.date, 0) + 1
+
+        series = []
+        for d in dates:
+            universe = universe_by_date.get(d, 0)
+            series.append({
+                'date':            d,
+                'universe':        universe,
+                'breadth_ratio':   (above_by_date.get(d, 0) / universe) if universe else None,
+                'leader_count':    leaders_by_date.get(d, 0),
+                'extension_count': extension_by_date.get(d, 0),
+            })
+        return series
+
+    def _classify_health_days(self, raw: list) -> list:
+        """Classify each day of the raw series → [{date, participation,
+        leadership, damaged}] for indexes _HEALTH_DELTA_LOOKBACK..N-1, ascending.
+
+        Day i's deltas compare against day i-_HEALTH_DELTA_LOOKBACK — a strict
+        trading-day offset, whereas the headline descriptors use a calendar
+        proxy (_DAYS_5T + snap). Around holidays the series' last-day descriptor
+        may drift ±1-2 days from the headline; acceptable for damage counting.
+
+        The historical EXHAUSTED override uses extension ratio only
+        (climactic_count=0): per-day climactic counts would need a ~45-day ADR
+        matrix. Known simplification that only under-counts damage on days that
+        were exhausted purely climactically.
+        """
+        days = []
+        for i in range(_HEALTH_DELTA_LOOKBACK, len(raw)):
+            cur = raw[i]
+            prev = raw[i - _HEALTH_DELTA_LOOKBACK]
+            if (
+                not cur['universe'] or not prev['universe']
+                or cur['breadth_ratio'] is None or prev['breadth_ratio'] is None
+            ):
+                continue
+            breadth_pp = (cur['breadth_ratio'] - prev['breadth_ratio']) * 100
+            participation = self._participation_descriptor(breadth_pp)
+            density_delta = self._density_delta_pct(
+                cur['leader_count'], cur['universe'],
+                prev['leader_count'], prev['universe'],
+            )
+            leadership = self._leadership_descriptor(
+                density_delta,
+                climactic_count=0,
+                extension_count=cur['extension_count'],
+                leader_count=cur['leader_count'],
+            )
+            days.append({
+                'date':          cur['date'],
+                'participation': participation,
+                'leadership':    leadership,
+                'damaged': (
+                    participation in _DAMAGE_PARTICIPATION
+                    or leadership in _DAMAGE_LEADERSHIP
+                ),
+            })
+        return days
+
+    @staticmethod
+    def _health_state(damaged: list) -> dict:
+        """State machine over ascending damaged flags (today last).
+
+        Asymmetric by construction: DAMAGED/FRAGILE can only upgrade to
+        RECOVERING via a clean streak of repair_streak_min days, and ROBUST only
+        returns once damage ages out of the sliding window — one good day never
+        changes the state.
+        """
+        n = len(damaged)
+        damaged_days = sum(1 for f in damaged if f)
+        episodes = sum(
+            1 for i, f in enumerate(damaged) if f and (i == 0 or not damaged[i - 1])
+        )
+        repair_streak = 0
+        for f in reversed(damaged):
+            if f:
+                break
+            repair_streak += 1
+        days_since_last_damage = repair_streak if damaged_days else None
+
+        t = _HEALTH_THRESHOLDS
+        if n < _HEALTH_MIN_CLASSIFIED_DAYS:
+            state = "UNKNOWN"
+        elif (
+            damaged_days <= t['robust_max_damaged_days']
+            and episodes <= t['robust_max_episodes']
+        ):
+            state = "ROBUST"
+        else:
+            recent = damaged[-t['damaged_recent_window']:]
+            if (
+                damaged_days >= t['damaged_min_days']
+                or sum(1 for f in recent if f) >= t['damaged_min_recent']
+            ):
+                state = "DAMAGED"
+            else:
+                state = "FRAGILE"
+            if repair_streak >= t['repair_streak_min']:
+                state = "RECOVERING"
+
+        return {
+            'state':                  state,
+            'episodes':               episodes,
+            'damaged_days':           damaged_days,
+            'repair_streak':          repair_streak,
+            'days_since_last_damage': days_since_last_damage,
+        }
+
+    # ─── Follow-through engine ─────────────────────────────────────────────────
+
+    async def _follow_through(self, as_of: date) -> FollowThroughAnalysis:
+        """Is the market paying recent bullish signals? 3 grouped/bulk queries.
+
+        Note on historical reconstruction (analyze_as_of): outcome_status for
+        signals near a past as_of resolved AFTER that date, so a reconstructed
+        follow-through has mild lookahead. Acceptable for journal backfill
+        (it shows what actually happened); the live path has no such issue.
+        """
+        window_start = as_of - timedelta(days=FT_WINDOW_CAL_DAYS)
+        baseline_start = window_start - timedelta(days=FT_BASELINE_CAL_DAYS)
+
+        # Window: signal counts per transition_type × outcome_status.
+        window_result = await self._db.execute(
+            select(
+                TransitionObservation.transition_type,
+                TransitionObservation.outcome_status,
+                func.count().label('cnt'),
+            )
+            .where(
+                TransitionObservation.date_detected > window_start,
+                TransitionObservation.date_detected <= as_of,
+                TransitionObservation.transition_type.in_(BULLISH_TRANSITIONS),
+            )
+            .group_by(
+                TransitionObservation.transition_type,
+                TransitionObservation.outcome_status,
+            )
+        )
+        by_type_status: dict = {}
+        for row in window_result:
+            by_type_status[(row.transition_type, row.outcome_status)] = row.cnt
+
+        def _sum(statuses, types=BULLISH_TRANSITIONS) -> int:
+            return sum(
+                cnt for (t, s), cnt in by_type_status.items()
+                if s in statuses and t in types
+            )
+
+        success = _sum({'SUCCESS'})
+        failure = _sum({'FAILURE'})
+        neutral = _sum({'NEUTRAL'})
+        pending = _sum({'PENDING'})
+        resolved = success + failure + neutral
+        signals = resolved + pending + _sum({'INSUFFICIENT_DATA'})
+
+        # Provisional layer: early proxies on the window's PENDING signals.
+        prov_result = await self._db.execute(
+            select(
+                TransitionObservation.pct_5d,
+                TransitionObservation.price_at_detection,
+                TransitionObservation.atr_at_detection,
+            )
+            .where(
+                TransitionObservation.date_detected > window_start,
+                TransitionObservation.date_detected <= as_of,
+                TransitionObservation.transition_type.in_(BULLISH_TRANSITIONS),
+                TransitionObservation.outcome_status == 'PENDING',
+            )
+        )
+        prov_on_track = prov_failing = prov_unclear = 0
+        for row in prov_result:
+            verdict = classify_provisional(
+                row.pct_5d, row.price_at_detection, row.atr_at_detection
+            )
+            if verdict == 'on_track':
+                prov_on_track += 1
+            elif verdict == 'failing':
+                prov_failing += 1
+            else:
+                prov_unclear += 1
+
+        # Baseline: resolved outcomes detected before the window.
+        baseline_result = await self._db.execute(
+            select(TransitionObservation.outcome_status, func.count().label('cnt'))
+            .where(
+                TransitionObservation.date_detected > baseline_start,
+                TransitionObservation.date_detected <= window_start,
+                TransitionObservation.transition_type.in_(BULLISH_TRANSITIONS),
+                TransitionObservation.outcome_status.in_(('SUCCESS', 'FAILURE', 'NEUTRAL')),
+            )
+            .group_by(TransitionObservation.outcome_status)
+        )
+        baseline_counts = {row.outcome_status: row.cnt for row in baseline_result}
+
+        verdict = classify_follow_through(
+            success=success,
+            failure=failure,
+            neutral=neutral,
+            baseline_success=baseline_counts.get('SUCCESS', 0),
+            baseline_failure=baseline_counts.get('FAILURE', 0),
+            baseline_neutral=baseline_counts.get('NEUTRAL', 0),
+            prov_on_track=prov_on_track,
+            prov_failing=prov_failing,
+        )
+
+        per_family = {}
+        for family, types in FT_FAMILIES.items():
+            f_success = _sum({'SUCCESS'}, types)
+            f_resolved = f_success + _sum({'FAILURE', 'NEUTRAL'}, types)
+            per_family[family] = {
+                'signals':  f_resolved + _sum({'PENDING', 'INSUFFICIENT_DATA'}, types),
+                'success':  f_success,
+                'resolved': f_resolved,
+                'delivery': round(f_success / f_resolved, 4) if f_resolved else None,
+            }
+
+        return FollowThroughAnalysis(
+            descriptor=verdict['descriptor'],
+            basis=verdict['basis'],
+            window_days=FT_WINDOW_CAL_DAYS,
+            signals=signals,
+            resolved=resolved,
+            success=success,
+            failure=failure,
+            neutral=neutral,
+            pending=pending,
+            delivery_rate=round(verdict['delivery_rate'], 4) if verdict['delivery_rate'] is not None else None,
+            baseline_rate=round(verdict['baseline_rate'], 4) if verdict['baseline_rate'] is not None else None,
+            baseline_n=sum(baseline_counts.values()),
+            delta_pp=round(verdict['delta_pp'], 2) if verdict['delta_pp'] is not None else None,
+            provisional_on_track=prov_on_track,
+            provisional_failing=prov_failing,
+            provisional_unclear=prov_unclear,
+            per_family=per_family,
+        )

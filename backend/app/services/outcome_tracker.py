@@ -151,9 +151,13 @@ class OutcomeTracker:
         pct_5d = obs.pct_5d
 
         if t in PRE_RECLAIM:
+            # FAILURE: la estructura se rompió (perdió EMA50 o drawdown extremo).
             if obs.broke_ema50_within_10d or (dd_atr is not None and dd_atr < -3.0):
                 return 'FAILURE'
-            if obs.reached_ema21_within_10d and (dd_atr or 0) > -2.5:
+            # SUCCESS: el retroceso rebotó y entregó un recorrido real al alza
+            # (>=1.5 ATR) sin un drawdown que invalide la entrada. Mide
+            # rendimiento posterior, no solo que tocara la EMA.
+            if gain_atr is not None and gain_atr >= 1.5 and (dd_atr or 0) > -2.5:
                 return 'SUCCESS'
             return 'NEUTRAL'
 

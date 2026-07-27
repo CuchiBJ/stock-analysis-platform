@@ -36,6 +36,27 @@ def _classify(n_resolved: int) -> str:
     return "no_data"
 
 
+def _rates(
+    success: int, failure: int, neutral: int, status: str
+) -> tuple[Optional[float], Optional[float]]:
+    """Return (success_rate, delivery_rate), or (None, None) when not empirical.
+
+    - success_rate: win/loss ratio among DECISIVE outcomes — success / (S+F).
+      Excludes NEUTRAL.
+    - delivery_rate: share of ALL settled signals that delivered the move —
+      success / (S+F+N). A NEUTRAL settled without delivering, so it belongs in
+      the denominator; this is the honest "hit rate over every signal" and is
+      always <= success_rate. Diverges most when neutrals are many.
+    """
+    if status != "empirical":
+        return None, None
+    n_resolved = success + failure
+    n_settled = n_resolved + neutral
+    success_rate = success / n_resolved if n_resolved > 0 else None
+    delivery_rate = success / n_settled if n_settled > 0 else None
+    return success_rate, delivery_rate
+
+
 @router.get("/by-transition-type")
 async def calibration_by_transition_type(db: AsyncSession = Depends(get_db)):
     transition_values = [
@@ -74,11 +95,12 @@ async def calibration_by_transition_type(db: AsyncSession = Depends(get_db)):
 
         n_resolved = success + failure
         n_pending = pending
-        n_observed = n_resolved + n_pending + neutral
+        # Settled = every signal with a known outcome (SUCCESS/FAILURE/NEUTRAL),
+        # i.e. all non-pending. A NEUTRAL settled but did NOT deliver the move.
+        n_settled = n_resolved + neutral
+        n_observed = n_settled + n_pending
         status = _classify(n_resolved)
-        success_rate: Optional[float] = (
-            success / n_resolved if status == "empirical" else None
-        )
+        success_rate, delivery_rate = _rates(success, failure, neutral, status)
 
         rows.append(
             {
@@ -87,7 +109,9 @@ async def calibration_by_transition_type(db: AsyncSession = Depends(get_db)):
                 "n_pending": n_pending,
                 "success_count": success,
                 "failure_count": failure,
+                "neutral_count": neutral,
                 "success_rate": success_rate,
+                "delivery_rate": delivery_rate,
                 "status": status,
             }
         )
@@ -145,3 +169,48 @@ async def scan_now(
     scanner = BatchTransitionScanner(db)
     stats = await scanner.scan_universe(target_date)
     return asdict(stats)
+
+
+@router.post("/reclassify", tags=["admin"])
+async def reclassify_outcomes(db: AsyncSession = Depends(get_db)):
+    """Re-corre la clasificación de outcome sobre observaciones ya resueltas
+    usando los campos crudos persistidos (no re-descarga precios). Necesario
+    tras cambiar la regla de clasificación para que la calibración refleje la
+    nueva definición sin esperar a acumular observaciones nuevas.
+    """
+    from collections import Counter
+
+    from app.services.outcome_tracker import OutcomeTracker
+
+    resolved_or_neutral = ("SUCCESS", "FAILURE", "NEUTRAL")
+    q = select(TransitionObservation).where(
+        TransitionObservation.outcome_status.in_(resolved_or_neutral)
+    )
+    observations = (await db.execute(q)).scalars().all()
+
+    tracker = OutcomeTracker(db)
+    changed = 0
+    by_status: Counter = Counter()
+    for obs in observations:
+        new_status = tracker._classify_outcome(obs)
+        if new_status != obs.outcome_status:
+            obs.outcome_status = new_status
+            changed += 1
+        by_status[new_status] += 1
+
+    await db.commit()
+
+    try:
+        from app.services.empirical_probability_calculator import (
+            EmpiricalProbabilityCalculator,
+        )
+
+        EmpiricalProbabilityCalculator.clear_cache()
+    except Exception:
+        pass
+
+    return {
+        "evaluated": len(observations),
+        "changed": changed,
+        "by_status": dict(by_status),
+    }

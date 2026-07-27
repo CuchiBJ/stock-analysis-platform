@@ -5,8 +5,9 @@ import { API_URL } from '@/lib/utils'
 import DashboardLayout from '@/components/layout/DashboardLayout'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
-import { Upload, Download, AlertTriangle, Link2, Plus, X, Pencil, Trash2, RefreshCw } from 'lucide-react'
+import { Upload, Download, AlertTriangle, Link2, Plus, X, Pencil, Trash2 } from 'lucide-react'
 import { NewTradeModal, CloseTradeModal, EditTradeModal, type Trade, type Vocab } from './TradeForms'
+import WinRateEvolutionChart, { type WinRatePoint } from '@/components/charts/WinRateEvolutionChart'
 
 interface Aggregate {
   n: number
@@ -33,6 +34,9 @@ interface RiskEvolutionRow {
   n: number
   avg_planned_risk_dollars: number | null
   avg_risk_pct_of_account: number | null
+  win_rate: number | null
+  wins: number
+  losses: number
   total_r: number | null
   total_pnl: number
 }
@@ -63,6 +67,8 @@ interface StatsResponse {
   by_regime_at_entry: RegimeRow[]
   by_setup_regime_matrix: SetupRegimeMatrixRow[]
   decision_overall: DecisionOverall
+  win_rate_evolution: WinRatePoint[]
+  rolling_window: number
   open_positions: number
   linked_to_observations: number
   underpowered_buckets: number
@@ -99,8 +105,6 @@ export default function JournalPage() {
   const [closeTarget, setCloseTarget] = useState<Trade | null>(null)
   const [editTarget, setEditTarget] = useState<Trade | null>(null)
   const [backfilling, setBackfilling] = useState(false)
-  const [ibkrConfigured, setIbkrConfigured] = useState(false)
-  const [syncing, setSyncing] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
   async function reload() {
@@ -125,33 +129,6 @@ export default function JournalPage() {
   }
 
   useEffect(() => { reload() }, [])
-
-  useEffect(() => {
-    fetch(`${API_URL}/api/v1/journal/ibkr-status`)
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(d => setIbkrConfigured(!!d.configured))
-      .catch(() => setIbkrConfigured(false))
-  }, [])
-
-  async function syncIbkr() {
-    setSyncing(true); setImportResult(null)
-    try {
-      const res = await fetch(`${API_URL}/api/v1/journal/sync-ibkr`, { method: 'POST' })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
-      setImportResult(
-        `IBKR sincronizado: ${data.closed_inserted} cerradas + ${data.open_upserted} abiertas nuevas · ` +
-        `${data.skipped_existing} sin cambios` +
-        (data.fetched_executions != null ? ` · ${data.fetched_executions} ejecuciones leídas` : '') +
-        (data.hint ? `\n⚠ ${data.hint}` : '')
-      )
-      await reload()
-    } catch (err: any) {
-      setImportResult(`Error: ${err.message}`)
-    } finally {
-      setSyncing(false)
-    }
-  }
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -211,26 +188,6 @@ export default function JournalPage() {
             </p>
           </div>
           <div className="flex gap-2">
-            {ibkrConfigured ? (
-              <button
-                onClick={syncIbkr}
-                disabled={syncing}
-                className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded bg-green-500/20 border border-green-500/40 text-green-300 hover:bg-green-500/30 disabled:opacity-50"
-                title="Trae las operaciones ejecutadas en IBKR automáticamente (deduplica, no pisa tus anotaciones)."
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
-                {syncing ? 'Sincronizando…' : 'Sync IBKR'}
-              </button>
-            ) : (
-              <button
-                disabled
-                className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border border-border bg-card text-muted-foreground/60 cursor-not-allowed"
-                title="IBKR no conectado. Definí IBKR_FLEX_TOKEN e IBKR_FLEX_QUERY_ID en backend/.env y reiniciá el backend para habilitar el auto-import."
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                Sync IBKR (sin conectar)
-              </button>
-            )}
             <button
               onClick={() => setShowNew(true)}
               disabled={!vocab}
@@ -355,6 +312,19 @@ export default function JournalPage() {
                 {stats.decision_overall.n_fully_open > 0 && <span>Open: {stats.decision_overall.n_fully_open}</span>}
               </div>
             </Card>
+
+            <details className="group" open>
+              <summary className="cursor-pointer list-none px-4 py-2 bg-muted/30 border border-border rounded text-[10px] uppercase tracking-widest text-muted-foreground hover:bg-muted/50 select-none flex items-center justify-between">
+                <span>Evolución del win rate · cómo fuiste performando</span>
+                <span className="text-muted-foreground/60 group-open:rotate-90 transition-transform">▸</span>
+              </summary>
+              <Card className="p-3 mt-2">
+                <WinRateEvolutionChart
+                  data={stats.win_rate_evolution}
+                  rollingWindow={stats.rolling_window}
+                />
+              </Card>
+            </details>
 
             <div className="flex items-center gap-4 text-[11px] text-muted-foreground flex-wrap">
               <span title="Suma de R-multiples — invariante a cambios de tamaño de posición">
@@ -707,6 +677,7 @@ function RiskEvolutionTable({ rows }: { rows: RiskEvolutionRow[] }) {
           <th className="px-3 py-2 font-medium text-right">N</th>
           <th className="px-3 py-2 font-medium text-right">Avg Risk $</th>
           <th className="px-3 py-2 font-medium text-right">Avg Risk %</th>
+          <th className="px-3 py-2 font-medium text-right" title="Win rate del mes — excluye scratches (break-even) del denominador.">WR</th>
           <th className="px-3 py-2 font-medium text-right">Total R</th>
           <th className="px-3 py-2 font-medium text-right">Total P&L</th>
         </tr>
@@ -718,6 +689,7 @@ function RiskEvolutionTable({ rows }: { rows: RiskEvolutionRow[] }) {
             <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{r.n}</td>
             <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{r.avg_planned_risk_dollars != null ? `$${r.avg_planned_risk_dollars.toFixed(2)}` : '—'}</td>
             <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{r.avg_risk_pct_of_account != null ? `${(r.avg_risk_pct_of_account * 100).toFixed(2)}%` : '—'}</td>
+            <td className="px-3 py-2 text-right tabular-nums text-muted-foreground" title={r.win_rate != null ? `${r.wins}W / ${r.losses}L` : 'sin trades resueltos'}>{r.win_rate != null ? `${(r.win_rate * 100).toFixed(0)}%` : '—'}</td>
             <td className={`px-3 py-2 text-right tabular-nums ${colorPnl(r.total_r)}`}>{r.total_r != null ? `${r.total_r >= 0 ? '+' : ''}${r.total_r.toFixed(2)} R` : '—'}</td>
             <td className={`px-3 py-2 text-right tabular-nums ${colorPnl(r.total_pnl)}`}>{fmtMoney(r.total_pnl)}</td>
           </tr>

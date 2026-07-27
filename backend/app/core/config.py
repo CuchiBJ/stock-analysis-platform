@@ -10,13 +10,8 @@ class Settings(BaseSettings):
     cors_origins: str = Field("http://localhost:3000", env="CORS_ORIGINS")
     redis_url: str = Field("redis://localhost:6379/0", env="REDIS_URL")
 
-    # IBKR Flex Web Service — optional. When both are set, the journal can
-    # auto-sync executed trades (POST /journal/sync-ibkr and the nightly
-    # scheduler job). Generate in IBKR Account Management → Reports → Flex
-    # Queries → Flex Web Service (token) + an Activity Flex Query with the
-    # Trades/Executions section (query id).
-    ibkr_flex_token: Optional[str] = Field(None, env="IBKR_FLEX_TOKEN")
-    ibkr_flex_query_id: Optional[str] = Field(None, env="IBKR_FLEX_QUERY_ID")
+    # Anthropic API key for the in-app chat (read-only DB Q&A via tool use).
+    anthropic_api_key: Optional[str] = Field(None, env="ANTHROPIC_API_KEY")
 
     class Config:
         env_file = ".env"

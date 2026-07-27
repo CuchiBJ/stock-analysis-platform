@@ -16,6 +16,7 @@ const navItems = [
   { href: '/queue',       label: 'Queue'       },
   { href: '/calibration', label: 'Calibration' },
   { href: '/journal',     label: 'Journal'     },
+  { href: '/chat',        label: 'Chat'        },
   { href: '/guide',       label: 'Guide'       },
 ]
 

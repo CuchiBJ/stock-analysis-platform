@@ -60,7 +60,6 @@ interface CompactSetupCardProps {
   transitionStrength: number
   narrative: string
   confidence: number
-  continuationProb?: number
   freshness: string
   daysInState: number
   keyMetrics: {
@@ -75,8 +74,6 @@ interface CompactSetupCardProps {
   isPreReclaim?: boolean
   sparklineData?: number[]
   priceLabel?: string | null
-  probabilitySource?: 'empirical' | 'rule_based'
-  sampleSize?: number
   contextWarnings?: string[]
   groupStrength?: GroupStrength | null
   scoreBreakdown?: ScoreBreakdown | null
@@ -94,37 +91,31 @@ export default function CompactSetupCard({
   symbol,
   state,
   narrative,
-  continuationProb,
+  confidence,
   freshness,
   keyMetrics,
   isPriority = false,
   isPreReclaim = false,
   priceLabel,
-  probabilitySource,
-  sampleSize,
   contextWarnings,
   groupStrength,
   scoreBreakdown,
 }: CompactSetupCardProps) {
-  const contPct = continuationProb !== undefined ? Math.round(continuationProb * 100) : null
-
-  const probabilityTooltip =
-    probabilitySource === 'empirical'
-      ? `Probabilidad empírica · N=${sampleSize}`
-      : probabilitySource === 'rule_based'
-      ? 'Probabilidad rule-based · sin sample histórico suficiente'
-      : undefined
+  // Priority score (0–1) rendered as a 0–100 quality score — más accionable
+  // que la probabilidad de continuación, que era casi idéntica entre acciones
+  // con el mismo setup.
+  const scorePts = confidence != null ? Math.round(confidence * 100) : null
 
   const accentBorder =
-    contPct !== null && contPct >= 70 ? 'border-l-green-500' :
-    contPct !== null && contPct >= 50 ? 'border-l-yellow-500' :
-                                        'border-l-white/10'
+    scorePts !== null && scorePts >= 70 ? 'border-l-green-500' :
+    scorePts !== null && scorePts >= 50 ? 'border-l-yellow-500' :
+                                          'border-l-white/10'
 
-  const contColor =
-    contPct === null ? 'text-white/30' :
-    contPct >= 70    ? 'text-green-400' :
-    contPct >= 50    ? 'text-yellow-400' :
-                       'text-orange-400'
+  const scoreColor =
+    scorePts === null ? 'text-white/30' :
+    scorePts >= 70    ? 'text-green-400' :
+    scorePts >= 50    ? 'text-yellow-400' :
+                        'text-orange-400'
 
   const freshInfo = FRESHNESS[freshness] ?? FRESHNESS.fresh
 
@@ -152,7 +143,7 @@ export default function CompactSetupCard({
             {freshInfo.label}
           </span>
         </div>
-        {contPct !== null && (
+        {scorePts !== null && (
           <div className="flex items-center gap-1">
             {contextWarnings?.includes('leadership_exhausted') && (
               <span className="text-[9px] px-1 py-0.5 rounded border border-amber-400/30 bg-amber-400/10 text-amber-400 leading-none">
@@ -160,10 +151,11 @@ export default function CompactSetupCard({
               </span>
             )}
             <span
-              className={`text-base font-bold tabular-nums ${contColor}`}
-              title={probabilityTooltip}
+              className={`text-base font-bold tabular-nums ${scoreColor}`}
+              title="Score de prioridad del setup (0–100)"
             >
-              {contPct}%
+              {scorePts}
+              <span className="text-[10px] font-normal text-white/30 ml-0.5">/100</span>
             </span>
           </div>
         )}

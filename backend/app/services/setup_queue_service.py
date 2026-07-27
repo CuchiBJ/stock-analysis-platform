@@ -276,19 +276,30 @@ class SetupQueueService:
         """How well a leader is holding up in the pullback — down-day context.
 
         Ordered strongest → weakest:
-          at_highs      — within 2 ATR of the 52w high, barely pulled back
+          at_highs      — within 2 ATR of the 52w high AND still holding EMA21
           above_ema21   — still above fast support (EMA21)
-          testing_ema50 — already lost EMA21, now holding/testing EMA50
+          testing_ema21 — just lost EMA21, still sitting near it (well above EMA50)
+          testing_ema50 — pulled back further, now down near/at EMA50
           deep_pullback — below EMA50, extended retrace
         """
         d_high = m.distance_to_high_52w_atr
         d21 = m.distance_to_ema21_atr
         d50 = m.distance_to_ema50_atr
-        if d_high is not None and d_high >= -2.0:
+        # 'at_highs' is the strongest tier, so it must be near the high *and*
+        # still above fast support — a name that already lost EMA21 has pulled
+        # back and belongs in a weaker tier (testing_ema*/deep_pullback),
+        # even if it's still within 2 ATR of the 52w high.
+        if d_high is not None and d_high >= -2.0 and (d21 is None or d21 > 0):
             return 'at_highs'
         if d21 is not None and d21 > 0:
             return 'above_ema21'
         if d50 is not None and d50 > 0:
+            # Below EMA21 but holding above EMA50: which level is it actually
+            # testing? Split by proximity — a name sitting right under EMA21
+            # (e.g. -0.1 ATR) is testing EMA21, not EMA50, even though it's
+            # still above the slower average.
+            if d21 is not None and abs(d21) < d50:
+                return 'testing_ema21'
             return 'testing_ema50'
         return 'deep_pullback'
 
