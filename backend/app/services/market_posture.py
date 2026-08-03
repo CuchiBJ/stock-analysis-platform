@@ -87,6 +87,10 @@ def compute_posture(
     window_days: int = 0,
     repair_streak: int = 0,
     repair_streak_min: int = 5,
+    repair_clean_days: Optional[int] = None,
+    repair_window_days: int = 7,
+    recent_severe_days: int = 0,
+    severe_lookback_days: int = 3,
     follow_through: str = "UNKNOWN",
     ft_delivery: Optional[float] = None,
     ft_baseline: Optional[float] = None,
@@ -128,8 +132,9 @@ def compute_posture(
     # Follow-through ceiling: the market not paying recent signals caps
     # aggression at SELECTIVO regardless of how the anatomy looks. UNKNOWN is
     # never suppressive (same rule as everywhere else).
-    if ft == "NOT_PAYING" and _RANK[state] > _RANK["SELECTIVO"]:
-        state = "SELECTIVO"
+    if ft == "NOT_PAYING":
+        if _RANK[state] > _RANK["SELECTIVO"]:
+            state = "SELECTIVO"
         detail = ""
         if ft_delivery is not None:
             detail = f" ({ft_delivery * 100:.0f}% pagando"
@@ -138,9 +143,12 @@ def compute_posture(
 
     unlock = None
     if h in ("DAMAGED", "FRAGILE"):
+        clean_days = repair_streak if repair_clean_days is None else repair_clean_days
         unlock = (
-            f"RECOVERING requiere {repair_streak_min} ruedas limpias consecutivas "
-            f"(racha actual: {repair_streak})"
+            f"RECOVERING requiere {repair_streak_min} de las últimas "
+            f"{repair_window_days} ruedas limpias y 0 deterioros severos en las últimas "
+            f"{severe_lookback_days} (actual: {clean_days}/{repair_window_days} limpias, "
+            f"{recent_severe_days}/{severe_lookback_days} severas)"
         )
     elif h == "RECOVERING":
         unlock = "ROBUST cuando el daño envejezca fuera de la ventana de 20 ruedas"

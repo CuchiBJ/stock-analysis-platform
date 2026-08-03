@@ -20,6 +20,8 @@ interface ActionableSetup {
   continuation_prob: number
   probability_source?: 'empirical' | 'rule_based'
   sample_size?: number
+  probability_basis?: string
+  transition?: string
   narrative: string
   setup_type: 'ema9_pullback' | 'ema21_pullback'
   pullback_quality: number

@@ -1,14 +1,23 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { API_URL } from '@/lib/utils'
 import DashboardLayout from '@/components/layout/DashboardLayout'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
-import { Eye, CircleDashed, CheckCircle2, AlertTriangle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, CircleDashed, Eye, TrendingDown, TrendingUp } from 'lucide-react'
 
-interface CalibrationRow {
-  transition_type: string
+type CohortStatus = 'empirical' | 'insufficient' | 'no_data'
+type Drift = 'deteriorating' | 'stable' | 'improving' | 'insufficient'
+
+interface ConfidenceInterval {
+  low: number
+  high: number
+}
+
+interface CalibrationCohort {
+  n_observed: number
+  n_settled: number
   n_resolved: number
   n_pending: number
   success_count: number
@@ -16,49 +25,115 @@ interface CalibrationRow {
   neutral_count: number
   success_rate: number | null
   delivery_rate: number | null
-  status: 'empirical' | 'insufficient' | 'no_data'
+  confidence_interval: ConfidenceInterval | null
+  status: CohortStatus
+  samples_needed: number
+}
+
+interface CalibrationRow {
+  transition_type: string
+  bullish: boolean
+  historical: CalibrationCohort
+  recent: CalibrationCohort
+  baseline: CalibrationCohort
+  current_regime: CalibrationCohort
+  drift: Drift
+  recent_delta_pp: number | null
+  regime_delta_pp: number | null
+}
+
+interface FollowThroughContext {
+  descriptor: 'PAYING' | 'MIXED' | 'NOT_PAYING' | 'UNKNOWN'
+  basis: string
+  window_days: number
+  delivery_rate: number | null
+  baseline_rate: number | null
+  resolved: number
+  pending: number
 }
 
 interface CalibrationResponse {
   min_samples_required: number
+  recent_window_days: number
+  as_of: string
+  current_context: {
+    regime: string
+    regime_confidence: number
+    follow_through: FollowThroughContext | null
+    posture: { state: string; instruction: string } | null
+  }
   total_observations: number
   total_resolved: number
+  total_settled: number
   total_pending: number
   eta_first_data: string | null
   rows: CalibrationRow[]
 }
 
-function StatusBadge({ status }: { status: CalibrationRow['status'] }) {
-  if (status === 'empirical') {
+const driftOrder: Record<Drift, number> = {
+  deteriorating: 0,
+  stable: 1,
+  improving: 2,
+  insufficient: 3,
+}
+
+function formatPct(value: number | null): string {
+  return value == null ? '—' : `${(value * 100).toFixed(1)}%`
+}
+
+function formatRegime(value: string): string {
+  return value.replaceAll('_', ' ').toUpperCase()
+}
+
+function CohortValue({ cohort, minSamples }: { cohort: CalibrationCohort; minSamples: number }) {
+  if (cohort.status === 'no_data') {
+    return <span className="text-white/30">sin data</span>
+  }
+  if (cohort.status === 'insufficient') {
     return (
-      <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-green-500/30 bg-green-500/10 text-green-400 uppercase tracking-wide">
-        <CheckCircle2 className="w-3 h-3" /> empirical
+      <span className="text-amber-400/80" title={`Se requieren ${minSamples} outcomes settled`}>
+        {cohort.n_settled} / {minSamples}
       </span>
     )
   }
-  if (status === 'insufficient') {
-    return (
-      <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-400 uppercase tracking-wide">
-        <AlertTriangle className="w-3 h-3" /> insufficient
-      </span>
-    )
-  }
+  const interval = cohort.confidence_interval
   return (
-    <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-white/15 bg-white/5 text-white/40 uppercase tracking-wide">
-      <CircleDashed className="w-3 h-3" /> no data
+    <span
+      className="text-foreground"
+      title={interval ? `95% CI ${(interval.low * 100).toFixed(1)}–${(interval.high * 100).toFixed(1)}% · ${cohort.n_settled} settled` : undefined}
+    >
+      {formatPct(cohort.delivery_rate)}
     </span>
   )
 }
 
-function rowNote(row: CalibrationRow, minSamples: number): string {
-  if (row.status === 'empirical') {
-    return `${row.success_count} success · ${row.failure_count} failure · ${row.neutral_count} neutral`
+function DriftBadge({ drift, delta }: { drift: Drift; delta: number | null }) {
+  if (drift === 'deteriorating') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">
+        <TrendingDown className="h-3 w-3" /> deteriorating {delta != null ? `${delta.toFixed(1)}pp` : ''}
+      </span>
+    )
   }
-  if (row.status === 'insufficient') {
-    const need = minSamples - row.n_resolved
-    return `Need ${need} more · ${row.success_count}/${row.failure_count}/${row.neutral_count} so far`
+  if (drift === 'improving') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded border border-green-500/30 bg-green-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-green-400">
+        <TrendingUp className="h-3 w-3" /> improving {delta != null ? `+${delta.toFixed(1)}pp` : ''}
+      </span>
+    )
   }
-  return row.n_pending > 0 ? `${row.n_pending} pending` : 'no observations yet'
+  if (drift === 'stable') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded border border-white/15 bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-wide text-white/60">
+        <CheckCircle2 className="h-3 w-3" /> stable
+      </span>
+    )
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded border border-amber-500/20 bg-amber-500/5 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-400/70">
+      <CircleDashed className="h-3 w-3" /> insufficient
+    </span>
+  )
 }
 
 export default function CalibrationPage() {
@@ -68,26 +143,33 @@ export default function CalibrationPage() {
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
     fetch(`${API_URL}/api/v1/calibration/by-transition-type`)
-      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
-      .then(d => { if (!cancelled) { setData(d); setError(null) } })
-      .catch(e => { if (!cancelled) setError(e.message) })
+      .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then(payload => { if (!cancelled) { setData(payload); setError(null) } })
+      .catch(reason => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [])
 
-  const empiricalCount = data?.rows.filter(r => r.status === 'empirical').length ?? 0
+  const rows = useMemo(() => {
+    if (!data) return []
+    return [...data.rows].sort((a, b) =>
+      Number(b.bullish) - Number(a.bullish)
+      || driftOrder[a.drift] - driftOrder[b.drift]
+      || b.recent.n_settled - a.recent.n_settled
+    )
+  }, [data])
+
+  const ft = data?.current_context.follow_through
+  const ftIsHostile = ft?.descriptor === 'NOT_PAYING'
 
   return (
     <DashboardLayout>
-      <div className="max-w-4xl mx-auto space-y-4">
+      <div className="mx-auto max-w-6xl space-y-4">
         <div>
           <h1 className="text-xl font-bold text-foreground">Calibration</h1>
-          <p className="text-xs text-muted-foreground mt-1">
-            Rendimiento empírico por transition type, resuelto 10 días post-detección.
-            {' '}<span className="text-foreground/70">Win rate</span> = aciertos sobre desenlaces decisivos (success ÷ success+failure, excluye neutrals).
-            {' '}<span className="text-foreground/70">Delivered</span> = aciertos sobre <em>todas</em> las señales que cerraron (incluye neutrals en el denominador) — un neutral cerró sin entregar el recorrido ≥1.5 ATR.
+          <p className="mt-1 text-xs text-muted-foreground">
+            Evidencia observada, no garantía. Historical muestra el prior; Recent y Same regime indican cuánto se parece esa evidencia al mercado de hoy.
           </p>
         </div>
 
@@ -96,89 +178,110 @@ export default function CalibrationPage() {
 
         {data && (
           <>
-            {data.total_resolved === 0 ? (
-              <Card className="p-5 border-amber-400/30 bg-amber-400/5">
-                <div className="flex items-start gap-3">
-                  <Eye className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
-                  <div>
-                    <p className="text-sm font-semibold text-amber-300">
-                      Sistema observando — ningún outcome resuelto aún
+            <Card className={`p-5 ${ftIsHostile ? 'border-red-500/30 bg-red-500/5' : 'border-white/10'}`}>
+              <div className="flex items-start gap-3">
+                {ftIsHostile
+                  ? <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-400" />
+                  : <Eye className="mt-0.5 h-5 w-5 shrink-0 text-cyan-400" />}
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                    <p className="text-sm font-semibold text-foreground">
+                      Contexto actual · {formatRegime(data.current_context.regime)}
                     </p>
-                    <p className="text-xs text-white/60 mt-1">
-                      {data.total_observations} observation{data.total_observations === 1 ? '' : 's'} registrada{data.total_observations === 1 ? '' : 's'}
-                      {data.total_pending > 0 && ` · ${data.total_pending} pending`}
-                      {data.eta_first_data && ` · primera data esperada ${data.eta_first_data}`}
-                    </p>
-                    <p className="text-[11px] text-white/40 mt-2">
-                      Threshold: {data.min_samples_required}+ observations resueltas (SUCCESS o FAILURE) por transition_type para mostrar success rate empírica.
-                    </p>
+                    {ft && (
+                      <span className={`text-xs font-bold ${ftIsHostile ? 'text-red-400' : ft.descriptor === 'PAYING' ? 'text-green-400' : 'text-amber-400'}`}>
+                        FOLLOW-THROUGH {ft.descriptor}
+                      </span>
+                    )}
+                    {data.current_context.posture && (
+                      <span className="text-xs font-semibold text-white/70">POSTURA {data.current_context.posture.state}</span>
+                    )}
                   </div>
+                  {ft && (
+                    <p className="mt-2 text-xs text-white/60">
+                      Ventana {ft.window_days}d: {formatPct(ft.delivery_rate)} delivered sobre {ft.resolved} señales settled
+                      {ft.baseline_rate != null && ` · baseline ${formatPct(ft.baseline_rate)}`}
+                      {` · ${ft.pending} pending`}.
+                    </p>
+                  )}
+                  <p className="mt-2 text-[11px] text-white/40">
+                    Una tasa histórica alta no habilita un trade si Recent, Same regime o el follow-through actual no acompañan. As of {data.as_of}.
+                  </p>
                 </div>
-              </Card>
-            ) : (
-              <Card className="p-4">
-                <div className="grid grid-cols-3 gap-4 text-center">
-                  <div>
-                    <div className="text-2xl font-bold text-foreground tabular-nums">{data.total_observations}</div>
-                    <div className="text-[10px] text-muted-foreground uppercase tracking-widest">total obs</div>
-                  </div>
-                  <div>
-                    <div className="text-2xl font-bold text-foreground tabular-nums">{data.total_resolved}</div>
-                    <div className="text-[10px] text-muted-foreground uppercase tracking-widest">resolved</div>
-                  </div>
-                  <div>
-                    <div className="text-2xl font-bold text-green-400 tabular-nums">{empiricalCount}</div>
-                    <div className="text-[10px] text-muted-foreground uppercase tracking-widest">empirical types</div>
-                  </div>
-                </div>
-              </Card>
-            )}
-
-            <Card className="p-0 overflow-hidden">
-              <table className="w-full text-sm">
-                <thead className="bg-muted/30 border-b border-border">
-                  <tr className="text-left text-[10px] uppercase tracking-widest text-muted-foreground">
-                    <th className="px-4 py-2 font-medium">Transition</th>
-                    <th className="px-4 py-2 font-medium text-right">N</th>
-                    <th className="px-4 py-2 font-medium text-right" title="Aciertos sobre desenlaces decisivos (success ÷ success+failure). Excluye neutrals.">Win rate</th>
-                    <th className="px-4 py-2 font-medium text-right" title="Aciertos sobre todas las señales que cerraron (success ÷ success+failure+neutral).">Delivered</th>
-                    <th className="px-4 py-2 font-medium">Status</th>
-                    <th className="px-4 py-2 font-medium">Detail</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.rows.map(row => (
-                    <tr key={row.transition_type} className="border-b border-border/50 last:border-0 hover:bg-muted/20">
-                      <td className="px-4 py-2.5 font-mono text-xs text-foreground">
-                        {row.transition_type}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums text-muted-foreground">
-                        {row.n_resolved}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums">
-                        {row.success_rate !== null
-                          ? <span className="text-foreground">{(row.success_rate * 100).toFixed(1)}%</span>
-                          : <span className="text-muted-foreground">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums">
-                        {row.delivery_rate !== null
-                          ? <span className="text-foreground/70">{(row.delivery_rate * 100).toFixed(1)}%</span>
-                          : <span className="text-muted-foreground">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <StatusBadge status={row.status} />
-                      </td>
-                      <td className="px-4 py-2.5 text-xs text-muted-foreground">
-                        {rowNote(row, data.min_samples_required)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              </div>
             </Card>
 
-            <p className="text-[11px] text-muted-foreground text-center">
-              Phase 1 in-sample calibration. Out-of-sample (predicted vs actual) requiere persistir <span className="font-mono">predicted_probability_at_detection</span> — defer.
+            <Card className="p-4">
+              <div className="grid grid-cols-2 gap-4 text-center md:grid-cols-4">
+                <div>
+                  <div className="text-2xl font-bold tabular-nums text-foreground">{data.total_observations}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground">observations</div>
+                </div>
+                <div>
+                  <div className="text-2xl font-bold tabular-nums text-foreground">{data.total_settled}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground">settled</div>
+                </div>
+                <div>
+                  <div className="text-2xl font-bold tabular-nums text-amber-400">{data.total_pending}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground">pending</div>
+                </div>
+                <div>
+                  <div className="text-2xl font-bold tabular-nums text-cyan-400">{data.min_samples_required}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground">min settled / cohort</div>
+                </div>
+              </div>
+            </Card>
+
+            <Card className="overflow-hidden p-0">
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1050px] text-sm">
+                  <thead className="border-b border-border bg-muted/30">
+                    <tr className="text-left text-[10px] uppercase tracking-widest text-muted-foreground">
+                      <th className="px-4 py-2 font-medium">Transition</th>
+                      <th className="px-4 py-2 text-right font-medium">All history</th>
+                      <th className="px-4 py-2 text-right font-medium">Baseline 180d</th>
+                      <th className="px-4 py-2 text-right font-medium">Recent {data.recent_window_days}d</th>
+                      <th className="px-4 py-2 text-right font-medium">Same {formatRegime(data.current_context.regime)}</th>
+                      <th className="px-4 py-2 font-medium">Drift</th>
+                      <th className="px-4 py-2 font-medium">Evidence</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(row => (
+                      <tr key={row.transition_type} className="border-b border-border/50 last:border-0 hover:bg-muted/20">
+                        <td className="px-4 py-2.5">
+                          <div className="font-mono text-xs text-foreground">{row.transition_type}</div>
+                          <div className="mt-0.5 text-[9px] uppercase tracking-wide text-white/30">
+                            {row.bullish ? 'bullish setup' : 'defensive signal'}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums">
+                          <CohortValue cohort={row.historical} minSamples={data.min_samples_required} />
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums">
+                          <CohortValue cohort={row.baseline} minSamples={data.min_samples_required} />
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums">
+                          <CohortValue cohort={row.recent} minSamples={data.min_samples_required} />
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums">
+                          <CohortValue cohort={row.current_regime} minSamples={data.min_samples_required} />
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <DriftBadge drift={row.drift} delta={row.recent_delta_pp} />
+                        </td>
+                        <td className="px-4 py-2.5 text-xs text-muted-foreground">
+                          recent n={row.recent.n_settled} · regime n={row.current_regime.n_settled}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+
+            <p className="text-center text-[11px] text-muted-foreground">
+              Delivered = SUCCESS ÷ (SUCCESS + FAILURE + NEUTRAL). Drift compara Recent 21d contra los 180d anteriores y sólo cambia cuando los intervalos Wilson 95% dejan de superponerse.
             </p>
           </>
         )}

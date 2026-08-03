@@ -66,15 +66,15 @@ function followThroughExplanation(descriptor: string): string {
 }
 
 // One-line read per health state — the WHY behind the badge.
-function healthExplanation(state: string, repairMin = 5): string {
+function healthExplanation(state: string, repairMin = 5, repairWindow = 7, severeWindow = 3): string {
   if (state === 'ROBUST')
     return 'Sin deterioro relevante en la ventana: el avance reciente está respaldado por semanas limpias.'
   if (state === 'RECOVERING')
-    return `Hubo daño en la ventana, pero el mercado encadenó ≥${repairMin} ruedas limpias consecutivas — reparación en curso, aún no ROBUST hasta que el daño envejezca fuera de la ventana.`
+    return `Hubo daño en la ventana, pero el mercado acumuló ≥${repairMin} ruedas limpias de las últimas ${repairWindow} sin recaída severa en las últimas ${severeWindow} — reparación en curso, aún no ROBUST hasta que el daño envejezca.`
   if (state === 'FRAGILE')
-    return `Hubo episodios de deterioro recientes; el estado de hoy puede ser sano pero el mercado aún no demostró reparación sostenida (se requieren ${repairMin} ruedas limpias consecutivas).`
+    return `Hubo deterioro reciente; el mercado aún no reunió ${repairMin} ruedas limpias de ${repairWindow}, o conserva una recaída severa dentro de las últimas ${severeWindow}. Los pullbacks leves no reinician todo el progreso.`
   if (state === 'DAMAGED')
-    return 'Deterioro pesado o en curso: gran parte de la ventana dañada, o un cluster activo en los últimos días. Un rebote aislado no cambia este estado.'
+    return `Deterioro pesado o en curso. Para pasar a RECOVERING se requieren ${repairMin} ruedas limpias de ${repairWindow} y ninguna recaída severa en las últimas ${severeWindow}; un pullback leve consume margen pero no reinicia todo el progreso.`
   return 'Historia insuficiente para clasificar la salud (se requieren ≥10 ruedas clasificables).'
 }
 
@@ -110,6 +110,11 @@ export default function MarketContextDrawer({ ctx, onClose }: Props) {
   const [showRaw, setShowRaw] = useState(false)
   const p = ctx.participation
   const l = ctx.leadership
+  const repairWindow = ctx.health?.repair_window_days ?? 7
+  const repairRequired = ctx.health?.repair_required_clean_days ?? 5
+  const repairClean = ctx.health?.repair_clean_days ?? ctx.health?.repair_streak ?? 0
+  const severeWindow = ctx.health?.severe_lookback_days ?? 3
+  const recentSevere = ctx.health?.recent_severe_days ?? 0
 
   return (
     <div className="fixed inset-0 z-50 flex" onClick={onClose}>
@@ -214,12 +219,16 @@ export default function MarketContextDrawer({ ctx, onClose }: Props) {
               <div className="mb-3">
                 <DamageStrip series={ctx.health.series} cellWidth={16} height={14} />
                 <p className="text-[10px] text-white/30 mt-1">
-                  Últimas {ctx.health.series.length} ruedas — rojo = día con participación NARROWING/COLLAPSING o liderazgo THINNING/COLLAPSING/EXHAUSTED
+                  Últimas {ctx.health.series.length} ruedas — ámbar = pullback leve (NARROWING/THINNING) · rojo = recaída severa (COLLAPSING/EXHAUSTED)
                 </p>
               </div>
 
               <MetricRow label="Días dañados"             value={`${ctx.health.damaged_days} / ${ctx.health.window_days}`} />
               <MetricRow label="Episodios de deterioro"   value={ctx.health.episodes} />
+              <MetricRow
+                label="Reparación"
+                value={`${repairClean}/${repairWindow} limpias · ${recentSevere}/${severeWindow} severas`}
+              />
               <MetricRow label="Racha limpia actual"      value={`${ctx.health.repair_streak} rueda${ctx.health.repair_streak === 1 ? '' : 's'}`} />
               <MetricRow
                 label="Ruedas desde el último daño"
@@ -227,7 +236,7 @@ export default function MarketContextDrawer({ ctx, onClose }: Props) {
               />
 
               <p className="text-[11px] text-white/50 mt-3 leading-relaxed">
-                {healthExplanation(ctx.health.state)}
+                {healthExplanation(ctx.health.state, repairRequired, repairWindow, severeWindow)}
               </p>
             </section>
           )}

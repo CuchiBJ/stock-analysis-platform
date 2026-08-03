@@ -53,12 +53,17 @@ Invocado en los 5 puntos de [scheduler.py:362-419](../../../backend/app/data/sch
 
 **Por qué helper vs decorador:** las funciones a instrumentar ya están envueltas en `@track_task_errors`, y necesitan capturar `symbols_processed` que es retornado/calculado dentro del cuerpo. Un decorador no tendría acceso fácil. Helper explícito mantiene el código del scheduler legible.
 
-### D3. Coverage = `count(StockMetrics.date == today) / count(quality_universe)` con QUALITY_FILTERS
+### D3. Coverage = símbolos frescos de una cohorte quality fija / tamaño de la cohorte
 
 Calculado on-demand en `build_health_snapshot()`, no persistido. Una query agregada barata (~ms).
 
-**`expected`** = count de símbolos con `StockPrice.date == today` aplicando QUALITY_FILTERS (price ≥ 5, vol ≥ 500k, adr ≥ 2). 
-**`actual`** = mismo conjunto pero con `StockMetrics.date == today AND updated_at >= today_open_et`.
+**Cohorte** = símbolos que pasan `QUALITY_FILTERS` en la última sesión completa anterior a la sesión de trabajo.
+**`expected`** = tamaño de esa cohorte fija.
+**`actual`** = símbolos de esa misma cohorte con `StockMetrics.date == today AND updated_at >= today_open_et`.
+
+Los filtros no se vuelven a aplicar sobre las métricas de hoy para calcular el
+numerador. Si una acción actualizada deja de cumplir ADR, volumen o precio durante
+la sesión, eso es un cambio legítimo de membresía y no una falla del pipeline.
 
 **Por qué no usar `symbols_processed` del heartbeat:** el heartbeat refleja el último ciclo SLOW; si el SLOW corre cada 30 min, la coverage real en la DB puede ser mayor que el último run individual. Query directa da número real.
 

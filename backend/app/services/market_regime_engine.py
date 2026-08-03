@@ -1,6 +1,7 @@
 """Market Regime Engine - Detect market environment for setup context"""
 
 import asyncio
+from datetime import date
 from enum import Enum
 from dataclasses import dataclass
 from typing import Optional, Dict
@@ -31,6 +32,7 @@ class MarketRegimeAnalysis:
     sector_expansion: float
     pullback_environment_quality: float
     confidence: float
+    as_of: Optional[date] = None
     
     def get_summary(self) -> str:
         """Get narrative summary of market regime"""
@@ -62,18 +64,29 @@ class MarketRegimeEngine:
     def __init__(self, db: AsyncSession):
         self.db = db
     
-    async def detect_regime(self) -> MarketRegimeAnalysis:
+    async def _resolve_as_of(self, target: Optional[date] = None) -> Optional[date]:
+        q = select(func.max(StockMetrics.date))
+        if target is not None:
+            q = q.where(StockMetrics.date <= target)
+        return (await self.db.execute(q)).scalar()
+
+    async def detect_regime(self, target: Optional[date] = None) -> MarketRegimeAnalysis:
         """
         Detect current market regime.
         
         Returns comprehensive analysis including regime state and
         contributing factors.
         """
-        breadth_quality = await self._calculate_breadth_quality()
-        leadership_health = await self._calculate_leadership_health()
-        speculative_appetite = await self._calculate_speculative_appetite()
-        sector_expansion = await self._calculate_sector_expansion()
-        pullback_env_quality = await self._calculate_pullback_environment_quality()
+        as_of = await self._resolve_as_of(target)
+        if as_of is None:
+            breadth_quality = leadership_health = speculative_appetite = 0.5
+            sector_expansion = pullback_env_quality = 0.5
+        else:
+            breadth_quality = await self._calculate_breadth_quality(as_of)
+            leadership_health = await self._calculate_leadership_health(as_of)
+            speculative_appetite = await self._calculate_speculative_appetite(as_of)
+            sector_expansion = await self._calculate_sector_expansion(as_of)
+            pullback_env_quality = await self._calculate_pullback_environment_quality(as_of)
         
         # Determine regime based on factors
         regime = self._determine_regime(
@@ -96,10 +109,11 @@ class MarketRegimeEngine:
             speculative_appetite=speculative_appetite,
             sector_expansion=sector_expansion,
             pullback_environment_quality=pullback_env_quality,
-            confidence=confidence
+            confidence=confidence,
+            as_of=as_of,
         )
     
-    async def _calculate_breadth_quality(self) -> float:
+    async def _calculate_breadth_quality(self, as_of: Optional[date] = None) -> float:
         """
         Calculate breadth quality (0-1).
         
@@ -110,18 +124,21 @@ class MarketRegimeEngine:
         """
         try:
             qf = self._QUALITY_FILTERS
+            as_of = as_of or await self._resolve_as_of()
+            if as_of is None:
+                return 0.5
 
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(*qf, StockMetrics.distance_to_ema50 >= 0)
+                .where(*qf, StockMetrics.date == as_of, StockMetrics.distance_to_ema50 >= 0)
             )
             above_ema50 = result.scalar() or 0
 
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(*qf)
+                .where(*qf, StockMetrics.date == as_of)
             )
             total = result.scalar() or 1
 
@@ -130,7 +147,7 @@ class MarketRegimeEngine:
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(*qf, StockMetrics.distance_to_high_52w >= -10)
+                .where(*qf, StockMetrics.date == as_of, StockMetrics.distance_to_high_52w >= -10)
             )
             near_highs = result.scalar() or 0
 
@@ -143,7 +160,7 @@ class MarketRegimeEngine:
             logger.error(f"Error calculating breadth quality: {e}")
             return 0.5  # Default to neutral
     
-    async def _calculate_leadership_health(self) -> float:
+    async def _calculate_leadership_health(self, as_of: Optional[date] = None) -> float:
         """
         Calculate leadership health (0-1).
         
@@ -154,11 +171,14 @@ class MarketRegimeEngine:
         """
         try:
             qf = self._QUALITY_FILTERS
+            as_of = as_of or await self._resolve_as_of()
+            if as_of is None:
+                return 0.5
 
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(*qf, StockMetrics.pullback_quality_score >= 60)
+                .where(*qf, StockMetrics.date == as_of, StockMetrics.pullback_quality_score >= 60)
             )
             leaders = result.scalar() or 0
 
@@ -168,7 +188,7 @@ class MarketRegimeEngine:
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(*qf, StockMetrics.pullback_quality_score >= 60,
+                .where(*qf, StockMetrics.date == as_of, StockMetrics.pullback_quality_score >= 60,
                        StockMetrics.distance_to_ema21 >= 0)
             )
             leaders_above_ema21 = result.scalar() or 0
@@ -178,7 +198,7 @@ class MarketRegimeEngine:
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(*qf, StockMetrics.pullback_quality_score >= 60,
+                .where(*qf, StockMetrics.date == as_of, StockMetrics.pullback_quality_score >= 60,
                        StockMetrics.relative_strength_spy >= 105)
             )
             strong_rs_leaders = result.scalar() or 0
@@ -192,7 +212,7 @@ class MarketRegimeEngine:
             logger.error(f"Error calculating leadership health: {e}")
             return 0.5  # Default to neutral
     
-    async def _calculate_speculative_appetite(self) -> float:
+    async def _calculate_speculative_appetite(self, as_of: Optional[date] = None) -> float:
         """
         Calculate speculative appetite (0-1).
         
@@ -203,11 +223,14 @@ class MarketRegimeEngine:
         """
         try:
             qf = self._QUALITY_FILTERS
+            as_of = as_of or await self._resolve_as_of()
+            if as_of is None:
+                return 0.5
 
             result = await self.db.execute(
                 select(func.avg(StockMetrics.adr_percent))
                 .select_from(StockMetrics)
-                .where(*qf)
+                .where(*qf, StockMetrics.date == as_of)
             )
             avg_adr = result.scalar() or 3.0
 
@@ -220,7 +243,7 @@ class MarketRegimeEngine:
             logger.error(f"Error calculating speculative appetite: {e}")
             return 0.5  # Default to neutral
     
-    async def _calculate_sector_expansion(self) -> float:
+    async def _calculate_sector_expansion(self, as_of: Optional[date] = None) -> float:
         """
         Calculate sector expansion (0-1).
         
@@ -230,18 +253,21 @@ class MarketRegimeEngine:
         """
         try:
             qf = self._QUALITY_FILTERS
+            as_of = as_of or await self._resolve_as_of()
+            if as_of is None:
+                return 0.5
 
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(*qf, StockMetrics.perf_1w > 0)
+                .where(*qf, StockMetrics.date == as_of, StockMetrics.perf_1w > 0)
             )
             positive_weekly = result.scalar() or 0
 
             result = await self.db.execute(
                 select(func.count())
                 .select_from(StockMetrics)
-                .where(*qf)
+                .where(*qf, StockMetrics.date == as_of)
             )
             total = result.scalar() or 1
 
@@ -253,7 +279,7 @@ class MarketRegimeEngine:
             logger.error(f"Error calculating sector expansion: {e}")
             return 0.5  # Default to neutral
     
-    async def _calculate_pullback_environment_quality(self) -> float:
+    async def _calculate_pullback_environment_quality(self, as_of: Optional[date] = None) -> float:
         """
         Calculate pullback environment quality (0-1).
         
@@ -263,11 +289,18 @@ class MarketRegimeEngine:
         """
         try:
             qf = self._QUALITY_FILTERS
+            as_of = as_of or await self._resolve_as_of()
+            if as_of is None:
+                return 0.5
 
             result = await self.db.execute(
                 select(func.avg(StockMetrics.pullback_quality_score))
                 .select_from(StockMetrics)
-                .where(*qf, StockMetrics.pullback_quality_score.isnot(None))
+                .where(
+                    *qf,
+                    StockMetrics.date == as_of,
+                    StockMetrics.pullback_quality_score.isnot(None),
+                )
             )
             avg_pullback_quality = result.scalar() or 50.0
 

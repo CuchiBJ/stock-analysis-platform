@@ -1,15 +1,14 @@
-"""Empirical continuation probability — stratified success rates from
-transition_observations. Falls back to a rule-based sentinel when no cohort
-level meets the minimum sample threshold.
+"""Context-aware empirical continuation probability.
 
-Cohort key (Phase 1):  (transition_type, rs_bucket)
-  Level 2 from the full ladder — participation_at_detection is not yet stored
-  in transition_observations, so Level 1 (with participation) is skipped.
-
-Fallback ladder:
-  Level 2: (transition_type, rs_bucket)
-  Level 3: (transition_type,)
-  Level 4: rule-based sentinel — probability=0.0, source="rule_based"
+The fallback ladder prefers cohorts comparable to the current setup while
+requiring progressively larger samples as specificity decreases:
+  1. recent transition + regime + RS bucket (20)
+  2. recent transition (30)
+  3. transition + regime + RS bucket (20)
+  4. transition + regime (30)
+  5. transition + RS bucket (30)
+  6. transition across all contexts (50)
+  7. rule-based sentinel
 
 Cache: per-process in-memory dict, TTL = 600 s.
   Cleared on every outcome_tracker.evaluate_pending_outcomes() write.
@@ -17,7 +16,7 @@ Cache: per-process in-memory dict, TTL = 600 s.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +26,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-MIN_SAMPLE_SIZE = 5
+MIN_CONTEXT_RS_SAMPLE = 20
+MIN_CONTEXT_SAMPLE = 30
+MIN_RS_SAMPLE = 30
+MIN_GLOBAL_SAMPLE = 50
+RECENT_CONTEXT_DAYS = 21
 _CACHE_TTL_SECONDS = 600
 
 _cache: dict[tuple, tuple[EmpiricalLookupResult, datetime]] = {}
@@ -38,6 +41,7 @@ class EmpiricalLookupResult:
     probability: float
     source: str   # "empirical" | "rule_based"
     sample_size: int
+    basis: str
 
 
 def _rs_bucket(rs_value: Optional[float]) -> str:
@@ -65,12 +69,21 @@ class EmpiricalProbabilityCalculator:
         self,
         transition_type: str,
         rs_bucket: Optional[str] = None,
-    ) -> tuple[int, int]:
-        """Return (success_count, failure_count). NEUTRAL/PENDING excluded."""
+        regime: Optional[str] = None,
+        since: Optional[date] = None,
+        as_of_date: Optional[date] = None,
+    ) -> tuple[int, int, int]:
+        """Return (success, failure, neutral). Pending outcomes are excluded."""
         conditions: list = [
             TransitionObservation.transition_type == transition_type,
-            TransitionObservation.outcome_status.in_(['SUCCESS', 'FAILURE']),
+            TransitionObservation.outcome_status.in_(['SUCCESS', 'FAILURE', 'NEUTRAL']),
         ]
+        if regime is not None:
+            conditions.append(TransitionObservation.regime_at_detection == regime)
+        if since is not None:
+            conditions.append(TransitionObservation.date_detected > since)
+        if as_of_date is not None:
+            conditions.append(TransitionObservation.date_detected <= as_of_date)
         if rs_bucket is not None:
             if rs_bucket == 'unknown':
                 conditions.append(TransitionObservation.rs_spy_at_detection.is_(None))
@@ -96,20 +109,37 @@ class EmpiricalProbabilityCalculator:
         rows = (await self.db.execute(q)).all()
         success = sum(r.cnt for r in rows if r.outcome_status == 'SUCCESS')
         failure = sum(r.cnt for r in rows if r.outcome_status == 'FAILURE')
-        return success, failure
+        neutral = sum(r.cnt for r in rows if r.outcome_status == 'NEUTRAL')
+        return success, failure, neutral
 
     async def lookup(
         self,
         transition_type: str,
         rs_value: Optional[float],
-        participation: Optional[str] = None,
+        current_regime: Optional[str] = None,
+        as_of_date: Optional[date] = None,
     ) -> EmpiricalLookupResult:
         """
-        Attempt empirical lookup, falling back through the ladder.
-        participation is accepted but currently unused (not yet stored in DB).
+        Attempt context-aware empirical lookup, falling back through the ladder.
         """
+        if not transition_type or transition_type.lower() == "stable":
+            return EmpiricalLookupResult(
+                probability=0.0,
+                source="rule_based",
+                sample_size=0,
+                basis="rule_formula",
+            )
+
+        transition_type = transition_type.lower()
         bucket = _rs_bucket(rs_value)
-        cache_key = (transition_type, bucket, participation or 'UNKNOWN')
+        regime = (current_regime or "").lower()
+        usable_regime = regime if regime and regime != "unknown" else None
+        cache_key = (
+            transition_type,
+            bucket,
+            usable_regime or "UNKNOWN",
+            as_of_date.isoformat() if as_of_date else "LIVE",
+        )
 
         cached = _cache.get(cache_key)
         if cached is not None:
@@ -117,29 +147,53 @@ class EmpiricalProbabilityCalculator:
             if (datetime.utcnow() - ts).total_seconds() < _CACHE_TTL_SECONDS:
                 return result
 
-        # Level 2: (transition_type, rs_bucket)
-        success, failure = await self._query_cohort(transition_type, rs_bucket=bucket)
-        if success + failure >= MIN_SAMPLE_SIZE:
-            result = EmpiricalLookupResult(
-                probability=success / (success + failure),
-                source='empirical',
-                sample_size=success + failure,
+        recent_since = as_of_date - timedelta(days=RECENT_CONTEXT_DAYS) if as_of_date else None
+        ladder: list[
+            tuple[str, int, Optional[str], Optional[str], Optional[date]]
+        ] = []
+        if recent_since is not None and usable_regime is not None:
+            ladder.append(
+                ("transition_recent_regime_rs", MIN_CONTEXT_RS_SAMPLE, bucket, usable_regime, recent_since)
             )
-            _cache[cache_key] = (result, datetime.utcnow())
-            return result
+        if recent_since is not None:
+            ladder.append(
+                ("transition_recent", MIN_CONTEXT_SAMPLE, None, None, recent_since)
+            )
+        if usable_regime is not None:
+            ladder.extend([
+                ("transition_regime_rs", MIN_CONTEXT_RS_SAMPLE, bucket, usable_regime, None),
+                ("transition_regime", MIN_CONTEXT_SAMPLE, None, usable_regime, None),
+            ])
+        ladder.extend([
+            ("transition_rs", MIN_RS_SAMPLE, bucket, None, None),
+            ("transition_all", MIN_GLOBAL_SAMPLE, None, None, None),
+        ])
 
-        # Level 3: (transition_type,)
-        success, failure = await self._query_cohort(transition_type)
-        if success + failure >= MIN_SAMPLE_SIZE:
-            result = EmpiricalLookupResult(
-                probability=success / (success + failure),
-                source='empirical',
-                sample_size=success + failure,
+        for basis, minimum, cohort_bucket, cohort_regime, cohort_since in ladder:
+            success, failure, neutral = await self._query_cohort(
+                transition_type,
+                rs_bucket=cohort_bucket,
+                regime=cohort_regime,
+                since=cohort_since,
+                as_of_date=as_of_date if cohort_since is not None else None,
             )
-            _cache[cache_key] = (result, datetime.utcnow())
-            return result
+            sample_size = success + failure + neutral
+            if sample_size >= minimum:
+                result = EmpiricalLookupResult(
+                    probability=success / sample_size,
+                    source="empirical",
+                    sample_size=sample_size,
+                    basis=basis,
+                )
+                _cache[cache_key] = (result, datetime.utcnow())
+                return result
 
         # Level 4: rule-based sentinel — caller evaluates the formula
-        result = EmpiricalLookupResult(probability=0.0, source='rule_based', sample_size=0)
+        result = EmpiricalLookupResult(
+            probability=0.0,
+            source="rule_based",
+            sample_size=0,
+            basis="rule_formula",
+        )
         _cache[cache_key] = (result, datetime.utcnow())
         return result

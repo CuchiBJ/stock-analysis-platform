@@ -12,17 +12,25 @@ from datetime import date, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func
+from sqlalchemy import and_, select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
 from app.models.stock import StockMetrics, TransitionObservation
 from app.services.batch_transition_scanner import BatchTransitionScanner
+from app.services.calibration_statistics import (
+    MIN_SETTLED_SAMPLES,
+    classify_drift,
+    cohort_statistics,
+    rate_delta_pp,
+)
+from app.services.follow_through import BULLISH_TRANSITIONS, FT_BASELINE_CAL_DAYS
 from app.services.transition_engine import OperationalTransition
 
 router = APIRouter(prefix="/calibration", tags=["calibration"])
 
-MIN_SAMPLES_REQUIRED = 5
+MIN_SAMPLES_REQUIRED = MIN_SETTLED_SAMPLES
+RECENT_WINDOW_DAYS = 21
 PENDING_STATUSES = ("PENDING", "INSUFFICIENT_DATA")
 RESOLVED_STATUSES = ("SUCCESS", "FAILURE")
 _STATUS_ORDER = {"empirical": 0, "insufficient": 1, "no_data": 2}
@@ -63,11 +71,37 @@ async def calibration_by_transition_type(db: AsyncSession = Depends(get_db)):
         t.value for t in OperationalTransition if t.value != "stable"
     ]
 
+    as_of = (await db.execute(select(func.max(StockMetrics.date)))).scalar() or date.today()
+
+    from app.services.market_context_engine import MarketContextEngine
+    market_context = await MarketContextEngine(db).analyze()
+    if market_context is None or market_context.regime is None:
+        raise HTTPException(status_code=404, detail="Current market context is unavailable")
+    regime_analysis = market_context.regime
+    current_regime = regime_analysis.regime.value
+    recent_start = as_of - timedelta(days=RECENT_WINDOW_DAYS)
+    baseline_start = recent_start - timedelta(days=FT_BASELINE_CAL_DAYS)
+
     counts_q = (
         select(
             TransitionObservation.transition_type,
             TransitionObservation.outcome_status,
-            func.count(TransitionObservation.id).label("cnt"),
+            func.count(TransitionObservation.id).label("historical_count"),
+            func.count(TransitionObservation.id).filter(
+                and_(
+                    TransitionObservation.date_detected > recent_start,
+                    TransitionObservation.date_detected <= as_of,
+                )
+            ).label("recent_count"),
+            func.count(TransitionObservation.id).filter(
+                and_(
+                    TransitionObservation.date_detected > baseline_start,
+                    TransitionObservation.date_detected <= recent_start,
+                )
+            ).label("baseline_count"),
+            func.count(TransitionObservation.id).filter(
+                TransitionObservation.regime_at_detection == current_regime
+            ).label("regime_count"),
         )
         .where(TransitionObservation.transition_type.in_(transition_values))
         .group_by(
@@ -77,53 +111,78 @@ async def calibration_by_transition_type(db: AsyncSession = Depends(get_db)):
     )
     raw_rows = (await db.execute(counts_q)).all()
 
-    counts: dict[str, dict[str, int]] = {t: {} for t in transition_values}
+    counts: dict[str, dict[str, dict[str, int]]] = {
+        t: {"historical": {}, "recent": {}, "baseline": {}, "current_regime": {}}
+        for t in transition_values
+    }
     for r in raw_rows:
-        counts[r.transition_type][r.outcome_status] = r.cnt
+        counts[r.transition_type]["historical"][r.outcome_status] = r.historical_count
+        counts[r.transition_type]["recent"][r.outcome_status] = r.recent_count
+        counts[r.transition_type]["baseline"][r.outcome_status] = r.baseline_count
+        counts[r.transition_type]["current_regime"][r.outcome_status] = r.regime_count
 
     rows = []
     total_observations = 0
     total_resolved = 0
     total_pending = 0
+    total_settled = 0
+
+    def _cohort(raw: dict[str, int]) -> dict:
+        return cohort_statistics(
+            success=raw.get("SUCCESS", 0),
+            failure=raw.get("FAILURE", 0),
+            neutral=raw.get("NEUTRAL", 0),
+            pending=raw.get("PENDING", 0) + raw.get("INSUFFICIENT_DATA", 0),
+        )
 
     for t in transition_values:
-        c = counts[t]
-        success = c.get("SUCCESS", 0)
-        failure = c.get("FAILURE", 0)
-        pending = c.get("PENDING", 0) + c.get("INSUFFICIENT_DATA", 0)
-        neutral = c.get("NEUTRAL", 0)
-
-        n_resolved = success + failure
-        n_pending = pending
-        # Settled = every signal with a known outcome (SUCCESS/FAILURE/NEUTRAL),
-        # i.e. all non-pending. A NEUTRAL settled but did NOT deliver the move.
-        n_settled = n_resolved + neutral
-        n_observed = n_settled + n_pending
-        status = _classify(n_resolved)
-        success_rate, delivery_rate = _rates(success, failure, neutral, status)
+        historical = _cohort(counts[t]["historical"])
+        recent = _cohort(counts[t]["recent"])
+        baseline = _cohort(counts[t]["baseline"])
+        regime_cohort = _cohort(counts[t]["current_regime"])
+        drift = classify_drift(baseline, recent)
+        bullish = t in BULLISH_TRANSITIONS
 
         rows.append(
             {
                 "transition_type": t,
-                "n_resolved": n_resolved,
-                "n_pending": n_pending,
-                "success_count": success,
-                "failure_count": failure,
-                "neutral_count": neutral,
-                "success_rate": success_rate,
-                "delivery_rate": delivery_rate,
-                "status": status,
+                "bullish": bullish,
+                "historical": historical,
+                "recent": recent,
+                "baseline": baseline,
+                "current_regime": regime_cohort,
+                "drift": drift,
+                "recent_delta_pp": rate_delta_pp(recent, baseline),
+                "regime_delta_pp": rate_delta_pp(regime_cohort, historical),
+                # Legacy historical fields retained for existing consumers.
+                "n_resolved": historical["n_resolved"],
+                "n_pending": historical["n_pending"],
+                "success_count": historical["success_count"],
+                "failure_count": historical["failure_count"],
+                "neutral_count": historical["neutral_count"],
+                "success_rate": historical["success_rate"],
+                "delivery_rate": historical["delivery_rate"],
+                "status": historical["status"],
             }
         )
 
-        total_observations += n_observed
-        total_resolved += n_resolved
-        total_pending += n_pending
+        total_observations += historical["n_observed"]
+        total_resolved += historical["n_resolved"]
+        total_pending += historical["n_pending"]
+        total_settled += historical["n_settled"]
 
-    rows.sort(key=lambda r: (_STATUS_ORDER[r["status"]], -r["n_resolved"]))
+    drift_order = {"deteriorating": 0, "stable": 1, "improving": 2, "insufficient": 3}
+    rows.sort(
+        key=lambda r: (
+            0 if r["bullish"] else 1,
+            drift_order[r["drift"]],
+            -r["recent"]["n_settled"],
+            r["transition_type"],
+        )
+    )
 
     eta_first_data = None
-    if total_resolved == 0 and total_pending > 0:
+    if total_settled == 0 and total_pending > 0:
         oldest_pending = (
             await db.execute(
                 select(func.min(TransitionObservation.date_detected)).where(
@@ -142,10 +201,39 @@ async def calibration_by_transition_type(db: AsyncSession = Depends(get_db)):
                     biz_days += 1
             eta_first_data = candidate.isoformat()
 
+    follow_through = None
+    posture = None
+    if market_context is not None:
+        if market_context.follow_through is not None:
+            ft = market_context.follow_through
+            follow_through = {
+                "descriptor": ft.descriptor,
+                "basis": ft.basis,
+                "window_days": ft.window_days,
+                "delivery_rate": ft.delivery_rate,
+                "baseline_rate": ft.baseline_rate,
+                "resolved": ft.resolved,
+                "pending": ft.pending,
+            }
+        if market_context.posture is not None:
+            posture = {
+                "state": market_context.posture.state,
+                "instruction": market_context.posture.instruction,
+            }
+
     return {
         "min_samples_required": MIN_SAMPLES_REQUIRED,
+        "recent_window_days": RECENT_WINDOW_DAYS,
+        "as_of": as_of.isoformat(),
+        "current_context": {
+            "regime": current_regime,
+            "regime_confidence": round(regime_analysis.confidence, 4),
+            "follow_through": follow_through,
+            "posture": posture,
+        },
         "total_observations": total_observations,
         "total_resolved": total_resolved,
+        "total_settled": total_settled,
         "total_pending": total_pending,
         "eta_first_data": eta_first_data,
         "rows": rows,
@@ -214,3 +302,69 @@ async def reclassify_outcomes(db: AsyncSession = Depends(get_db)):
         "changed": changed,
         "by_status": dict(by_status),
     }
+
+
+async def _reclassify_observation_regimes(db: AsyncSession, engine_factory=None) -> dict:
+    """Rebuild persisted regime labels from each detection date's snapshot."""
+    from collections import Counter
+
+    from app.services.market_regime_engine import MarketRegimeEngine
+
+    engine_factory = engine_factory or MarketRegimeEngine
+    date_rows = (
+        await db.execute(
+            select(
+                TransitionObservation.date_detected,
+                func.count(TransitionObservation.id).label("cnt"),
+            )
+            .where(TransitionObservation.date_detected.isnot(None))
+            .group_by(TransitionObservation.date_detected)
+            .order_by(TransitionObservation.date_detected)
+        )
+    ).all()
+
+    engine = engine_factory(db)
+    evaluated = 0
+    changed = 0
+    by_regime: Counter = Counter()
+    unresolved_dates = []
+
+    for row in date_rows:
+        analysis = await engine.detect_regime(row.date_detected)
+        if analysis.as_of is None:
+            unresolved_dates.append(row.date_detected.isoformat())
+            continue
+        regime = analysis.regime.value
+        evaluated += row.cnt
+        by_regime[regime] += row.cnt
+        result = await db.execute(
+            update(TransitionObservation)
+            .where(
+                TransitionObservation.date_detected == row.date_detected,
+                TransitionObservation.regime_at_detection.is_distinct_from(regime),
+            )
+            .values(regime_at_detection=regime)
+        )
+        changed += result.rowcount or 0
+
+    await db.commit()
+
+    from app.services.empirical_probability_calculator import EmpiricalProbabilityCalculator
+    from app.services.outcome_tracker import _regime_cache
+
+    EmpiricalProbabilityCalculator.clear_cache()
+    _regime_cache.clear()
+
+    return {
+        "evaluated": evaluated,
+        "changed": changed,
+        "dates_evaluated": len(date_rows) - len(unresolved_dates),
+        "by_regime": dict(by_regime),
+        "unresolved_dates": unresolved_dates,
+    }
+
+
+@router.post("/reclassify-regimes", tags=["admin"])
+async def reclassify_regimes(db: AsyncSession = Depends(get_db)):
+    """Correct regime_at_detection using the no-lookahead market snapshot."""
+    return await _reclassify_observation_regimes(db)

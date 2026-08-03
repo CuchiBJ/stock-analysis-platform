@@ -18,10 +18,10 @@ from app.services.observation_scorer import (
     is_pre_reclaim_candidate,
 )
 from app.services.setup_lifecycle_engine import SetupLifecycleEngine, SetupState
-from app.services.market_regime_engine import MarketRegimeEngine
 from app.services.regime_aware_engine import RegimeAwareEngine
-from app.services.context_decision_filter import fetch_current_context, compute_context_multiplier
+from app.services.context_decision_filter import compute_context_multiplier
 from app.services.group_strength_service import fetch_current_group_strengths, compute_group_multiplier
+from app.services.market_context_engine import MarketContextEngine
 from app.services.websocket_manager import websocket_manager
 from app.models.stock import Stock, StockMetrics, TransitionObservation
 from sqlalchemy import select, and_, or_, func, text
@@ -399,18 +399,28 @@ async def get_actionable_setups(
     """
     try:
         transition_engine = TransitionEngine(db)
-        regime_engine = MarketRegimeEngine(db)
 
-        # Fetch market context once — used for score multiplier and warnings
-        participation, leadership = await fetch_current_context(db)
+        # One snapshot owns participation, leadership, follow-through, and regime.
+        market_context = await MarketContextEngine(db).analyze()
+        if market_context is None or market_context.regime is None:
+            return {"setups": [], "context_snapshot": None}
+        participation = market_context.participation.descriptor
+        leadership = market_context.leadership.descriptor
+        regime = market_context.regime
         ctx_multiplier = compute_context_multiplier(participation, leadership)
-        context_snapshot = {"participation": participation, "leadership": leadership}
+        context_snapshot = {
+            "as_of": market_context.as_of.isoformat(),
+            "participation": participation,
+            "leadership": leadership,
+            "regime": regime.regime.value,
+            "follow_through": (
+                market_context.follow_through.descriptor
+                if market_context.follow_through is not None else "UNKNOWN"
+            ),
+        }
 
         # Fetch group strength snapshot once — used for per-setup group multiplier
         group_perfs = await fetch_current_group_strengths(db)
-
-        # Get market regime
-        regime = await regime_engine.detect_regime()
 
         # Get active setups with high pullback quality (latest date per symbol)
         # Use subquery to filter to latest date per symbol
@@ -444,6 +454,25 @@ async def get_actionable_setups(
         setup_symbols = [s.symbol for s in setups]
         days_in_state_map = await _get_days_in_state(db, setup_symbols)
 
+        # Fetch one prior metrics row per candidate in a single PostgreSQL
+        # DISTINCT ON query. Calibration must receive the actual operational
+        # transition; omitting it silently forces every setup to rule-based.
+        previous_metrics_map: dict[str, StockMetrics] = {}
+        if setup_symbols:
+            latest_setup_date = max(s.date for s in setups)
+            previous_result = await db.execute(
+                select(StockMetrics)
+                .where(
+                    StockMetrics.symbol.in_(setup_symbols),
+                    StockMetrics.date < latest_setup_date,
+                )
+                .distinct(StockMetrics.symbol)
+                .order_by(StockMetrics.symbol, StockMetrics.date.desc())
+            )
+            previous_metrics_map = {
+                row.symbol: row for row in previous_result.scalars().all()
+            }
+
         # Fetch market_group for all setup symbols in one query
         mg_result = await db.execute(
             select(Stock.symbol, Stock.market_group)
@@ -469,7 +498,19 @@ async def get_actionable_setups(
             )
             setup_type = _classify_setup_type(setup)
             narrative = _generate_priority_narrative(setup, priority_score, setup_type)
-            prob, prob_source, sample_size = await lifecycle.calculate_continuation_probability(setup)
+            op_transition = await transition_engine.calculate_operational_transition(
+                setup.symbol,
+                setup,
+                previous_metrics_map.get(setup.symbol),
+            )
+            transition_value = op_transition.transition.value
+            prob, prob_source, sample_size, prob_basis = (
+                await lifecycle.calculate_continuation_probability(
+                    setup,
+                    transition_type=transition_value,
+                    current_regime=regime.regime.value,
+                )
+            )
             cont_prob = min(1.0, prob * regime_cont_mult)
 
             # Apply context + group multipliers compositionally
@@ -504,6 +545,8 @@ async def get_actionable_setups(
                 "continuation_prob":    round(cont_prob, 2),
                 "probability_source":   prob_source,
                 "sample_size":          sample_size,
+                "probability_basis":    prob_basis,
+                "transition":           transition_value,
                 "narrative":            narrative,
                 "setup_type":           setup_type,
                 "pullback_quality":     setup.pullback_quality_score,

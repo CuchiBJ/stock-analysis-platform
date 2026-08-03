@@ -27,6 +27,14 @@ from app.services.follow_through import (
     classify_provisional,
 )
 from app.services.market_posture import Posture, compute_posture
+from app.services.market_health import (
+    CLEAN,
+    SEVERE,
+    DamageSeverity,
+    classify_damage_severity,
+    compute_health_state,
+)
+from app.services.market_regime_engine import MarketRegimeAnalysis, MarketRegimeEngine
 from app.services.quality_leader_gate import is_quality_leader
 from app.services.universe_filters import QUALITY_FILTERS
 
@@ -64,23 +72,10 @@ _DENSITY_LEVEL_MIN_SAMPLE = 10
 # ─── Market health persistence (IBD distribution-day inspired) ────────────────
 # Health has MEMORY: repeated deterioration episodes over the recent window keep
 # the market unhealthy even when today's descriptors look fine. Damage
-# accumulates fast; repair is asymmetric — it requires a sustained clean streak
-# (follow-through), never a single good day.
+# accumulates fast; repair is asymmetric — it requires broad evidence over a
+# rolling window, never a single good day.
 _HEALTH_WINDOW = 20               # trading days of memory
 _HEALTH_DELTA_LOOKBACK = 5        # trading-day index offset for per-day deltas
-_HEALTH_MIN_CLASSIFIED_DAYS = 10  # fewer classified days → state UNKNOWN
-
-_DAMAGE_PARTICIPATION = frozenset({"NARROWING", "COLLAPSING"})
-_DAMAGE_LEADERSHIP = frozenset({"THINNING", "COLLAPSING", "EXHAUSTED"})
-
-_HEALTH_THRESHOLDS = {
-    'robust_max_damaged_days': 2,   # ≤2 damaged days AND ≤1 episode → ROBUST
-    'robust_max_episodes':     1,
-    'damaged_min_days':        8,   # ≥8 of 20 damaged → DAMAGED (heavy total)
-    'damaged_recent_window':   5,   # ...or an active cluster right now:
-    'damaged_min_recent':      3,   #    ≥3 damaged of the last 5 days → DAMAGED
-    'repair_streak_min':       5,   # ≥5 trailing clean days → RECOVERING overlay
-}
 
 
 @dataclass
@@ -105,7 +100,12 @@ class HealthAnalysis:
     damaged_days: int
     window_days: int           # days actually classified (≤ _HEALTH_WINDOW)
     days_since_last_damage: Optional[int]  # None when no damage in window
-    repair_streak: int         # trailing consecutive clean days
+    repair_streak: int         # trailing consecutive clean days (diagnostic only)
+    repair_clean_days: int     # clean sessions inside the rolling repair window
+    repair_window_days: int    # sessions considered (≤7)
+    repair_required_clean_days: int
+    recent_severe_days: int    # severe sessions inside the recent veto window
+    severe_lookback_days: int  # sessions considered (≤3)
     series: list = field(default_factory=list)  # [{date, participation, leadership, damaged}] ascending
 
 
@@ -116,6 +116,7 @@ class MarketContext:
     participation: ParticipationAnalysis
     leadership: LeadershipAnalysis
     engines_pending: list
+    regime: Optional[MarketRegimeAnalysis] = None
     # Short trajectory (last N trading days, ascending) so the bar can show the
     # evolution of each engine, not just today's value + a 5d delta.
     participation_history: list = field(default_factory=list)  # [{date, value}] breadth ratio
@@ -178,6 +179,7 @@ class MarketContextEngine:
                 return ctx
 
         universe_size = await self._universe_size(as_of)
+        regime = await MarketRegimeEngine(self._db).detect_regime(as_of)
         participation = await self._participation(as_of)
         leadership = await self._leadership(as_of)
         part_hist, lead_hist = await self._history(as_of)
@@ -190,7 +192,11 @@ class MarketContextEngine:
             damaged_days=health.damaged_days,
             window_days=health.window_days,
             repair_streak=health.repair_streak,
-            repair_streak_min=_HEALTH_THRESHOLDS['repair_streak_min'],
+            repair_streak_min=health.repair_required_clean_days,
+            repair_clean_days=health.repair_clean_days,
+            repair_window_days=health.repair_window_days,
+            recent_severe_days=health.recent_severe_days,
+            severe_lookback_days=health.severe_lookback_days,
             follow_through=follow_through.descriptor,
             ft_delivery=follow_through.delivery_rate,
             ft_baseline=follow_through.baseline_rate,
@@ -202,6 +208,7 @@ class MarketContextEngine:
             participation=participation,
             leadership=leadership,
             engines_pending=list(self.ENGINES_PENDING),
+            regime=regime,
             participation_history=part_hist,
             leadership_history=lead_hist,
             health=health,
@@ -706,7 +713,10 @@ class MarketContextEngine:
             as_of, _HEALTH_WINDOW + _HEALTH_DELTA_LOOKBACK
         )
         days = self._classify_health_days(raw)[-_HEALTH_WINDOW:]
-        verdict = self._health_state([d['damaged'] for d in days])
+        verdict = self._health_state(
+            [d['damaged'] for d in days],
+            [d['severity'] for d in days],
+        )
         return HealthAnalysis(
             state=verdict['state'],
             episodes=verdict['episodes'],
@@ -714,12 +724,18 @@ class MarketContextEngine:
             window_days=len(days),
             days_since_last_damage=verdict['days_since_last_damage'],
             repair_streak=verdict['repair_streak'],
+            repair_clean_days=verdict['repair_clean_days'],
+            repair_window_days=verdict['repair_window_days'],
+            repair_required_clean_days=verdict['repair_required_clean_days'],
+            recent_severe_days=verdict['recent_severe_days'],
+            severe_lookback_days=verdict['severe_lookback_days'],
             series=[
                 {
                     'date':          d['date'].isoformat(),
                     'participation': d['participation'],
                     'leadership':    d['leadership'],
                     'damaged':       d['damaged'],
+                    'severity':      d['severity'],
                 }
                 for d in days
             ],
@@ -808,7 +824,8 @@ class MarketContextEngine:
 
     def _classify_health_days(self, raw: list) -> list:
         """Classify each day of the raw series → [{date, participation,
-        leadership, damaged}] for indexes _HEALTH_DELTA_LOOKBACK..N-1, ascending.
+        leadership, damaged, severity}] for indexes
+        _HEALTH_DELTA_LOOKBACK..N-1, ascending.
 
         Day i's deltas compare against day i-_HEALTH_DELTA_LOOKBACK — a strict
         trading-day offset, whereas the headline descriptors use a calendar
@@ -841,65 +858,28 @@ class MarketContextEngine:
                 extension_count=cur['extension_count'],
                 leader_count=cur['leader_count'],
             )
+            severity = classify_damage_severity(participation, leadership)
             days.append({
                 'date':          cur['date'],
                 'participation': participation,
                 'leadership':    leadership,
-                'damaged': (
-                    participation in _DAMAGE_PARTICIPATION
-                    or leadership in _DAMAGE_LEADERSHIP
-                ),
+                'damaged':       severity != CLEAN,
+                'severity':      severity,
             })
         return days
 
     @staticmethod
-    def _health_state(damaged: list) -> dict:
-        """State machine over ascending damaged flags (today last).
+    def _health_state(
+        damaged: list,
+        severities: Optional[list[DamageSeverity]] = None,
+    ) -> dict:
+        """Compatibility wrapper around the extracted pure health policy.
 
-        Asymmetric by construction: DAMAGED/FRAGILE can only upgrade to
-        RECOVERING via a clean streak of repair_streak_min days, and ROBUST only
-        returns once damage ages out of the sliding window — one good day never
-        changes the state.
+        Legacy callers that only provide booleans conservatively treat every
+        damaged flag as severe; the live engine always provides full severity.
         """
-        n = len(damaged)
-        damaged_days = sum(1 for f in damaged if f)
-        episodes = sum(
-            1 for i, f in enumerate(damaged) if f and (i == 0 or not damaged[i - 1])
-        )
-        repair_streak = 0
-        for f in reversed(damaged):
-            if f:
-                break
-            repair_streak += 1
-        days_since_last_damage = repair_streak if damaged_days else None
-
-        t = _HEALTH_THRESHOLDS
-        if n < _HEALTH_MIN_CLASSIFIED_DAYS:
-            state = "UNKNOWN"
-        elif (
-            damaged_days <= t['robust_max_damaged_days']
-            and episodes <= t['robust_max_episodes']
-        ):
-            state = "ROBUST"
-        else:
-            recent = damaged[-t['damaged_recent_window']:]
-            if (
-                damaged_days >= t['damaged_min_days']
-                or sum(1 for f in recent if f) >= t['damaged_min_recent']
-            ):
-                state = "DAMAGED"
-            else:
-                state = "FRAGILE"
-            if repair_streak >= t['repair_streak_min']:
-                state = "RECOVERING"
-
-        return {
-            'state':                  state,
-            'episodes':               episodes,
-            'damaged_days':           damaged_days,
-            'repair_streak':          repair_streak,
-            'days_since_last_damage': days_since_last_damage,
-        }
+        resolved = severities or [SEVERE if flag else CLEAN for flag in damaged]
+        return compute_health_state(resolved)
 
     # ─── Follow-through engine ─────────────────────────────────────────────────
 

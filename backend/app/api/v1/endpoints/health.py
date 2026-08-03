@@ -85,7 +85,7 @@ def compute_market_state(now_et: datetime) -> dict:
 
 
 async def _coverage(db: AsyncSession, now_et: datetime) -> dict:
-    """Coverage = quality-universe symbols refreshed today / quality-universe size.
+    """Coverage = reference quality cohort refreshed today / cohort size.
 
     Both numerator and denominator are restricted to the QUALITY universe (the
     curated institutional set: mid/large cap, liquid, non-penny, min ADR) — the
@@ -98,11 +98,11 @@ async def _coverage(db: AsyncSession, now_et: datetime) -> dict:
     caps coverage well below 100% even on a fully-processed day. And anchoring to
     a still-loading `max(date)` makes the denominator swing through the day.
 
-    Denominator is the quality count on the last COMPLETE session (the most
-    recent metrics date strictly before the working session). The quality set is
-    defined by per-date metrics, so today's set is still filling in; yesterday's
-    completed set is the stable, reachable target that both numerator and — once
-    the pipeline finishes — reality converge to.
+    The cohort is frozen from the last COMPLETE session (the most recent metrics
+    date strictly before the working session). Both numerator and denominator use
+    that same symbol set. Reapplying QUALITY_FILTERS to today's values would turn
+    legitimate membership changes (for example ADR falling below 4%) into false
+    coverage gaps even when the symbol was refreshed successfully.
     """
     latest_price_date = (await db.execute(select(func.max(StockPrice.date)))).scalar()
     if latest_price_date is None:
@@ -115,14 +115,18 @@ async def _coverage(db: AsyncSession, now_et: datetime) -> dict:
             select(func.max(StockMetrics.date)).where(StockMetrics.date < latest_price_date)
         )
     ).scalar()
-    expected = 0
-    if ref_date is not None:
-        expected = (
-            await db.execute(
-                select(func.count(func.distinct(StockMetrics.symbol)))
-                .where(StockMetrics.date == ref_date, *QUALITY_FILTERS)
-            )
-        ).scalar() or 0
+    if ref_date is None:
+        return {"expected": 0, "actual": 0, "pct": 0.0}
+
+    quality_cohort = (
+        select(StockMetrics.symbol)
+        .where(StockMetrics.date == ref_date, *QUALITY_FILTERS)
+        .distinct()
+        .subquery()
+    )
+    expected = (
+        await db.execute(select(func.count()).select_from(quality_cohort))
+    ).scalar() or 0
 
     market_open_et = ET.localize(
         datetime.combine(now_et.date(), MARKET_OPEN_ET)
@@ -137,13 +141,12 @@ async def _coverage(db: AsyncSession, now_et: datetime) -> dict:
         .where(
             StockMetrics.date == latest_price_date,
             StockMetrics.updated_at >= market_open_utc,
-            *QUALITY_FILTERS,
+            StockMetrics.symbol.in_(select(quality_cohort.c.symbol)),
         )
     )
     actual = (await db.execute(actual_q)).scalar() or 0
 
-    # Cap at 100: today's quality set can legitimately be a touch larger than the
-    # reference day's, and coverage is meant to read as "done / to-do", not >100%.
+    # Defensive cap: the fixed cohort makes actual <= expected by construction.
     pct = min(100.0, actual / expected * 100.0) if expected > 0 else 0.0
     return {"expected": int(expected), "actual": int(actual), "pct": round(pct, 1)}
 

@@ -139,8 +139,11 @@ class TestPostureFollowThroughCeiling:
     def test_not_paying_does_not_raise_defensive_states(self):
         v = compute_posture(
             "COLLAPSING", "THINNING", "ROBUST", follow_through="NOT_PAYING",
+            ft_delivery=0.20, ft_baseline=0.45,
         )
         assert v.state == "DEFENSIVO"
+        assert any("no está pagando" in r for r in v.reasons)
+        assert any("20%" in r and "45%" in r for r in v.reasons)
 
     def test_paying_never_boosts(self):
         # PAYING is not a boost: STABLE×HEALTHY stays NORMAL.

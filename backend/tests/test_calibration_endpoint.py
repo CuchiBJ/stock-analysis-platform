@@ -5,6 +5,9 @@ that this repo doesn't have yet — tests target the pure logic surfaces
 (`_classify`, status ordering, constants).
 """
 import pytest
+import asyncio
+from datetime import date
+from types import SimpleNamespace
 
 from app.api.v1.endpoints.calibration import (
     MIN_SAMPLES_REQUIRED,
@@ -13,8 +16,14 @@ from app.api.v1.endpoints.calibration import (
     _STATUS_ORDER,
     _classify,
     _rates,
+    _reclassify_observation_regimes,
 )
 from app.services.transition_engine import OperationalTransition
+from app.services.calibration_statistics import (
+    classify_drift,
+    cohort_statistics,
+    wilson_interval,
+)
 
 
 class TestClassify:
@@ -63,8 +72,8 @@ class TestRates:
 
 
 class TestConstants:
-    def test_min_samples_is_five(self):
-        assert MIN_SAMPLES_REQUIRED == 5
+    def test_min_samples_is_conservative(self):
+        assert MIN_SAMPLES_REQUIRED == 20
 
     def test_resolved_statuses(self):
         assert set(RESOLVED_STATUSES) == {"SUCCESS", "FAILURE"}
@@ -103,3 +112,96 @@ class TestTransitionTypeCoverage:
             "stabilizing",
         }
         assert values == expected
+
+
+class TestContextAwareCohorts:
+    def test_settled_threshold_includes_neutral(self):
+        cohort = cohort_statistics(success=8, failure=2, neutral=10, pending=3)
+        assert cohort["status"] == "empirical"
+        assert cohort["n_settled"] == 20
+        assert cohort["n_resolved"] == 10
+        assert cohort["delivery_rate"] == pytest.approx(0.4)
+        assert cohort["success_rate"] == pytest.approx(0.8)
+        assert cohort["n_pending"] == 3
+
+    def test_insufficient_cohort_hides_rates(self):
+        cohort = cohort_statistics(success=10, failure=5, neutral=4)
+        assert cohort["status"] == "insufficient"
+        assert cohort["samples_needed"] == 1
+        assert cohort["delivery_rate"] is None
+        assert cohort["confidence_interval"] is None
+
+    def test_wilson_interval_contains_observed_rate(self):
+        low, high = wilson_interval(30, 100)
+        assert low < 0.30 < high
+        assert 0 <= low <= high <= 1
+
+    def test_drift_requires_non_overlapping_intervals(self):
+        historical = cohort_statistics(success=60, failure=20, neutral=20)
+        deteriorating = cohort_statistics(success=10, failure=50, neutral=40)
+        improving = cohort_statistics(success=90, failure=5, neutral=5)
+        overlapping = cohort_statistics(success=55, failure=25, neutral=20)
+
+        assert classify_drift(historical, deteriorating) == "deteriorating"
+        assert classify_drift(historical, improving) == "improving"
+        assert classify_drift(historical, overlapping) == "stable"
+
+    def test_drift_is_insufficient_without_both_cohorts(self):
+        empirical = cohort_statistics(success=15, failure=5, neutral=0)
+        insufficient = cohort_statistics(success=3, failure=2, neutral=0)
+        assert classify_drift(empirical, insufficient) == "insufficient"
+
+
+class _RowsResult:
+    def __init__(self, rows=None, rowcount=0):
+        self._rows = rows or []
+        self.rowcount = rowcount
+
+    def all(self):
+        return self._rows
+
+
+class _ReclassifyDb:
+    def __init__(self):
+        self.results = [
+            _RowsResult([
+                SimpleNamespace(date_detected=date(2026, 7, 24), cnt=10),
+                SimpleNamespace(date_detected=date(2026, 7, 25), cnt=5),
+            ]),
+            _RowsResult(rowcount=7),
+            _RowsResult(rowcount=3),
+        ]
+        self.committed = False
+
+    async def execute(self, _statement):
+        return self.results.pop(0)
+
+    async def commit(self):
+        self.committed = True
+
+
+class _ReclassifyEngine:
+    def __init__(self, _db):
+        pass
+
+    async def detect_regime(self, target):
+        value = "risk_off" if target.day == 24 else "transition"
+        return SimpleNamespace(
+            as_of=target,
+            regime=SimpleNamespace(value=value),
+        )
+
+
+def test_regime_reclassification_groups_dates_and_counts_changes():
+    db = _ReclassifyDb()
+    result = asyncio.run(
+        _reclassify_observation_regimes(db, engine_factory=_ReclassifyEngine)
+    )
+    assert result == {
+        "evaluated": 15,
+        "changed": 10,
+        "dates_evaluated": 2,
+        "by_regime": {"risk_off": 10, "transition": 5},
+        "unresolved_dates": [],
+    }
+    assert db.committed is True

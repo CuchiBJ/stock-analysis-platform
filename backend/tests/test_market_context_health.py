@@ -10,6 +10,13 @@ from app.services.market_context_engine import (
     _HEALTH_DELTA_LOOKBACK,
     MarketContextEngine,
 )
+from app.services.market_health import (
+    CLEAN,
+    MILD,
+    SEVERE,
+    classify_damage_severity,
+    compute_health_state,
+)
 
 # Engine instance with a sentinel DB — the pure methods never touch it.
 _eng = MarketContextEngine(db=object())  # type: ignore[arg-type]
@@ -41,11 +48,12 @@ class TestHealthState:
         v = _state([F] * 13 + [T, T, T] + [F] * 4)
         assert v['state'] == "FRAGILE"
 
-    def test_two_separate_episodes_is_fragile(self):
-        # Only 2 damaged days, but 2 distinct episodes → episodes rule breaks ROBUST.
+    def test_two_old_episodes_can_be_recovering(self):
+        # Two episodes break ROBUST, but enough recent clean evidence now permits
+        # RECOVERING once the last severe day leaves the 3-day veto window.
         v = _state([F] * 12 + [T] + [F] * 2 + [T] + [F] * 4)
-        assert v['state'] == "FRAGILE"
         assert v['episodes'] == 2
+        assert v['state'] == "RECOVERING"
 
     def test_old_damage_with_long_clean_tail_is_recovering(self):
         # 3 old damaged days + 17 clean: repair streak satisfied → RECOVERING
@@ -65,16 +73,17 @@ class TestHealthState:
         assert v['damaged_days'] == 3
         assert v['state'] == "DAMAGED"
 
-    def test_asymmetric_repair_four_clean_days_not_enough(self):
-        # Damage history + only 4 trailing clean days → still FRAGILE, not RECOVERING.
-        v = _state([T, T, T, T] + [F] * 11 + [T, F, F, F, F])
+    def test_four_clean_of_latest_seven_is_not_enough(self):
+        # Consecutive streak is diagnostic only; the rolling 7-day evidence is
+        # what matters. Four clean sessions do not qualify.
+        v = _state([F] * 13 + [T, T, T, F, F, F, F])
         assert v['repair_streak'] == 4
         assert v['state'] == "FRAGILE"
 
-    def test_five_clean_days_flips_to_recovering(self):
-        # Same damage but 5 trailing clean days → RECOVERING (follow-through bar).
+    def test_five_clean_of_seven_flips_to_recovering(self):
         v = _state([T, T, T, T] + [F] * 10 + [T, F, F, F, F, F])
         assert v['repair_streak'] == 5
+        assert v['repair_clean_days'] >= 5
         assert v['state'] == "RECOVERING"
 
     def test_heavy_damage_with_streak_is_recovering_not_robust(self):
@@ -110,6 +119,41 @@ class TestHealthState:
     def test_episode_counting_run_boundaries(self):
         v = _state([T, T, F, T] + [F] * 16)
         assert v['episodes'] == 2
+
+
+class TestSeverityAwareRecovery:
+    def test_worst_case_severity_precedence(self):
+        assert classify_damage_severity("STABLE", "HEALTHY") == CLEAN
+        assert classify_damage_severity("NARROWING", "HEALTHY") == MILD
+        assert classify_damage_severity("STABLE", "THINNING") == MILD
+        assert classify_damage_severity("NARROWING", "COLLAPSING") == SEVERE
+        assert classify_damage_severity("COLLAPSING", "HEALTHY") == SEVERE
+        assert classify_damage_severity("EXPANDING", "EXHAUSTED") == SEVERE
+
+    def test_mild_pullbacks_do_not_reset_rolling_repair(self):
+        severities = [SEVERE] * 10 + [CLEAN] * 3 + [
+            CLEAN, CLEAN, MILD, CLEAN, CLEAN, MILD, CLEAN,
+        ]
+        v = compute_health_state(severities)
+        assert v['repair_clean_days'] == 5
+        assert v['recent_severe_days'] == 0
+        assert v['repair_streak'] == 1
+        assert v['state'] == "RECOVERING"
+
+    def test_recent_severe_day_vetoes_recovery(self):
+        severities = [SEVERE] * 10 + [CLEAN] * 3 + [
+            MILD, CLEAN, CLEAN, CLEAN, CLEAN, SEVERE, CLEAN,
+        ]
+        v = compute_health_state(severities)
+        assert v['repair_clean_days'] == 5
+        assert v['recent_severe_days'] == 1
+        assert v['state'] == "DAMAGED"
+
+    def test_recent_severe_day_prevents_robust(self):
+        v = compute_health_state([CLEAN] * 19 + [SEVERE])
+        assert v['damaged_days'] == 1
+        assert v['recent_severe_days'] == 1
+        assert v['state'] == "FRAGILE"
         v = _state([F, T, T, T, F] + [F] * 10 + [T] * 5)
         assert v['episodes'] == 2
 
@@ -147,6 +191,7 @@ class TestClassifyHealthDays:
         days = _eng._classify_health_days(raw)
         assert days[-1]['participation'] == "NARROWING"
         assert days[-1]['damaged'] is True
+        assert days[-1]['severity'] == MILD
         assert all(not d['damaged'] for d in days[:-1])
 
     def test_density_collapse_marks_damage(self):
@@ -156,6 +201,7 @@ class TestClassifyHealthDays:
         days = _eng._classify_health_days(raw)
         assert days[-1]['leadership'] == "COLLAPSING"
         assert days[-1]['damaged'] is True
+        assert days[-1]['severity'] == SEVERE
 
     def test_shrinking_universe_cancels_phantom_collapse(self):
         # Leader count -20% but universe also -20% → density flat → no damage.
@@ -165,6 +211,7 @@ class TestClassifyHealthDays:
         days = _eng._classify_health_days(raw)
         assert days[-1]['leadership'] == "HEALTHY"
         assert days[-1]['damaged'] is False
+        assert days[-1]['severity'] == CLEAN
 
     def test_extension_ratio_marks_exhausted_damage(self):
         # >40% of leaders extended → EXHAUSTED even with flat density.
@@ -173,6 +220,7 @@ class TestClassifyHealthDays:
         days = _eng._classify_health_days(raw)
         assert days[-1]['leadership'] == "EXHAUSTED"
         assert days[-1]['damaged'] is True
+        assert days[-1]['severity'] == SEVERE
 
     def test_zero_universe_day_is_skipped_not_damaged(self):
         # A data-gap day (universe=0, ratio None) is dropped from the output —

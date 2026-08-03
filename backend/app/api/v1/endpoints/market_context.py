@@ -77,6 +77,18 @@ async def get_current_market_context(db: AsyncSession = Depends(get_db)):
     return {
         "as_of": ctx.as_of.isoformat(),
         "universe_size": ctx.universe_size,
+        "regime": None if ctx.regime is None else {
+            "descriptor": ctx.regime.regime.value,
+            "as_of": ctx.regime.as_of.isoformat() if ctx.regime.as_of else None,
+            "confidence": ctx.regime.confidence,
+            "factors": {
+                "breadth_quality": ctx.regime.breadth_quality,
+                "leadership_health": ctx.regime.leadership_health,
+                "speculative_appetite": ctx.regime.speculative_appetite,
+                "sector_expansion": ctx.regime.sector_expansion,
+                "pullback_environment_quality": ctx.regime.pullback_environment_quality,
+            },
+        },
         "posture": None if ctx.posture is None else {
             "state":       ctx.posture.state,
             "instruction": ctx.posture.instruction,
@@ -122,6 +134,11 @@ async def get_current_market_context(db: AsyncSession = Depends(get_db)):
             "damaged_days":           ctx.health.damaged_days,
             "days_since_last_damage": ctx.health.days_since_last_damage,
             "repair_streak":          ctx.health.repair_streak,
+            "repair_clean_days":      ctx.health.repair_clean_days,
+            "repair_window_days":     ctx.health.repair_window_days,
+            "repair_required_clean_days": ctx.health.repair_required_clean_days,
+            "recent_severe_days":     ctx.health.recent_severe_days,
+            "severe_lookback_days":   ctx.health.severe_lookback_days,
             "series":                 ctx.health.series,
         },
         "engines_pending": ctx.engines_pending,

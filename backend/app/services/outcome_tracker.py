@@ -22,7 +22,7 @@ async def get_current_regime(db: AsyncSession, today: date) -> str:
         try:
             from app.services.market_regime_engine import MarketRegimeEngine
             engine = MarketRegimeEngine(db)
-            analysis = await engine.detect_regime()
+            analysis = await engine.detect_regime(today)
             regime_str = analysis.regime.value if hasattr(analysis.regime, 'value') else str(analysis.regime)
         except Exception as e:
             logger.warning(f"Could not detect regime: {e}")

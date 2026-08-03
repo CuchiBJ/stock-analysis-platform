@@ -156,9 +156,10 @@ class SetupLifecycleEngine:
         self,
         metrics: StockMetrics,
         transition_type: Optional[str] = None,
-    ) -> tuple[float, str, int]:
+        current_regime: Optional[str] = None,
+    ) -> tuple[float, str, int, str]:
         """
-        Returns (probability, source, sample_size).
+        Returns (probability, source, sample_size, empirical_basis).
 
         Tries empirical lookup first (when transition_type is known).
         Falls back to rule-based weighted-composite formula.
@@ -166,13 +167,28 @@ class SetupLifecycleEngine:
         if transition_type:
             try:
                 calc = EmpiricalProbabilityCalculator(self.db)
-                emp = await calc.lookup(transition_type, metrics.relative_strength_spy)
+                emp = await calc.lookup(
+                    transition_type,
+                    metrics.relative_strength_spy,
+                    current_regime=current_regime,
+                    as_of_date=metrics.date,
+                )
                 if emp.source == 'empirical':
-                    return (round(emp.probability, 4), 'empirical', emp.sample_size)
+                    return (
+                        round(emp.probability, 4),
+                        'empirical',
+                        emp.sample_size,
+                        emp.basis,
+                    )
             except Exception as e:
                 logger.warning(f"Empirical lookup failed, using rule-based: {e}")
 
-        return (round(self._rule_based_probability(metrics), 4), 'rule_based', 0)
+        return (
+            round(self._rule_based_probability(metrics), 4),
+            'rule_based',
+            0,
+            'rule_formula',
+        )
 
     def generate_narrative(self, metrics: StockMetrics, state: SetupState) -> str:
         """Short operational narrative."""

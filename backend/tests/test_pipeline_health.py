@@ -5,12 +5,13 @@ Covered:
   - record_cycle — upsert semantics, last_success_at preservation, DB-error safety
 """
 import asyncio
-from datetime import datetime, timedelta
-from unittest.mock import AsyncMock
+from datetime import date, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
 
 import pytz
+from sqlalchemy.dialects import postgresql
 
-from app.api.v1.endpoints.health import compute_market_state
+from app.api.v1.endpoints.health import _coverage, compute_market_state
 from app.data.pipeline_heartbeat import record_cycle
 from app.data.scheduler import DataScheduler
 
@@ -78,6 +79,40 @@ def test_market_state_saturday_returns_closed():
     assert state["is_open"] is False
     assert state["is_warmup"] is False
     assert state["minutes_since_open"] is None
+
+
+# ---- quality cohort coverage -------------------------------------------------
+
+def _scalar_result(value):
+    result = MagicMock()
+    result.scalar.return_value = value
+    return result
+
+
+def test_coverage_uses_same_reference_cohort_for_actual_and_expected():
+    """Today's filter changes must not look like failed metric refreshes."""
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _scalar_result(date(2026, 7, 31)),  # working price date
+        _scalar_result(date(2026, 7, 30)),  # last complete metrics session
+        _scalar_result(619),                # reference quality cohort
+        _scalar_result(618),                # refreshed members of that cohort
+    ])
+
+    coverage = _run(_coverage(db, _et(2026, 7, 31, 13, 0)))
+
+    assert coverage == {"expected": 619, "actual": 618, "pct": 99.8}
+
+    actual_stmt = db.execute.await_args_list[3].args[0]
+    actual_sql = str(actual_stmt.compile(
+        dialect=postgresql.dialect(),
+        compile_kwargs={"literal_binds": True},
+    ))
+    # The actual query selects today's fresh rows, but cohort membership and all
+    # QUALITY_FILTERS are evaluated at the reference date inside the subquery.
+    assert "stock_metrics.date = '2026-07-31'" in actual_sql
+    assert "stock_metrics.date = '2026-07-30'" in actual_sql
+    assert "stock_metrics.symbol IN (SELECT" in actual_sql
 
 
 # ---- clock-skew self-recovery ------------------------------------------------

@@ -42,7 +42,9 @@ The `/api/v1/health/data-freshness` endpoint SHALL include three additional top-
 #### Scenario: Endpoint returns universe coverage
 
 - **WHEN** the endpoint is called
-- **THEN** the response SHALL include a `coverage` object with `expected` (count of symbols passing QUALITY_FILTERS with a `StockPrice` row for today ET), `actual` (count of symbols passing QUALITY_FILTERS with a `StockMetrics` row for today ET updated after market open), and `pct` (float 0-100 = `actual/expected*100`, or 0 if `expected=0`)
+- **THEN** the system SHALL freeze a quality cohort containing the symbols that passed `QUALITY_FILTERS` on the last complete metrics session before the working price date
+- **AND** the response SHALL include a `coverage` object with `expected` (size of that fixed cohort), `actual` (count of symbols from that same cohort with a `StockMetrics` row for the working price date updated after market open), and `pct` (float 0-100 = `actual/expected*100`, or 0 if `expected=0`)
+- **AND** changes in today's quality-filter values SHALL NOT remove a successfully refreshed cohort symbol from `actual`
 
 #### Scenario: Endpoint returns market state
 

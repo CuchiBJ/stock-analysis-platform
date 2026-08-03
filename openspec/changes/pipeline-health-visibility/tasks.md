@@ -21,7 +21,8 @@
 - [x] 3.2 `_heartbeats(db)` agrega `age_seconds` y mapea cada `PipelineHeartbeat` a dict
 - [x] 3.3 `_coverage(db, now_et)` con QUALITY_FILTERS + `StockMetrics.updated_at >= market_open_utc`
 - [x] 3.4 `market_state` integrado en el snapshot
-- [ ] 3.5 Verificar manualmente con `curl http://localhost:8000/api/v1/health/data-freshness | jq` (deferred — requiere correr backend local)
+- [x] 3.5 Verificar manualmente con `curl http://localhost:8000/api/v1/health/data-freshness | jq` → coverage de cohorte fija `618/619 (99.8%)`
+- [x] 3.6 Corregir coverage para que `expected` y `actual` usen la misma cohorte quality de la última sesión completa
 
 ## 4. Backend — tests [data-health-monitoring]
 
@@ -30,6 +31,7 @@
 - [x] 4.3 `test_record_cycle_db_failure_does_not_raise` — DB exception → rollback awaited, no re-raise
 - [x] 4.4 8 casos `compute_market_state` (pre_market / warmup / boundary / regular / after_hours / closed / sábado)
 - [ ] 4.5 Test de integración del endpoint (deferred — el repo no tiene async-DB fixtures; el chequeo manual cubre 8.1)
+- [x] 4.6 Test de regresión: cambios intradía en QUALITY_FILTERS no se contabilizan como fallos de refresh
 
 ## 5. Frontend — tipos y data layer [data-health-monitoring]
 

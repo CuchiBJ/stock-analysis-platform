@@ -58,7 +58,7 @@ class TestHealthCeiling:
         assert _p("EXPANDING", "EXPANDING", "FRAGILE").state == "SELECTIVO"
 
     def test_recovering_health_caps_at_normal_never_agresivo(self):
-        # Repair streak grants NORMAL back, but AGRESIVO requires ROBUST.
+        # Rolling repair evidence grants NORMAL back, but AGRESIVO requires ROBUST.
         assert _p("EXPANDING", "EXPANDING", "RECOVERING").state == "NORMAL"
 
     def test_unknown_health_caps_at_normal(self):
@@ -94,9 +94,18 @@ class TestVerdictContent:
         assert set(cases) == set(POSTURE_ORDER)
 
     def test_unlock_explains_path_out_of_damage(self):
-        v = _p("STABLE", "HEALTHY", "DAMAGED", repair_streak=2, repair_streak_min=5)
-        assert "5 ruedas limpias" in v.unlock
-        assert "racha actual: 2" in v.unlock
+        v = _p(
+            "STABLE", "HEALTHY", "DAMAGED",
+            repair_streak=1,
+            repair_streak_min=5,
+            repair_clean_days=4,
+            repair_window_days=7,
+            recent_severe_days=1,
+            severe_lookback_days=3,
+        )
+        assert "5 de las últimas 7" in v.unlock
+        assert "4/7 limpias" in v.unlock
+        assert "1/3 severas" in v.unlock
 
     def test_unlock_for_recovering_points_to_robust(self):
         v = _p("STABLE", "HEALTHY", "RECOVERING")

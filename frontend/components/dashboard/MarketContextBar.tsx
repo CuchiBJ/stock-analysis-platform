@@ -78,6 +78,7 @@ export interface HealthDayPoint {
   participation: string
   leadership: string
   damaged: boolean
+  severity?: 'clean' | 'mild' | 'severe'
 }
 
 export interface HealthData {
@@ -87,6 +88,11 @@ export interface HealthData {
   damaged_days: number
   days_since_last_damage: number | null
   repair_streak: number
+  repair_clean_days?: number
+  repair_window_days?: number
+  repair_required_clean_days?: number
+  recent_severe_days?: number
+  severe_lookback_days?: number
   series: HealthDayPoint[]
 }
 
@@ -222,9 +228,15 @@ export function DamageStrip({
           width={cellWidth}
           height={height}
           rx={0.5}
-          fill={d.damaged ? '#f87171' : 'rgba(255,255,255,0.12)'}
+          fill={
+            (d.severity ?? (d.damaged ? 'severe' : 'clean')) === 'severe'
+              ? '#f87171'
+              : (d.severity ?? (d.damaged ? 'severe' : 'clean')) === 'mild'
+                ? '#fbbf24'
+                : 'rgba(255,255,255,0.12)'
+          }
         >
-          <title>{`${d.date}: participation ${d.participation} · leadership ${d.leadership}`}</title>
+          <title>{`${d.date}: ${(d.severity ?? (d.damaged ? 'severe' : 'clean')).toUpperCase()} · participation ${d.participation} · leadership ${d.leadership}`}</title>
         </rect>
       ))}
     </svg>
@@ -398,7 +410,7 @@ export default function MarketContextBar() {
               <span className="text-white/20 shrink-0">·</span>
               <div
                 className="flex items-center gap-1.5 shrink-0"
-                title={`Memoria ${ctx.health.window_days} ruedas: ${ctx.health.damaged_days} días dañados en ${ctx.health.episodes} episodio${ctx.health.episodes === 1 ? '' : 's'}, racha limpia ${ctx.health.repair_streak}. La salud tiene memoria: un día bueno no repara semanas de deterioro (se requieren 5 ruedas limpias para RECOVERING).`}
+                title={`Memoria ${ctx.health.window_days} ruedas: ${ctx.health.damaged_days} días dañados en ${ctx.health.episodes} episodio${ctx.health.episodes === 1 ? '' : 's'}. Reparación: ${ctx.health.repair_clean_days ?? ctx.health.repair_streak}/${ctx.health.repair_window_days ?? 7} limpias; ${ctx.health.recent_severe_days ?? 0}/${ctx.health.severe_lookback_days ?? 3} severas. RECOVERING requiere ${ctx.health.repair_required_clean_days ?? 5} de ${ctx.health.repair_window_days ?? 7} limpias y ninguna severa en las últimas ${ctx.health.severe_lookback_days ?? 3}.`}
               >
                 <span className="text-white/40 uppercase tracking-widest text-[10px]">Health</span>
                 <span className={`font-bold tracking-wide ${healthStateColor(ctx.health.state)}`}>
