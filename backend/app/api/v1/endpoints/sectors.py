@@ -4,6 +4,8 @@ from sqlalchemy import select
 from typing import List
 from app.core.deps import get_db
 from app.services.sector_service import SectorService
+from app.services.sector_etf_momentum import SectorEtfMomentumService
+from app.services.market_group_momentum import MarketGroupMomentumService
 from app.services.universe_filters import QUALITY_FILTERS
 from app.models.stock import Stock, StockMetrics
 from app.schemas.sector import Sector as SectorSchema
@@ -40,6 +42,30 @@ async def get_sector_rotation(
     except Exception as e:
         import traceback
         print(f"Error in get_sector_rotation: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/etf-momentum")
+async def get_sector_etf_momentum(db: AsyncSession = Depends(get_db)):
+    """Daily-updated sector ETF view: 4-week leadership plus 5-day acceleration."""
+    try:
+        return await SectorEtfMomentumService(db).calculate_etf_momentum()
+    except Exception as e:
+        import traceback
+        print(f"Error in get_sector_etf_momentum: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/leadership-momentum")
+async def get_sector_leadership_momentum(db: AsyncSession = Depends(get_db)):
+    """Sector Leadership groups enriched with 4-week RS and 5-day acceleration."""
+    try:
+        return await MarketGroupMomentumService(db).calculate_leadership_momentum()
+    except Exception as e:
+        import traceback
+        print(f"Error in get_sector_leadership_momentum: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 

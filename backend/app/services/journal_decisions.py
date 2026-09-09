@@ -26,9 +26,12 @@ def assign_decision_links(trades: list[JournalTrade]) -> int:
     responsible for committing. Returns the number of rows whose parent_trade_id
     changed (useful for dry-run reporting and idempotency checks).
     """
-    by_symbol: dict[str, list[JournalTrade]] = defaultdict(list)
+    # DCA holdings are portfolio accumulation, not performance trades. Keep
+    # their episodes separate from tactical trades in the same symbol while
+    # still grouping repeated DCA buys with each other.
+    by_symbol: dict[tuple[str, bool], list[JournalTrade]] = defaultdict(list)
     for t in trades:
-        by_symbol[t.symbol].append(t)
+        by_symbol[(t.symbol, t.setup == 'dca')].append(t)
 
     changed = 0
     for legs in by_symbol.values():

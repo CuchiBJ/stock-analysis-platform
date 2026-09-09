@@ -71,6 +71,7 @@ interface IndexData {
   trend: string
   above_ema50: boolean
   above_ema200: boolean
+  new_high_52w?: boolean
 }
 
 export interface HealthDayPoint {
@@ -79,6 +80,8 @@ export interface HealthDayPoint {
   leadership: string
   damaged: boolean
   severity?: 'clean' | 'mild' | 'severe'
+  recovery_confirmed?: boolean
+  exceptional_recovery?: boolean
 }
 
 export interface HealthData {
@@ -93,6 +96,9 @@ export interface HealthData {
   repair_required_clean_days?: number
   recent_severe_days?: number
   severe_lookback_days?: number
+  recovery_confirmation_streak?: number
+  recovery_confirmation_required_days?: number
+  exceptional_recovery_session?: boolean
   series: HealthDayPoint[]
 }
 
@@ -101,6 +107,29 @@ export interface PostureData {
   instruction: string
   reasons: string[]
   unlock: string | null
+  policy?: {
+    thresholds: Record<string, number>
+    inputs: {
+      index_bullish: boolean
+      index_above_ema200: boolean
+      index_new_high: boolean
+      breadth_ratio: number | null
+      leader_density: number | null
+      participation: string
+      leadership: string
+    }
+    normal_confirmation_streak: number
+    normal_confirmation_required_days: number
+    normal_active: boolean
+    defensive_active: boolean
+    aggressive_active: boolean
+    exceptional_retained: boolean
+    exceptional_retention_age: number | null
+    today: Record<string, boolean>
+    base_state: string
+    health_ceiling: string
+    final_state: string
+  }
 }
 
 export interface FollowThroughData {
@@ -236,7 +265,7 @@ export function DamageStrip({
                 : 'rgba(255,255,255,0.12)'
           }
         >
-          <title>{`${d.date}: ${(d.severity ?? (d.damaged ? 'severe' : 'clean')).toUpperCase()} · participation ${d.participation} · leadership ${d.leadership}`}</title>
+          <title>{`${d.date}: ${(d.severity ?? (d.damaged ? 'severe' : 'clean')).toUpperCase()} · participation ${d.participation} · leadership ${d.leadership}${d.recovery_confirmed ? ' · RECOVERY CONFIRMED' : ''}${d.exceptional_recovery ? ' · EXCEPTIONAL MOMENTUM' : ''}`}</title>
         </rect>
       ))}
     </svg>
@@ -350,7 +379,7 @@ export default function MarketContextBar() {
         <div className="flex items-center gap-4 text-xs">
           {ctx.index && (
             <>
-              <div className="flex items-center gap-1.5 shrink-0" title={`Tendencia: ${ctx.index.trend}`}>
+              <div className="flex items-center gap-1.5 shrink-0" title={`Tendencia: ${ctx.index.trend}${ctx.index.new_high_52w ? ' · nuevo máximo 52W' : ''}`}>
                 <span className={`font-bold tracking-wide ${trendColor(ctx.index.trend)}`}>
                   {ctx.index.symbol}
                 </span>
@@ -361,6 +390,9 @@ export default function MarketContextBar() {
                   <span className={`text-[10px] font-semibold ${changeColor(ctx.index.change_pct)}`}>
                     {ctx.index.change_pct > 0 ? '+' : ''}{ctx.index.change_pct.toFixed(2)}%
                   </span>
+                )}
+                {ctx.index.new_high_52w && (
+                  <span className="text-[9px] font-bold text-green-400 uppercase tracking-wide">52W high</span>
                 )}
               </div>
               <span className="text-white/20 shrink-0">·</span>
@@ -410,7 +442,7 @@ export default function MarketContextBar() {
               <span className="text-white/20 shrink-0">·</span>
               <div
                 className="flex items-center gap-1.5 shrink-0"
-                title={`Memoria ${ctx.health.window_days} ruedas: ${ctx.health.damaged_days} días dañados en ${ctx.health.episodes} episodio${ctx.health.episodes === 1 ? '' : 's'}. Reparación: ${ctx.health.repair_clean_days ?? ctx.health.repair_streak}/${ctx.health.repair_window_days ?? 7} limpias; ${ctx.health.recent_severe_days ?? 0}/${ctx.health.severe_lookback_days ?? 3} severas. RECOVERING requiere ${ctx.health.repair_required_clean_days ?? 5} de ${ctx.health.repair_window_days ?? 7} limpias y ninguna severa en las últimas ${ctx.health.severe_lookback_days ?? 3}.`}
+                title={`Memoria ${ctx.health.window_days} ruedas: ${ctx.health.damaged_days} días dañados en ${ctx.health.episodes} episodio${ctx.health.episodes === 1 ? '' : 's'}. Confirmación acelerada: ${ctx.health.recovery_confirmation_streak ?? 0}/${ctx.health.recovery_confirmation_required_days ?? 3}${ctx.health.exceptional_recovery_session ? ' · momentum excepcional confirmado' : ''}. Reparación: ${ctx.health.repair_clean_days ?? ctx.health.repair_streak}/${ctx.health.repair_window_days ?? 7} limpias; ${ctx.health.recent_severe_days ?? 0}/${ctx.health.severe_lookback_days ?? 3} severas. RECOVERING requiere ${ctx.health.repair_required_clean_days ?? 5} de ${ctx.health.repair_window_days ?? 7} limpias y ninguna severa en las últimas ${ctx.health.severe_lookback_days ?? 3}.`}
               >
                 <span className="text-white/40 uppercase tracking-widest text-[10px]">Health</span>
                 <span className={`font-bold tracking-wide ${healthStateColor(ctx.health.state)}`}>

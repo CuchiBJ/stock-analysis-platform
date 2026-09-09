@@ -2,6 +2,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
 from typing import List, Optional
 from datetime import datetime, timedelta
+import math
 from app.models.stock import StockPrice, StockMetrics
 from app.data.processors.momentum import (
     calculate_ema, calculate_sma, calculate_rsi,
@@ -16,6 +17,14 @@ import pandas as pd
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _optional_finite_float(value) -> Optional[float]:
+    """Represent unavailable rolling indicators as NULL, never NaN/Infinity."""
+    if value is None or pd.isna(value):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
 
 
 class MetricsCalculator:
@@ -122,6 +131,9 @@ class MetricsCalculator:
             sma50 = calculate_sma(close_prices, 50).iloc[-1]
             sma150 = calculate_sma(close_prices, 150).iloc[-1]
             sma200 = calculate_sma(close_prices, 200).iloc[-1]
+            sma50_value = _optional_finite_float(sma50)
+            sma150_value = _optional_finite_float(sma150)
+            sma200_value = _optional_finite_float(sma200)
             
             rsi = calculate_rsi(close_prices, 14).iloc[-1]
             
@@ -224,9 +236,9 @@ class MetricsCalculator:
                 existing_metrics.avg_volume_20d = int(avg_vol_20d)
                 existing_metrics.relative_volume = rel_vol
                 # New indicators
-                existing_metrics.sma50 = float(sma50)
-                existing_metrics.sma150 = float(sma150)
-                existing_metrics.sma200 = float(sma200)
+                existing_metrics.sma50 = sma50_value
+                existing_metrics.sma150 = sma150_value
+                existing_metrics.sma200 = sma200_value
                 existing_metrics.perf_1y = float(perf_1y)
                 existing_metrics.perf_1w = float(perf_1w)
                 existing_metrics.perf_4w = float(perf_4w)
@@ -279,9 +291,9 @@ class MetricsCalculator:
                     avg_volume_20d=int(avg_vol_20d),
                     relative_volume=rel_vol,
                     # New indicators
-                    sma50=float(sma50),
-                    sma150=float(sma150),
-                    sma200=float(sma200),
+                    sma50=sma50_value,
+                    sma150=sma150_value,
+                    sma200=sma200_value,
                     perf_1y=float(perf_1y),
                     perf_1w=float(perf_1w),
                     perf_4w=float(perf_4w),

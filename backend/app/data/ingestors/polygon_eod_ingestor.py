@@ -97,9 +97,13 @@ class PolygonEODIngestor:
                 "note": "no data for date (weekend/holiday/pre-availability)",
             }
 
-        # Universe filter — only symbols in our stocks table
+        # Universe filter — stocks plus reference instruments used for market context.
+        # Sector ETFs intentionally need not exist in `stocks`: they are context,
+        # not candidates for the setup scanners.
         result = await self.db.execute(select(Stock.symbol))
         universe = {row[0] for row in result.fetchall()}
+        from app.services.sector_etf_momentum import BENCHMARK, SECTOR_ETFS
+        universe.update({BENCHMARK, *SECTOR_ETFS})
 
         in_universe = [b for b in bars if b["symbol"] in universe]
         skipped_invalid = sum(

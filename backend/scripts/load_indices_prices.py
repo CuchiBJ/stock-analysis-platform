@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load prices for major indices (SPY, QQQ, IWM, DIA)"""
+"""Load prices for broad benchmarks and standard US sector SPDR ETFs."""
 import sys
 sys.path.insert(0, '/home/fernando/repositorios/stock-analysis-platform/backend')
 
@@ -19,8 +19,13 @@ async def main():
     engine = create_async_engine(DATABASE_URL)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     
-    # Major indices ETFs
-    index_symbols = ['SPY', 'QQQ', 'IWM', 'DIA']
+    # Broad benchmarks plus the complete standard sector SPDR set.  Sector ETF
+    # closes provide secondary confirmation for official sectors and are not stock setups.
+    index_symbols = [
+        'SPY', 'QQQ', 'IWM', 'DIA',
+        'XLB', 'XLC', 'XLE', 'XLF', 'XLI', 'XLK',
+        'XLP', 'XLRE', 'XLU', 'XLV', 'XLY',
+    ]
     
     async with async_session() as db:
         for symbol in index_symbols:

@@ -771,6 +771,11 @@ class DataScheduler:
                 ingestor = StockIngestor(db)
                 symbols = await ingestor.get_active_symbols(limit=None)
 
+            # Reference instruments live in stock_prices but need not be stock
+            # setups in the active universe. Keep their closes fresh explicitly.
+            from app.services.sector_etf_momentum import BENCHMARK, SECTOR_ETFS
+            symbols = list(dict.fromkeys([*symbols, BENCHMARK, *SECTOR_ETFS]))
+
             logger.info(f"Starting yfinance price update for {len(symbols)} symbols")
             count = await asyncio.get_event_loop().run_in_executor(
                 None, self._bulk_download_prices_sync, symbols

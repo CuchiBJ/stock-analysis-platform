@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
 from app.models.stock import JournalTrade, JournalStopEvent, TransitionObservation
+from app.services.journal_decisions import assign_decision_links
 from app.services.journal_importer import JournalImporter
 from app.services.journal_snapshot_service import (
     reconstruct_regime_at_entry,
@@ -47,6 +48,16 @@ EXIT_REASON_OPTIONS = [
 ]
 
 DEFAULT_COMMISSION = 1.0
+_NON_PERFORMANCE_SETUPS = frozenset({'dca'})
+
+
+def _is_performance_trade(trade: JournalTrade) -> bool:
+    """Whether a journal row belongs to the active-trading scorecard."""
+    return trade.setup not in _NON_PERFORMANCE_SETUPS
+
+
+def _performance_trades(trades: list[JournalTrade]) -> list[JournalTrade]:
+    return [trade for trade in trades if _is_performance_trade(trade)]
 
 
 @router.post("/import")
@@ -92,9 +103,31 @@ async def list_trades(
         q = q.where(JournalTrade.exit_date.is_not(None))
 
     rows = (await db.execute(q)).scalars().all()
+    all_rows = (await db.execute(select(JournalTrade))).scalars().all()
+    decisions = _group_decisions(all_rows)
+    decision_outcomes = {
+        decision_id: _classify_resolved_decision(legs)
+        for decision_id, legs in decisions.items()
+    }
+    decision_result_details = {
+        decision_id: _decision_result_detail(legs)
+        for decision_id, legs in decisions.items()
+    }
+    decision_runner_be_ids = {
+        decision_id: _decision_runner_breakeven_id(legs)
+        for decision_id, legs in decisions.items()
+    }
     return {
         "count": len(rows),
-        "trades": [_trade_to_dict(t) for t in rows],
+        "trades": [
+            _trade_to_dict(
+                t,
+                decision_outcome=decision_outcomes.get(_decision_id(t)),
+                decision_result_detail=decision_result_details.get(_decision_id(t)),
+                decision_runner_breakeven_id=decision_runner_be_ids.get(_decision_id(t)),
+            )
+            for t in rows
+        ],
     }
 
 
@@ -165,6 +198,21 @@ def _be_band_dollars(t: JournalTrade) -> float:
     if t.entry_price is not None and t.qty:
         return _BE_PCT_BAND * abs(t.entry_price * t.qty)
     return 0.0
+
+
+def _is_trade_break_even(t: JournalTrade, pnl: float) -> bool:
+    """Treat an explicit near-zero R as BE before considering dollar P&L.
+
+    Commissions can make an execution with a price-based result of only a few
+    hundredths of R look like a small dollar loss. R is the normalized outcome
+    shown to the operator, so the canonical ±0.1R scratch band takes priority
+    whenever R is available. The existing dollar band remains as fallback and
+    for records whose R cannot be derived.
+    """
+    r_multiple = _derive_r(t)
+    if r_multiple is not None and abs(r_multiple) <= _BE_R_BAND:
+        return True
+    return abs(pnl) <= _be_band_dollars(t)
 
 
 _STOP_BE_TOLERANCE = 1e-6
@@ -248,7 +296,7 @@ def _aggregate(trades: list[JournalTrade]) -> dict:
     losses: list[tuple[JournalTrade, float]] = []
     breakeven: list[tuple[JournalTrade, float]] = []
     for t, p in with_pnl:
-        if abs(p) <= _be_band_dollars(t):
+        if _is_trade_break_even(t, p):
             breakeven.append((t, p))
         elif p > 0:
             wins.append((t, p))
@@ -284,10 +332,94 @@ def _aggregate(trades: list[JournalTrade]) -> dict:
     }
 
 
+def _decision_id(t: JournalTrade) -> int:
+    return t.parent_trade_id if t.parent_trade_id is not None else t.id
+
+
+def _group_decisions(trades: list[JournalTrade]) -> dict[int, list[JournalTrade]]:
+    decisions: dict[int, list[JournalTrade]] = {}
+    for trade in trades:
+        decisions.setdefault(_decision_id(trade), []).append(trade)
+    return decisions
+
+
 def _decision_rep(legs: list[JournalTrade]) -> JournalTrade:
     """Representative leg of a decision = the original Compra (no parent),
     falling back to the earliest-id leg when the entry itself isn't in the set."""
     return next((l for l in legs if l.parent_trade_id is None), None) or min(legs, key=lambda l: l.id)
+
+
+_RUNNER_BREAKEVEN = 'runner_breakeven'
+
+
+def _decision_weighted_r(legs: list[JournalTrade]) -> Optional[float]:
+    """Quantity-weighted decision R across closed executions."""
+    rs_with_qty = [
+        (r, leg.qty)
+        for leg in legs
+        if leg.exit_date is not None
+        and (r := _derive_r(leg)) is not None
+        and leg.qty
+    ]
+    if not rs_with_qty:
+        return None
+    total_qty = sum(qty for _, qty in rs_with_qty)
+    return sum(r * qty for r, qty in rs_with_qty) / total_qty
+
+
+def _decision_runner_breakeven_id(legs: list[JournalTrade]) -> Optional[int]:
+    """Detect a profitable partial followed by an exact entry-price runner exit.
+
+    This intentionally introduces no price tolerance: ``exit_price`` must equal
+    that execution's real ``entry_price``. The runner must be unambiguous from
+    the stored data: either the unique latest dated exit, or the representative
+    remainder with an explicitly linked ``partial_take`` child (which also works
+    when both fills share the same date and the journal has no execution time).
+    """
+    if len(legs) < 2 or any(leg.exit_date is None for leg in legs):
+        return None
+
+    closed_legs = [leg for leg in legs if leg.exit_date is not None]
+    profitable_legs = [
+        leg for leg in closed_legs
+        if (pnl := _derive_pnl(leg)) is not None and pnl > 0
+    ]
+    if not profitable_legs:
+        return None
+
+    net_pnl = sum(
+        pnl for pnl in (_derive_pnl(leg) for leg in closed_legs) if pnl is not None
+    )
+    if net_pnl <= 0:
+        return None
+
+    latest_exit = max(leg.exit_date for leg in closed_legs)
+    latest_legs = [leg for leg in closed_legs if leg.exit_date == latest_exit]
+
+    for runner in closed_legs:
+        if runner.exit_price is None or runner.entry_price is None:
+            continue
+        if runner.exit_price != runner.entry_price:
+            continue
+
+        is_unique_latest = len(latest_legs) == 1 and latest_legs[0].id == runner.id
+        has_earlier_profit = any(
+            leg.id != runner.id and leg.exit_date < runner.exit_date
+            for leg in profitable_legs
+        )
+        if is_unique_latest and has_earlier_profit:
+            return runner.id
+
+        has_explicit_profitable_partial = any(
+            leg.id != runner.id
+            and leg.parent_trade_id == runner.id
+            and leg.exit_reason == 'partial_take'
+            for leg in profitable_legs
+        )
+        if runner.parent_trade_id is None and has_explicit_profitable_partial:
+            return runner.id
+
+    return None
 
 
 def _classify_resolved_decision(legs: list[JournalTrade]) -> Optional[str]:
@@ -295,9 +427,9 @@ def _classify_resolved_decision(legs: list[JournalTrade]) -> Optional[str]:
 
     Returns None when the decision still has open legs or no resolvable P&L,
     so it contributes nothing to win-rate denominators. Mirrors the exact
-    decision-level WR convention used inline in journal_stats: BE band summed
-    across closed legs, and "booked a partial gain then ended net ≥ 0" counts
-    as a win rather than a scratch.
+    decision-level WR convention used inline in journal_stats: quantity-weighted
+    R inside ±0.1 takes priority as a scratch; otherwise the dollar BE band and
+    existing partial-gain rules apply.
     """
     closed_legs = [l for l in legs if l.exit_date is not None]
     open_legs = [l for l in legs if l.exit_date is None]
@@ -307,11 +439,16 @@ def _classify_resolved_decision(legs: list[JournalTrade]) -> Optional[str]:
     if not closed_pnls:
         return None
     net_pnl = sum(closed_pnls)
+    weighted_r = _decision_weighted_r(closed_legs)
+    if weighted_r is not None and abs(weighted_r) <= _BE_R_BAND:
+        return 'breakeven'
     be_band = sum(_be_band_dollars(l) for l in closed_legs)
     booked_partial_gain = any(
         (p := _derive_pnl(l)) is not None and p > _be_band_dollars(l)
         for l in closed_legs
     )
+    if _decision_runner_breakeven_id(legs) is not None:
+        return 'win'
     if net_pnl > be_band:
         return 'win'
     if net_pnl < -be_band:
@@ -319,6 +456,38 @@ def _classify_resolved_decision(legs: list[JournalTrade]) -> Optional[str]:
     if booked_partial_gain and net_pnl >= 0:
         return 'win'
     return 'breakeven'
+
+
+def _decision_result_detail(legs: list[JournalTrade]) -> Optional[str]:
+    """Secondary context; never replaces the canonical economic outcome."""
+    if _classify_resolved_decision(legs) != 'win':
+        return None
+    if _decision_runner_breakeven_id(legs) is not None:
+        return _RUNNER_BREAKEVEN
+    return None
+
+
+def _decision_economic_metrics(
+    decisions: dict[int, list[JournalTrade]],
+) -> dict[str, Optional[float]]:
+    """Split fully resolved decision P&L into signed winner/loser amounts."""
+    wins: list[float] = []
+    losses: list[float] = []
+    for legs in decisions.values():
+        outcome = _classify_resolved_decision(legs)
+        if outcome not in {'win', 'loss'}:
+            continue
+        net_pnl = sum(
+            p for p in (_derive_pnl(leg) for leg in legs) if p is not None
+        )
+        (wins if outcome == 'win' else losses).append(net_pnl)
+
+    return {
+        "decision_average_gain": sum(wins) / len(wins) if wins else None,
+        "decision_average_loss": sum(losses) / len(losses) if losses else None,
+        "decision_total_gains": sum(wins, 0.0),
+        "decision_total_losses": sum(losses, 0.0),
+    }
 
 
 # Trailing window (in resolved decisions) for the rolling win-rate line. Small
@@ -329,11 +498,11 @@ _WR_ROLLING_WINDOW = 20
 @router.get("/stats")
 async def journal_stats(db: AsyncSession = Depends(get_db)):
     """Returns overall metrics + breakdowns by setup, context, and setup×context."""
-    rows = (
+    rows = _performance_trades((
         await db.execute(
             select(JournalTrade).where(JournalTrade.exit_date.is_not(None))
         )
-    ).scalars().all()
+    ).scalars().all())
 
     overall = _aggregate(rows)
 
@@ -398,13 +567,10 @@ async def journal_stats(db: AsyncSession = Depends(get_db)):
     # parent_trade_id). WR / Total R must be measured here, not at row level,
     # because a single decision producing 2 winning partial sells should count
     # as 1 winner, not 2.
-    all_trade_rows = (
+    all_trade_rows = _performance_trades((
         await db.execute(select(JournalTrade))
-    ).scalars().all()
-    decisions: dict[int, list[JournalTrade]] = {}
-    for t in all_trade_rows:
-        decision_id = t.parent_trade_id if t.parent_trade_id is not None else t.id
-        decisions.setdefault(decision_id, []).append(t)
+    ).scalars().all())
+    decisions = _group_decisions(all_trade_rows)
 
     n_fully_resolved = 0
     n_partially_resolved = 0
@@ -430,13 +596,9 @@ async def journal_stats(db: AsyncSession = Depends(get_db)):
         net_pnl = sum(closed_pnls) if closed_pnls else 0.0
         decision_total_realized_pnl += net_pnl
         # Qty-weighted R for the decision
-        rs_with_qty = [
-            (_derive_r(l), l.qty) for l in closed_legs
-            if _derive_r(l) is not None and l.qty
-        ]
-        if rs_with_qty:
-            tot_qty = sum(q for _, q in rs_with_qty)
-            decision_total_r += sum(r * q for r, q in rs_with_qty) / tot_qty
+        weighted_r = _decision_weighted_r(closed_legs)
+        if weighted_r is not None:
+            decision_total_r += weighted_r
         # WR classification only for fully_resolved decisions — same convention
         # (BE band summed across legs, booked-partial-gain rescue) extracted into
         # _classify_resolved_decision so the win-rate-evolution series below and
@@ -463,6 +625,7 @@ async def journal_stats(db: AsyncSession = Depends(get_db)):
         "decision_total_r": decision_total_r if any(
             _derive_r(l) is not None for legs in decisions.values() for l in legs
         ) else None,
+        **_decision_economic_metrics(decisions),
     }
 
     # Risk evolution by month — surfaces R unit shrinkage / scaling over time.
@@ -487,7 +650,7 @@ async def journal_stats(db: AsyncSession = Depends(get_db)):
         wins = losses = 0
         for t in bucket:
             p = _derive_pnl(t)
-            if p is None or abs(p) <= _be_band_dollars(t):
+            if p is None or _is_trade_break_even(t, p):
                 continue
             if p > 0:
                 wins += 1
@@ -519,14 +682,14 @@ async def journal_stats(db: AsyncSession = Depends(get_db)):
         if outcome is None:
             continue
         rep = _decision_rep(legs)
-        resolved_decisions.append((rep.entry_date, did, outcome))
+        resolved_decisions.append((rep.entry_date, did, outcome, legs))
     # Chronological by entry date; id tiebreak keeps same-day ordering stable.
     resolved_decisions.sort(key=lambda x: (x[0] or date.min, x[1]))
-    outcomes_seq = [o for _, _, o in resolved_decisions]
+    outcomes_seq = [o for _, _, o, _ in resolved_decisions]
 
     win_rate_evolution = []
     cum_wins = cum_losses = 0
-    for i, (entry_dt, did, outcome) in enumerate(resolved_decisions):
+    for i, (entry_dt, did, outcome, legs) in enumerate(resolved_decisions):
         if outcome == 'win':
             cum_wins += 1
         elif outcome == 'loss':
@@ -544,6 +707,21 @@ async def journal_stats(db: AsyncSession = Depends(get_db)):
             "rolling_win_rate": (w_win / (w_win + w_loss)) if (w_win + w_loss) > 0 else None,
             "cumulative_wins": cum_wins,
             "cumulative_losses": cum_losses,
+            "trade": {
+                "id": did,
+                "symbol": _decision_rep(legs).symbol,
+                "direction": "long",
+                "entry_date": entry_dt.isoformat() if entry_dt else None,
+                "exit_date": max(
+                    (leg.exit_date for leg in legs if leg.exit_date is not None),
+                    default=None,
+                ).isoformat() if legs else None,
+                "pnl_dollars": sum(
+                    p for p in (_derive_pnl(leg) for leg in legs) if p is not None
+                ),
+                "execution_ids": sorted(leg.id for leg in legs),
+                "result_detail": _decision_result_detail(legs),
+            },
         })
 
     # Data starvation honesty: count of (setup, context) buckets with < 5 trades
@@ -553,12 +731,14 @@ async def journal_stats(db: AsyncSession = Depends(get_db)):
     open_count = (
         await db.execute(
             select(func.count(JournalTrade.id)).where(JournalTrade.exit_date.is_(None))
+            .where(JournalTrade.setup.notin_(_NON_PERFORMANCE_SETUPS))
         )
     ).scalar() or 0
 
     linked_count = (
         await db.execute(
             select(func.count(JournalTrade.id)).where(JournalTrade.linked_observation_id.is_not(None))
+            .where(JournalTrade.setup.notin_(_NON_PERFORMANCE_SETUPS))
         )
     ).scalar() or 0
 
@@ -566,11 +746,15 @@ async def journal_stats(db: AsyncSession = Depends(get_db)):
     # over total. Null means "operator never marked it" — denominator only. This
     # tells the operator whether the take-from-queue workflow is being used.
     total_count_for_provenance = (
-        await db.execute(select(func.count(JournalTrade.id)))
+        await db.execute(
+            select(func.count(JournalTrade.id))
+            .where(JournalTrade.setup.notin_(_NON_PERFORMANCE_SETUPS))
+        )
     ).scalar() or 0
     marked_count = (
         await db.execute(
             select(func.count(JournalTrade.id)).where(JournalTrade.from_queue.is_not(None))
+            .where(JournalTrade.setup.notin_(_NON_PERFORMANCE_SETUPS))
         )
     ).scalar() or 0
     provenance_capture_rate = (
@@ -749,7 +933,12 @@ async def backfill_regime(
 # --- CRUD: replace the spreadsheet ----------------------------------------------
 
 
-def _trade_to_dict(t: JournalTrade) -> dict:
+def _trade_to_dict(
+    t: JournalTrade,
+    decision_outcome: Optional[str] = None,
+    decision_result_detail: Optional[str] = None,
+    decision_runner_breakeven_id: Optional[int] = None,
+) -> dict:
     # All derived fields (cost_total, pnl_dollars, pnl_pct, r_multiple,
     # duration_days) fall back to on-the-fly computation when the persisted
     # cache is NULL. This handles both new trades that skip eager persistence
@@ -766,6 +955,7 @@ def _trade_to_dict(t: JournalTrade) -> dict:
     return {
         "id": t.id,
         "symbol": t.symbol,
+        "direction": "long",
         "setup": t.setup,
         "context": t.context,
         "entry_date": t.entry_date.isoformat() if t.entry_date else None,
@@ -800,7 +990,10 @@ def _trade_to_dict(t: JournalTrade) -> dict:
             and t.stop_price + _STOP_BE_TOLERANCE >= t.entry_price
         ),
         "parent_trade_id": t.parent_trade_id,
-        "decision_id": t.parent_trade_id if t.parent_trade_id is not None else t.id,
+        "decision_id": _decision_id(t),
+        "decision_outcome": decision_outcome,
+        "decision_result_detail": decision_result_detail,
+        "is_runner_breakeven_exit": decision_runner_breakeven_id == t.id,
     }
 
 
@@ -970,6 +1163,13 @@ async def create_open_trade(payload: OpenTradeIn, db: AsyncSession = Depends(get
         initial_stop_price=payload.stop_price,  # immutable snapshot of planned risk
     )
     db.add(trade)
+    await db.flush()
+    # Manual entries must use the same position-episode grouping as imports:
+    # another open buy in the same symbol belongs to the existing decision.
+    symbol_trades = (
+        await db.execute(select(JournalTrade).where(JournalTrade.symbol == symbol))
+    ).scalars().all()
+    assign_decision_links(symbol_trades)
     await db.commit()
     await db.refresh(trade)
     # Log the initial stop event after the trade has an id assigned.

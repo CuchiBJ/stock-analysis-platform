@@ -11,6 +11,16 @@ export interface WinRatePoint {
   rolling_win_rate: number | null
   cumulative_wins: number
   cumulative_losses: number
+  trade: {
+    id: number
+    symbol: string
+    direction: 'long'
+    entry_date: string | null
+    exit_date: string | null
+    pnl_dollars: number
+    execution_ids: number[]
+    result_detail: 'runner_breakeven' | null
+  }
 }
 
 // Palette validated (dataviz skill, light+dark) — CVD-safe pair, both series
@@ -45,9 +55,11 @@ function buildPath(
 export default function WinRateEvolutionChart({
   data,
   rollingWindow,
+  onOpenDecision,
 }: {
   data: WinRatePoint[]
   rollingWindow: number
+  onOpenDecision: (decisionId: number) => void
 }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(720)
@@ -110,7 +122,7 @@ export default function WinRateEvolutionChart({
   }
 
   return (
-    <div ref={wrapRef} className="w-full select-none">
+    <div ref={wrapRef} className="w-full select-none" onMouseLeave={() => setHover(null)}>
       {/* Legend — always present for ≥2 series */}
       <div className="flex items-center gap-4 px-1 pb-2 text-[10px] text-muted-foreground flex-wrap">
         <span className="inline-flex items-center gap-1.5">
@@ -209,33 +221,63 @@ export default function WinRateEvolutionChart({
           width={Math.max(1, width - PAD.left - PAD.right)} height={HEIGHT - PAD.top - PAD.bottom}
           fill="transparent"
           onMouseMove={onMove}
-          onMouseLeave={() => setHover(null)}
         />
       </svg>
 
       {/* Tooltip readout — below the plot, avoids clipping at the SVG edges */}
-      <div className="px-1 pt-1 min-h-[2.25rem] text-[11px]">
+      <div className="px-1 pt-1 min-h-[2.25rem] text-[11px]" aria-live="polite">
         {hp ? (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5">
-            <span className="text-muted-foreground">
-              Decisión <span className="text-foreground tabular-nums">#{hp.i}</span>
-              {hp.entry_date && <span className="text-muted-foreground/70"> · {hp.entry_date}</span>}
-            </span>
-            <span style={{ color: CUM_COLOR }} className="tabular-nums">
-              Acumulado {pctLabel(hp.cumulative_win_rate)}
-            </span>
-            <span style={{ color: ROLL_COLOR }} className="tabular-nums">
-              Reciente {pctLabel(hp.rolling_win_rate)}
-            </span>
-            <span className="text-muted-foreground/70 tabular-nums">
-              {hp.cumulative_wins}W / {hp.cumulative_losses}L acum.
-            </span>
-            <span className={
-              hp.outcome === 'win' ? 'text-green-400'
-                : hp.outcome === 'loss' ? 'text-red-400' : 'text-muted-foreground'
-            }>
-              {hp.outcome === 'win' ? 'ganada' : hp.outcome === 'loss' ? 'perdida' : 'scratch'}
-            </span>
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() => onOpenDecision(hp.trade.id)}
+              className="w-full rounded border border-border/70 bg-background/50 px-3 py-2 text-left hover:bg-muted/40 hover:border-blue-400/40 transition-colors focus:outline-none focus:ring-1 focus:ring-blue-400/70"
+              title="Abrir el detalle de esta operación en la lista"
+            >
+              <span className="flex items-center justify-between gap-3">
+                <span className="font-semibold text-foreground">Trade #{hp.trade.id} · {hp.trade.symbol}</span>
+                <span className={hp.trade.pnl_dollars >= 0 ? 'text-green-400 tabular-nums' : 'text-red-400 tabular-nums'}>
+                  {hp.trade.pnl_dollars < 0 ? '-' : ''}${Math.abs(hp.trade.pnl_dollars).toFixed(2)}
+                </span>
+              </span>
+              <span className="mt-1 block text-[10px] text-muted-foreground">
+                Dirección: Long · Entrada: {hp.trade.entry_date ?? '—'} · Salida: {hp.trade.exit_date ?? '—'}
+              </span>
+              <span className="mt-1 flex items-center justify-between gap-2 text-[10px]">
+                <span className={
+                  hp.outcome === 'win' ? 'text-green-400'
+                    : hp.outcome === 'loss' ? 'text-red-400' : 'text-amber-400'
+                }>
+                  Resultado: {hp.outcome === 'win' ? 'Ganado' : hp.outcome === 'loss' ? 'Pérdida' : 'Break even'}
+                </span>
+                <span className="text-blue-300">Abrir detalle →</span>
+              </span>
+              {hp.trade.result_detail === 'runner_breakeven' && (
+                <span
+                  className="mt-1 inline-block rounded border border-green-500/30 bg-green-500/10 px-1.5 py-0.5 text-[9px] font-medium text-green-300"
+                  title="La operación terminó con ganancia total; el remanente salió exactamente al precio de entrada."
+                >
+                  Ganada parcial · runner BE
+                </span>
+              )}
+              <span className="mt-1 block text-[9px] text-muted-foreground/60">
+                Ejecuciones: {hp.trade.execution_ids.map(id => `#${id}`).join(', ')}
+              </span>
+            </button>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5">
+              <span style={{ color: CUM_COLOR }} className="tabular-nums">
+                Acumulado {pctLabel(hp.cumulative_win_rate)}
+              </span>
+              <span style={{ color: ROLL_COLOR }} className="tabular-nums">
+                Reciente {pctLabel(hp.rolling_win_rate)}
+              </span>
+              <span className="text-muted-foreground/70 tabular-nums">
+                {hp.cumulative_wins}W / {hp.cumulative_losses}L acum.
+              </span>
+            </div>
+            <p className="text-[9px] text-muted-foreground/50">
+              El journal conserva fecha de entrada/salida; la fuente actual no provee hora de ejecución.
+            </p>
           </div>
         ) : (
           <span className="text-muted-foreground/50">Pasá el cursor sobre la curva para ver cada decisión.</span>

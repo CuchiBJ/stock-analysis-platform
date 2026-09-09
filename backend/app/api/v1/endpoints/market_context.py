@@ -39,7 +39,7 @@ async def _build_index_block(db: AsyncSession, symbol: str = "SPY"):
     m = (await db.execute(
         select(
             StockMetrics.ema50, StockMetrics.ema200,
-            StockMetrics.sma150, StockMetrics.sma200,
+            StockMetrics.sma150, StockMetrics.sma200, StockMetrics.high_52w,
         )
         .where(StockMetrics.symbol == symbol)
         .order_by(desc(StockMetrics.date))
@@ -49,6 +49,7 @@ async def _build_index_block(db: AsyncSession, symbol: str = "SPY"):
     ema200 = m.ema200 if m else None
     sma150 = m.sma150 if m else None
     sma200 = m.sma200 if m else None
+    high_52w = m.high_52w if m else None
 
     return {
         "symbol": symbol,
@@ -57,6 +58,7 @@ async def _build_index_block(db: AsyncSession, symbol: str = "SPY"):
         "trend": compute_index_trend(price, ema50, ema200, sma150, sma200),
         "above_ema50": (ema50 is not None and price > ema50),
         "above_ema200": (ema200 is not None and price > ema200),
+        "new_high_52w": (high_52w is not None and price >= high_52w),
     }
 
 
@@ -94,6 +96,7 @@ async def get_current_market_context(db: AsyncSession = Depends(get_db)):
             "instruction": ctx.posture.instruction,
             "reasons":     ctx.posture.reasons,
             "unlock":      ctx.posture.unlock,
+            "policy":      ctx.posture.policy,
         },
         "participation": {
             "descriptor":           ctx.participation.descriptor,
@@ -139,6 +142,9 @@ async def get_current_market_context(db: AsyncSession = Depends(get_db)):
             "repair_required_clean_days": ctx.health.repair_required_clean_days,
             "recent_severe_days":     ctx.health.recent_severe_days,
             "severe_lookback_days":   ctx.health.severe_lookback_days,
+            "recovery_confirmation_streak": ctx.health.recovery_confirmation_streak,
+            "recovery_confirmation_required_days": ctx.health.recovery_confirmation_required_days,
+            "exceptional_recovery_session": ctx.health.exceptional_recovery_session,
             "series":                 ctx.health.series,
         },
         "engines_pending": ctx.engines_pending,

@@ -27,12 +27,15 @@ from app.services.follow_through import (
     classify_provisional,
 )
 from app.services.market_posture import Posture, compute_posture
+from app.services.market_posture_policy import evaluate_policy_history
 from app.services.market_health import (
     CLEAN,
     SEVERE,
     DamageSeverity,
     classify_damage_severity,
     compute_health_state,
+    is_confirmed_recovery_session,
+    is_exceptional_recovery_session,
 )
 from app.services.market_regime_engine import MarketRegimeAnalysis, MarketRegimeEngine
 from app.services.quality_leader_gate import is_quality_leader
@@ -106,6 +109,10 @@ class HealthAnalysis:
     repair_required_clean_days: int
     recent_severe_days: int    # severe sessions inside the recent veto window
     severe_lookback_days: int  # sessions considered (≤3)
+    recovery_confirmation_streak: int  # trailing sessions with level + rate confirmation
+    recovery_confirmation_required_days: int
+    exceptional_recovery_session: bool
+    posture_policy: dict
     series: list = field(default_factory=list)  # [{date, participation, leadership, damaged}] ascending
 
 
@@ -197,6 +204,15 @@ class MarketContextEngine:
             repair_window_days=health.repair_window_days,
             recent_severe_days=health.recent_severe_days,
             severe_lookback_days=health.severe_lookback_days,
+            recovery_confirmation_streak=health.recovery_confirmation_streak,
+            recovery_confirmation_required_days=health.recovery_confirmation_required_days,
+            exceptional_recovery_session=health.exceptional_recovery_session,
+            index_bullish=health.series[-1].get('index_bullish', False) if health.series else False,
+            index_above_ema200=health.series[-1].get('index_above_ema200', False) if health.series else False,
+            index_new_high=health.series[-1].get('index_new_high', False) if health.series else False,
+            breadth_ratio=participation.metrics['breadth_above_ema21'],
+            leader_density=leadership.metrics['leader_density'],
+            policy_evidence=health.posture_policy,
             follow_through=follow_through.descriptor,
             ft_delivery=follow_through.delivery_rate,
             ft_baseline=follow_through.baseline_rate,
@@ -713,9 +729,12 @@ class MarketContextEngine:
             as_of, _HEALTH_WINDOW + _HEALTH_DELTA_LOOKBACK
         )
         days = self._classify_health_days(raw)[-_HEALTH_WINDOW:]
+        posture_policy = evaluate_policy_history(days)
         verdict = self._health_state(
             [d['damaged'] for d in days],
             [d['severity'] for d in days],
+            [d['recovery_confirmed'] for d in days],
+            [d['exceptional_recovery'] for d in days],
         )
         return HealthAnalysis(
             state=verdict['state'],
@@ -729,6 +748,10 @@ class MarketContextEngine:
             repair_required_clean_days=verdict['repair_required_clean_days'],
             recent_severe_days=verdict['recent_severe_days'],
             severe_lookback_days=verdict['severe_lookback_days'],
+            recovery_confirmation_streak=verdict['recovery_confirmation_streak'],
+            recovery_confirmation_required_days=verdict['recovery_confirmation_required_days'],
+            exceptional_recovery_session=verdict['exceptional_recovery_session'],
+            posture_policy=posture_policy,
             series=[
                 {
                     'date':          d['date'].isoformat(),
@@ -736,6 +759,14 @@ class MarketContextEngine:
                     'leadership':    d['leadership'],
                     'damaged':       d['damaged'],
                     'severity':      d['severity'],
+                    'recovery_confirmed': d['recovery_confirmed'],
+                    'exceptional_recovery': d['exceptional_recovery'],
+                    'index_bullish': d['index_bullish'],
+                    'index_above_ema200': d['index_above_ema200'],
+                    'index_new_high': d['index_new_high'],
+                    'breadth_ratio': round(d['breadth_ratio'], 4),
+                    'leader_density': round(d['leader_density'], 4),
+                    'policy_signals': d.get('policy_signals', {}),
                 }
                 for d in days
             ],
@@ -745,7 +776,7 @@ class MarketContextEngine:
         """Per-day raw inputs for the health engine over the last n trading days.
 
         Returns ascending [{date, universe, breadth_ratio, leader_count,
-        extension_count}] in 3 grouped/bulk queries total (independent of n) —
+        extension_count, index_bullish}] in grouped/bulk queries independent of n —
         cheaper per day than the per-date fetches in _history/_leadership_level.
         A date with no universe rows yields breadth_ratio=None so the classifier
         can skip it (a data gap must never count as damage).
@@ -810,6 +841,48 @@ class MarketContextEngine:
                 if row.distance_to_ema21_atr is not None and row.distance_to_ema21_atr > 3.0:
                     extension_by_date[row.date] = extension_by_date.get(row.date, 0) + 1
 
+        index_result = await self._db.execute(
+            select(
+                StockMetrics.date,
+                StockMetrics.current_price,
+                StockMetrics.ema50,
+                StockMetrics.ema200,
+                StockMetrics.high_52w,
+            )
+            .where(
+                StockMetrics.symbol == "SPY",
+                StockMetrics.date >= start,
+                StockMetrics.date <= as_of,
+            )
+        )
+        index_rows = list(index_result)
+        index_bullish_by_date = {
+            row.date: (
+                row.current_price is not None
+                and row.ema50 is not None
+                and row.ema200 is not None
+                and row.current_price > row.ema50
+                and row.current_price > row.ema200
+            )
+            for row in index_rows
+        }
+        index_above_ema200_by_date = {
+            row.date: (
+                row.current_price is not None
+                and row.ema200 is not None
+                and row.current_price > row.ema200
+            )
+            for row in index_rows
+        }
+        index_new_high_by_date = {
+            row.date: (
+                row.current_price is not None
+                and row.high_52w is not None
+                and row.current_price >= row.high_52w
+            )
+            for row in index_rows
+        }
+
         series = []
         for d in dates:
             universe = universe_by_date.get(d, 0)
@@ -819,6 +892,9 @@ class MarketContextEngine:
                 'breadth_ratio':   (above_by_date.get(d, 0) / universe) if universe else None,
                 'leader_count':    leaders_by_date.get(d, 0),
                 'extension_count': extension_by_date.get(d, 0),
+                'index_bullish':   index_bullish_by_date.get(d, False),
+                'index_above_ema200': index_above_ema200_by_date.get(d, False),
+                'index_new_high':  index_new_high_by_date.get(d, False),
             })
         return series
 
@@ -859,12 +935,39 @@ class MarketContextEngine:
                 leader_count=cur['leader_count'],
             )
             severity = classify_damage_severity(participation, leadership)
+            leader_density = cur['leader_count'] / cur['universe']
+            recovery_confirmed = is_confirmed_recovery_session(
+                index_bullish=cur.get('index_bullish', False),
+                breadth_ratio=cur['breadth_ratio'],
+                participation=participation,
+                leader_density=leader_density,
+                leadership=leadership,
+                severity=severity,
+            )
+            exceptional_recovery = is_exceptional_recovery_session(
+                index_bullish=cur.get('index_bullish', False),
+                index_new_high=cur.get('index_new_high', False),
+                breadth_ratio=cur['breadth_ratio'],
+                breadth_delta_pp=breadth_pp,
+                participation=participation,
+                leader_density=leader_density,
+                leader_density_delta_pct=density_delta,
+                leadership=leadership,
+                severity=severity,
+            )
             days.append({
                 'date':          cur['date'],
                 'participation': participation,
                 'leadership':    leadership,
                 'damaged':       severity != CLEAN,
                 'severity':      severity,
+                'recovery_confirmed': recovery_confirmed,
+                'exceptional_recovery': exceptional_recovery,
+                'index_bullish': cur.get('index_bullish', False),
+                'index_above_ema200': cur.get('index_above_ema200', False),
+                'index_new_high': cur.get('index_new_high', False),
+                'breadth_ratio': cur['breadth_ratio'],
+                'leader_density': leader_density,
             })
         return days
 
@@ -872,6 +975,8 @@ class MarketContextEngine:
     def _health_state(
         damaged: list,
         severities: Optional[list[DamageSeverity]] = None,
+        recovery_confirmations: Optional[list[bool]] = None,
+        exceptional_recovery_sessions: Optional[list[bool]] = None,
     ) -> dict:
         """Compatibility wrapper around the extracted pure health policy.
 
@@ -879,7 +984,11 @@ class MarketContextEngine:
         damaged flag as severe; the live engine always provides full severity.
         """
         resolved = severities or [SEVERE if flag else CLEAN for flag in damaged]
-        return compute_health_state(resolved)
+        return compute_health_state(
+            resolved,
+            recovery_confirmations or [],
+            exceptional_recovery_sessions or [],
+        )
 
     # ─── Follow-through engine ─────────────────────────────────────────────────
 

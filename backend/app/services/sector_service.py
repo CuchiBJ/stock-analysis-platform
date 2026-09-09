@@ -258,9 +258,9 @@ class SectorService:
             )
             prices = result.fetchall()
             
-            if len(prices) >= 20:
+            if len(prices) >= 21:
                 latest_price = prices[0].close
-                month_ago_price = prices[19].close
+                month_ago_price = prices[20].close
                 return ((latest_price - month_ago_price) / month_ago_price) * 100
             return 0
         except:

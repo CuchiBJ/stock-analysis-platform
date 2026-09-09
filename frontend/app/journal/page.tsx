@@ -55,7 +55,14 @@ interface DecisionOverall {
   decision_win_rate: number | null
   decision_total_realized_pnl: number
   decision_total_r: number | null
+  decision_average_gain: number | null
+  decision_average_loss: number | null
+  decision_total_gains: number
+  decision_total_losses: number
 }
+
+type DecisionOutcome = 'win' | 'loss' | 'breakeven'
+type TradeFilter = 'all' | DecisionOutcome
 
 interface StatsResponse {
   overall: Aggregate
@@ -94,8 +101,7 @@ function colorPnl(n: number | null | undefined): string {
 
 export default function JournalPage() {
   const [stats, setStats] = useState<StatsResponse | null>(null)
-  const [closedTrades, setClosedTrades] = useState<Trade[]>([])
-  const [openTrades, setOpenTrades] = useState<Trade[]>([])
+  const [allTrades, setAllTrades] = useState<Trade[]>([])
   const [vocab, setVocab] = useState<Vocab | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -105,20 +111,37 @@ export default function JournalPage() {
   const [closeTarget, setCloseTarget] = useState<Trade | null>(null)
   const [editTarget, setEditTarget] = useState<Trade | null>(null)
   const [backfilling, setBackfilling] = useState(false)
+  const [tradeFilter, setTradeFilter] = useState<TradeFilter>('all')
+  const [closedSectionOpen, setClosedSectionOpen] = useState(false)
+  const [focusRequest, setFocusRequest] = useState<{ decisionId: number; nonce: number } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  const decisionGroups = useMemo(() => buildDecisionGroups(allTrades), [allTrades])
+  const openPositionGroups = useMemo(() => buildOpenPositionGroups(allTrades), [allTrades])
+  const dcaPositionGroups = useMemo(() => buildDcaPositionGroups(allTrades), [allTrades])
+  const realizedDecisionGroups = useMemo(
+    () => decisionGroups.filter(
+      group => group.setup !== 'dca' && group.legs.some(leg => !leg.is_open),
+    ),
+    [decisionGroups],
+  )
+  const filteredDecisionGroups = useMemo(
+    () => tradeFilter === 'all'
+      ? realizedDecisionGroups
+      : realizedDecisionGroups.filter(group => group.outcome === tradeFilter),
+    [realizedDecisionGroups, tradeFilter],
+  )
 
   async function reload() {
     setLoading(true)
     try {
-      const [s, closed, open, v] = await Promise.all([
+      const [s, all, v] = await Promise.all([
         fetch(`${API_URL}/api/v1/journal/stats`).then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
-        fetch(`${API_URL}/api/v1/journal/trades?closed_only=true`).then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
         fetch(`${API_URL}/api/v1/journal/trades?closed_only=false`).then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
         vocab ? Promise.resolve({ json: () => vocab, ok: true } as any) : fetch(`${API_URL}/api/v1/journal/vocab`).then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
       ])
       setStats(s)
-      setClosedTrades(closed.trades)
-      setOpenTrades((open.trades as Trade[]).filter(t => t.is_open))
+      setAllTrades(all.trades)
       if (!vocab) setVocab(v as Vocab)
       setError(null)
     } catch (e: any) {
@@ -177,6 +200,18 @@ export default function JournalPage() {
     else alert(`Error: HTTP ${res.status}`)
   }
 
+  function selectTradeFilter(filter: TradeFilter) {
+    setTradeFilter(filter)
+    setClosedSectionOpen(true)
+    setFocusRequest(null)
+  }
+
+  function openDecisionDetail(decisionId: number) {
+    setTradeFilter('all')
+    setClosedSectionOpen(true)
+    setFocusRequest({ decisionId, nonce: Date.now() })
+  }
+
   return (
     <DashboardLayout>
       <div className="max-w-6xl mx-auto space-y-4">
@@ -220,7 +255,7 @@ export default function JournalPage() {
         {loading && <LoadingSkeleton variant="card" />}
         {error && <p className="text-sm text-destructive">Error: {error}</p>}
 
-        {stats && stats.overall.n === 0 && openTrades.length === 0 && (
+        {stats && stats.overall.n === 0 && openPositionGroups.length === 0 && dcaPositionGroups.length === 0 && (
           <Card className="p-6 text-center">
             <p className="text-sm text-muted-foreground">
               No hay trades cargados. Cargá uno con "Nuevo trade" o subí el CSV histórico con "Importar CSV".
@@ -229,64 +264,22 @@ export default function JournalPage() {
         )}
 
         {/* Open positions */}
-        {openTrades.length > 0 && (
-          <Card className="p-0 overflow-hidden border-blue-500/30 bg-blue-500/5">
-            <div className="px-4 py-2 bg-blue-500/10 border-b border-blue-500/20 flex items-center justify-between">
-              <span className="text-[10px] uppercase tracking-widest text-blue-300">Posiciones abiertas · {openTrades.length}</span>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead className="border-b border-border">
-                  <tr className="text-left text-[10px] uppercase tracking-widest text-muted-foreground">
-                    <th className="px-3 py-2 font-medium">Entry</th>
-                    <th className="px-3 py-2 font-medium">Symbol</th>
-                    <th className="px-3 py-2 font-medium">Setup</th>
-                    <th className="px-3 py-2 font-medium">Contexto</th>
-                    <th className="px-3 py-2 font-medium text-right">Entry $</th>
-                    <th className="px-3 py-2 font-medium text-right">Qty</th>
-                    <th className="px-3 py-2 font-medium text-right">Stop</th>
-                    <th className="px-3 py-2 font-medium text-right">Risk</th>
-                    <th className="px-3 py-2 font-medium"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {openTrades.map(t => {
-                    const risk = t.stop_price ? (t.entry_price - t.stop_price) * t.qty : null
-                    return (
-                      <tr key={t.id} className="border-b border-border/50 last:border-0 hover:bg-muted/20">
-                        <td className="px-3 py-2 font-mono text-muted-foreground">{t.entry_date}</td>
-                        <td className="px-3 py-2 font-semibold text-foreground">{t.symbol}</td>
-                        <td className="px-3 py-2 text-muted-foreground">{t.setup}</td>
-                        <td className="px-3 py-2 text-muted-foreground">{t.context}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">${t.entry_price.toFixed(2)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{t.qty}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                          {t.stop_price ? (
-                            <>
-                              ${t.stop_price.toFixed(2)}
-                              {t.is_risk_free && (
-                                <span className="ml-1.5 inline-block text-[9px] px-1 py-0.5 rounded bg-green-500/15 border border-green-500/30 text-green-300" title="Stop ≥ entry — risk-free">🔒 BE</span>
-                              )}
-                            </>
-                          ) : (
-                            <span className="text-amber-400">—</span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-red-400">{risk != null ? `-$${risk.toFixed(2)}` : '—'}</td>
-                        <td className="px-3 py-2">
-                          <div className="flex items-center gap-1 justify-end">
-                            <button onClick={() => setCloseTarget(t)} className="text-[10px] px-2 py-1 rounded bg-red-500/15 border border-red-500/30 text-red-300 hover:bg-red-500/25">Cerrar</button>
-                            <button onClick={() => setEditTarget(t)} className="p-1 text-muted-foreground hover:text-foreground" title="Editar"><Pencil className="w-3 h-3" /></button>
-                            <button onClick={() => deleteTrade(t.id)} className="p-1 text-muted-foreground hover:text-red-400" title="Borrar"><Trash2 className="w-3 h-3" /></button>
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </Card>
+        {openPositionGroups.length > 0 && (
+          <OpenPositionsTable
+            groups={openPositionGroups}
+            onClose={setCloseTarget}
+            onEdit={setEditTarget}
+            onDelete={deleteTrade}
+          />
+        )}
+
+        {/* DCA holdings are visible, but intentionally stay outside trading metrics/open positions. */}
+        {dcaPositionGroups.length > 0 && (
+          <DcaPositionsTable
+            groups={dcaPositionGroups}
+            onEdit={setEditTarget}
+            onDelete={deleteTrade}
+          />
         )}
 
         {stats && stats.overall.n > 0 && (
@@ -304,10 +297,13 @@ export default function JournalPage() {
                 <Metric label="Total R (weighted)" value={stats.decision_overall.decision_total_r != null ? `${stats.decision_overall.decision_total_r >= 0 ? '+' : ''}${stats.decision_overall.decision_total_r.toFixed(2)} R` : '—'} tone={(stats.decision_overall.decision_total_r ?? 0) >= 0 ? 'pos' : 'neg'} />
                 <Metric label="Resolved / Total" value={`${stats.decision_overall.n_fully_resolved}/${stats.decision_overall.n_decisions_total}`} />
               </div>
+              <div className="mt-4 pt-3 border-t border-border/60 grid grid-cols-2 lg:grid-cols-4 gap-2">
+                <EconomicMetric label="Ganancia promedio" value={stats.decision_overall.decision_average_gain} tone="pos" />
+                <EconomicMetric label="Pérdida promedio" value={stats.decision_overall.decision_average_loss} tone="neg" />
+                <EconomicMetric label="Ganancias acumuladas" value={stats.decision_overall.decision_total_gains} tone="pos" />
+                <EconomicMetric label="Pérdidas acumuladas" value={stats.decision_overall.decision_total_losses} tone="neg" />
+              </div>
               <div className="mt-3 text-[10px] text-muted-foreground flex flex-wrap gap-3">
-                <span>W: <span className="text-green-400">{stats.decision_overall.decision_wins}</span></span>
-                <span>L: <span className="text-red-400">{stats.decision_overall.decision_losses}</span></span>
-                <span>BE: {stats.decision_overall.decision_breakeven}</span>
                 {stats.decision_overall.n_partially_resolved > 0 && <span>Partials: {stats.decision_overall.n_partially_resolved}</span>}
                 {stats.decision_overall.n_fully_open > 0 && <span>Open: {stats.decision_overall.n_fully_open}</span>}
               </div>
@@ -322,6 +318,7 @@ export default function JournalPage() {
                 <WinRateEvolutionChart
                   data={stats.win_rate_evolution}
                   rollingWindow={stats.rolling_window}
+                  onOpenDecision={openDecisionDetail}
                 />
               </Card>
             </details>
@@ -352,13 +349,45 @@ export default function JournalPage() {
               )}
             </div>
 
-            <details className="group">
-              <summary className="cursor-pointer list-none px-4 py-2 bg-muted/30 border border-border rounded text-[10px] uppercase tracking-widest text-muted-foreground hover:bg-muted/50 select-none flex items-center justify-between">
-                <span>Operaciones cerradas ({new Set(closedTrades.map(t => t.decision_id)).size})</span>
-                <span className="text-muted-foreground/60 group-open:rotate-90 transition-transform">▸</span>
-              </summary>
-              <ClosedTradesTable trades={closedTrades} onEdit={setEditTarget} onDelete={deleteTrade} />
-            </details>
+            <div>
+              <div className="rounded border border-border bg-muted/30 overflow-hidden">
+                <button
+                  type="button"
+                  aria-expanded={closedSectionOpen}
+                  aria-controls="closed-trades-list"
+                  onClick={() => setClosedSectionOpen(open => !open)}
+                  className="w-full px-4 py-2 text-[10px] uppercase tracking-widest text-muted-foreground hover:bg-muted/50 select-none flex items-center justify-between"
+                >
+                  <span>
+                    Operaciones cerradas ({filteredDecisionGroups.length}
+                    {tradeFilter !== 'all' ? ` de ${realizedDecisionGroups.length}` : ''})
+                    {tradeFilter !== 'all' ? ` · ${outcomeLabel(tradeFilter)}` : ''}
+                  </span>
+                  <span className={`text-muted-foreground/60 transition-transform ${closedSectionOpen ? 'rotate-90' : ''}`}>▸</span>
+                </button>
+                <div
+                  role="group"
+                  aria-label="Filtrar operaciones cerradas"
+                  className="px-4 py-2 border-t border-border/70 flex flex-wrap items-center gap-2"
+                >
+                  <span className="text-[9px] uppercase tracking-widest text-muted-foreground mr-1">Filtrar operaciones</span>
+                  <OutcomeFilterButton label="Todos" count={realizedDecisionGroups.length} active={tradeFilter === 'all'} onClick={() => selectTradeFilter('all')} tone="all" />
+                  <OutcomeFilterButton label="Ganados" count={stats.decision_overall.decision_wins} active={tradeFilter === 'win'} onClick={() => selectTradeFilter('win')} tone="win" />
+                  <OutcomeFilterButton label="Pérdidas" count={stats.decision_overall.decision_losses} active={tradeFilter === 'loss'} onClick={() => selectTradeFilter('loss')} tone="loss" />
+                  <OutcomeFilterButton label="Break even" count={stats.decision_overall.decision_breakeven} active={tradeFilter === 'breakeven'} onClick={() => selectTradeFilter('breakeven')} tone="breakeven" />
+                </div>
+              </div>
+              {closedSectionOpen && (
+                <div id="closed-trades-list">
+                  <ClosedTradesTable
+                    groups={filteredDecisionGroups}
+                    focusRequest={focusRequest}
+                    onEdit={setEditTarget}
+                    onDelete={deleteTrade}
+                  />
+                </div>
+              )}
+            </div>
 
             <details className="group" open>
               <summary className="cursor-pointer list-none px-4 py-2 bg-muted/30 border border-border rounded text-[10px] uppercase tracking-widest text-muted-foreground hover:bg-muted/50 select-none flex items-center justify-between">
@@ -403,6 +432,288 @@ export default function JournalPage() {
   )
 }
 
+interface OpenPositionGroup {
+  symbol: string
+  legs: Trade[]
+  entryDate: string | null
+  setup: string
+  context: string
+  averageEntry: number
+  totalQty: number
+  stopPrice: number | null
+  multipleStops: boolean
+  risk: number | null
+}
+
+function buildOpenPositionGroups(trades: Trade[]): OpenPositionGroup[] {
+  return buildPositionGroups(trades.filter(trade => trade.is_open && trade.setup !== 'dca'))
+}
+
+function buildDcaPositionGroups(trades: Trade[]): OpenPositionGroup[] {
+  return buildPositionGroups(trades.filter(trade => trade.is_open && trade.setup === 'dca'))
+}
+
+function buildPositionGroups(trades: Trade[]): OpenPositionGroup[] {
+  const bySymbol = new Map<string, Trade[]>()
+  for (const trade of trades) {
+    const current = bySymbol.get(trade.symbol)
+    if (current) current.push(trade)
+    else bySymbol.set(trade.symbol, [trade])
+  }
+
+  return [...bySymbol.entries()].map(([symbol, rawLegs]) => {
+    const legs = [...rawLegs].sort(
+      (a, b) => (a.entry_date ?? '').localeCompare(b.entry_date ?? '') || a.id - b.id,
+    )
+    const totalQty = legs.reduce((sum, leg) => sum + leg.qty, 0)
+    const stops = [...new Set(legs.map(leg => leg.stop_price))]
+    const risks = legs.map(leg => leg.stop_price == null
+      ? null
+      : Math.max((leg.entry_price - leg.stop_price) * leg.qty, 0))
+    const setups = [...new Set(legs.map(leg => leg.setup))]
+    const contexts = [...new Set(legs.map(leg => leg.context))]
+    return {
+      symbol,
+      legs,
+      entryDate: legs[0]?.entry_date ?? null,
+      setup: setups.length === 1 ? setups[0] : 'mixto',
+      context: contexts.length === 1 ? contexts[0] : 'mixto',
+      averageEntry: totalQty > 0
+        ? legs.reduce((sum, leg) => sum + leg.entry_price * leg.qty, 0) / totalQty
+        : 0,
+      totalQty,
+      stopPrice: stops.length === 1 ? stops[0] : null,
+      multipleStops: stops.length > 1,
+      risk: risks.every(value => value != null)
+        ? risks.reduce<number>((sum, value) => sum + (value ?? 0), 0)
+        : null,
+    }
+  }).sort((a, b) => (b.entryDate ?? '').localeCompare(a.entryDate ?? '') || a.symbol.localeCompare(b.symbol))
+}
+
+function HoldingActions({
+  trade, onEdit, onDelete,
+}: {
+  trade: Trade
+  onEdit: (trade: Trade) => void
+  onDelete: (id: number) => void
+}) {
+  return (
+    <div className="flex items-center gap-1 justify-end" onClick={event => event.stopPropagation()}>
+      <button onClick={() => onEdit(trade)} className="p-1 text-muted-foreground hover:text-foreground" title="Editar compra"><Pencil className="w-3 h-3" /></button>
+      <button onClick={() => onDelete(trade.id)} className="p-1 text-muted-foreground hover:text-red-400" title="Borrar compra"><Trash2 className="w-3 h-3" /></button>
+    </div>
+  )
+}
+
+function DcaPositionsTable({
+  groups, onEdit, onDelete,
+}: {
+  groups: OpenPositionGroup[]
+  onEdit: (trade: Trade) => void
+  onDelete: (id: number) => void
+}) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  function toggle(symbol: string) {
+    setExpanded(previous => {
+      const next = new Set(previous)
+      if (next.has(symbol)) next.delete(symbol)
+      else next.add(symbol)
+      return next
+    })
+  }
+
+  return (
+    <Card className="p-0 overflow-hidden border-violet-500/30 bg-violet-500/5">
+      <div className="px-4 py-2 bg-violet-500/10 border-b border-violet-500/20 flex items-center justify-between gap-3">
+        <span className="text-[10px] uppercase tracking-widest text-violet-300">Posiciones DCA · {groups.length}</span>
+        <span className="text-[10px] text-muted-foreground">No afectan las métricas del Journal</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="border-b border-border">
+            <tr className="text-left text-[10px] uppercase tracking-widest text-muted-foreground">
+              <th className="px-2 py-2 w-6"></th>
+              <th className="px-3 py-2 font-medium">Primera compra</th>
+              <th className="px-3 py-2 font-medium">Activo</th>
+              <th className="px-3 py-2 font-medium text-right">Precio prom.</th>
+              <th className="px-3 py-2 font-medium text-right">Cantidad</th>
+              <th className="px-3 py-2 font-medium text-right">Capital invertido</th>
+              <th className="px-3 py-2 font-medium"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map(group => {
+              const multiple = group.legs.length > 1
+              const isExpanded = expanded.has(group.symbol)
+              const single = group.legs[0]
+              const invested = group.legs.reduce((sum, leg) => sum + leg.entry_price * leg.qty, 0)
+              return (
+                <Fragment key={group.symbol}>
+                  <tr
+                    className={`border-b border-border/50 last:border-0 hover:bg-muted/20 ${multiple ? 'cursor-pointer' : ''}`}
+                    onClick={() => multiple && toggle(group.symbol)}
+                  >
+                    <td className="px-2 py-2 text-center text-muted-foreground/60">
+                      {multiple && <span className={`inline-block transition-transform ${isExpanded ? 'rotate-90' : ''}`}>▸</span>}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-muted-foreground">{group.entryDate}</td>
+                    <td className="px-3 py-2 font-semibold text-foreground">
+                      {group.symbol}
+                      {multiple && <span className="ml-2 rounded border border-violet-500/30 bg-violet-500/15 px-1.5 py-0.5 text-[9px] text-violet-300">{group.legs.length} compras</span>}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">${group.averageEntry.toFixed(2)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{group.totalQty}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-violet-300">${invested.toFixed(2)}</td>
+                    <td className="px-3 py-2">
+                      {single && !multiple && <HoldingActions trade={single} onEdit={onEdit} onDelete={onDelete} />}
+                    </td>
+                  </tr>
+                  {multiple && isExpanded && (
+                    <tr className="border-b border-border/50 bg-muted/10">
+                      <td></td>
+                      <td colSpan={6} className="px-3 py-2">
+                        <div className="space-y-1">
+                          {group.legs.map(leg => (
+                            <div key={leg.id} className="grid grid-cols-[110px_1fr_auto_auto] items-center gap-3 rounded border border-border/50 bg-background/30 px-3 py-2">
+                              <span className="font-mono text-[10px] text-muted-foreground">{leg.entry_date}</span>
+                              <span className="text-[11px] text-muted-foreground">Compra #{leg.id} · {leg.qty} @ ${leg.entry_price.toFixed(2)}</span>
+                              <span className="text-[10px] text-violet-300">${(leg.entry_price * leg.qty).toFixed(2)}</span>
+                              <HoldingActions trade={leg} onEdit={onEdit} onDelete={onDelete} />
+                            </div>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  )
+}
+
+function OpenTradeActions({
+  trade, onClose, onEdit, onDelete,
+}: {
+  trade: Trade
+  onClose: (trade: Trade) => void
+  onEdit: (trade: Trade) => void
+  onDelete: (id: number) => void
+}) {
+  return (
+    <div className="flex items-center gap-1 justify-end" onClick={event => event.stopPropagation()}>
+      <button onClick={() => onClose(trade)} className="text-[10px] px-2 py-1 rounded bg-red-500/15 border border-red-500/30 text-red-300 hover:bg-red-500/25">Cerrar</button>
+      <button onClick={() => onEdit(trade)} className="p-1 text-muted-foreground hover:text-foreground" title="Editar"><Pencil className="w-3 h-3" /></button>
+      <button onClick={() => onDelete(trade.id)} className="p-1 text-muted-foreground hover:text-red-400" title="Borrar"><Trash2 className="w-3 h-3" /></button>
+    </div>
+  )
+}
+
+function OpenPositionsTable({
+  groups, onClose, onEdit, onDelete,
+}: {
+  groups: OpenPositionGroup[]
+  onClose: (trade: Trade) => void
+  onEdit: (trade: Trade) => void
+  onDelete: (id: number) => void
+}) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  function toggle(symbol: string) {
+    setExpanded(previous => {
+      const next = new Set(previous)
+      if (next.has(symbol)) next.delete(symbol)
+      else next.add(symbol)
+      return next
+    })
+  }
+
+  return (
+    <Card className="p-0 overflow-hidden border-blue-500/30 bg-blue-500/5">
+      <div className="px-4 py-2 bg-blue-500/10 border-b border-blue-500/20 flex items-center justify-between">
+        <span className="text-[10px] uppercase tracking-widest text-blue-300">Posiciones abiertas · {groups.length}</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="border-b border-border">
+            <tr className="text-left text-[10px] uppercase tracking-widest text-muted-foreground">
+              <th className="px-2 py-2 w-6"></th>
+              <th className="px-3 py-2 font-medium">Entry</th>
+              <th className="px-3 py-2 font-medium">Symbol</th>
+              <th className="px-3 py-2 font-medium">Setup</th>
+              <th className="px-3 py-2 font-medium">Contexto</th>
+              <th className="px-3 py-2 font-medium text-right">Entry prom.</th>
+              <th className="px-3 py-2 font-medium text-right">Qty</th>
+              <th className="px-3 py-2 font-medium text-right">Stop</th>
+              <th className="px-3 py-2 font-medium text-right">Risk</th>
+              <th className="px-3 py-2 font-medium"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map(group => {
+              const multiple = group.legs.length > 1
+              const isExpanded = expanded.has(group.symbol)
+              const single = group.legs[0]
+              return (
+                <Fragment key={group.symbol}>
+                  <tr
+                    className={`border-b border-border/50 last:border-0 hover:bg-muted/20 ${multiple ? 'cursor-pointer' : ''}`}
+                    onClick={() => multiple && toggle(group.symbol)}
+                  >
+                    <td className="px-2 py-2 text-center text-muted-foreground/60">
+                      {multiple && <span className={`inline-block transition-transform ${isExpanded ? 'rotate-90' : ''}`}>▸</span>}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-muted-foreground">{group.entryDate}</td>
+                    <td className="px-3 py-2 font-semibold text-foreground">
+                      {group.symbol}
+                      {multiple && <span className="ml-2 rounded border border-blue-500/30 bg-blue-500/15 px-1.5 py-0.5 text-[9px] text-blue-300">{group.legs.length} compras</span>}
+                    </td>
+                    <td className="px-3 py-2 text-muted-foreground">{group.setup}</td>
+                    <td className="px-3 py-2 text-muted-foreground">{group.context}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">${group.averageEntry.toFixed(2)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{group.totalQty}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                      {group.multipleStops ? 'varios' : group.stopPrice != null ? `$${group.stopPrice.toFixed(2)}` : '—'}
+                    </td>
+                    <td className={`px-3 py-2 text-right tabular-nums ${group.risk === 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {group.risk != null ? (group.risk === 0 ? '$0.00' : `-$${group.risk.toFixed(2)}`) : '—'}
+                    </td>
+                    <td className="px-3 py-2">
+                      {single && !multiple && <OpenTradeActions trade={single} onClose={onClose} onEdit={onEdit} onDelete={onDelete} />}
+                    </td>
+                  </tr>
+                  {multiple && isExpanded && (
+                    <tr className="border-b border-border/50 bg-muted/10">
+                      <td></td>
+                      <td colSpan={9} className="px-3 py-2">
+                        <div className="space-y-1">
+                          {group.legs.map(leg => (
+                            <div key={leg.id} className="grid grid-cols-[110px_1fr_auto_auto] items-center gap-3 rounded border border-border/50 bg-background/30 px-3 py-2">
+                              <span className="font-mono text-[10px] text-muted-foreground">{leg.entry_date}</span>
+                              <span className="text-[11px] text-muted-foreground">Compra #{leg.id} · {leg.qty} @ ${leg.entry_price.toFixed(2)}</span>
+                              <span className="text-[10px] text-muted-foreground">Stop {leg.stop_price != null ? `$${leg.stop_price.toFixed(2)}` : '—'}</span>
+                              <OpenTradeActions trade={leg} onClose={onClose} onEdit={onEdit} onDelete={onDelete} />
+                            </div>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  )
+}
+
 function Metric({ label, value, tone }: { label: string; value: string; tone?: 'pos' | 'neg' }) {
   const color = tone === 'pos' ? 'text-green-400' : tone === 'neg' ? 'text-red-400' : 'text-foreground'
   return (
@@ -411,6 +722,53 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: '
       <div className="text-[10px] text-muted-foreground uppercase tracking-widest">{label}</div>
     </div>
   )
+}
+
+function EconomicMetric({ label, value, tone }: { label: string; value: number | null; tone: 'pos' | 'neg' }) {
+  return (
+    <div className="rounded border border-border/60 bg-background/30 px-3 py-2">
+      <div className={`text-base font-semibold tabular-nums ${tone === 'pos' ? 'text-green-400' : 'text-red-400'}`}>
+        {fmtMoney(value)}
+      </div>
+      <div className="text-[9px] uppercase tracking-wider text-muted-foreground">{label}</div>
+    </div>
+  )
+}
+
+function OutcomeFilterButton({
+  label, count, active, onClick, tone,
+}: {
+  label: string
+  count: number
+  active: boolean
+  onClick: () => void
+  tone: 'all' | DecisionOutcome
+}) {
+  const activeClass = tone === 'win'
+    ? 'border-green-400/70 bg-green-500/20 text-green-200'
+    : tone === 'loss'
+      ? 'border-red-400/70 bg-red-500/20 text-red-200'
+      : tone === 'breakeven'
+        ? 'border-amber-400/70 bg-amber-500/20 text-amber-200'
+        : 'border-blue-400/70 bg-blue-500/20 text-blue-200'
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={`rounded-full border px-2.5 py-1 text-[10px] tabular-nums transition-colors focus:outline-none focus:ring-1 focus:ring-blue-400/70 ${active ? activeClass : 'border-border bg-card text-muted-foreground hover:text-foreground hover:bg-muted/50'}`}
+      title={`Mostrar solo operaciones ${label.toLowerCase()}`}
+    >
+      {label} · {count}
+    </button>
+  )
+}
+
+function outcomeLabel(outcome: TradeFilter): string {
+  if (outcome === 'win') return 'Ganados'
+  if (outcome === 'loss') return 'Pérdidas'
+  if (outcome === 'breakeven') return 'Break even'
+  return 'Todos'
 }
 
 // One closed "operation" = one original Compra and all its partial sells, linked
@@ -424,6 +782,8 @@ interface DecisionGroup {
   setup: string
   context: string
   entryDate: string | null
+  outcome: DecisionOutcome | null
+  resultDetail: 'runner_breakeven' | null
   legs: Trade[]
   totalQty: number
   totalPnl: number
@@ -462,6 +822,8 @@ function buildDecisionGroups(trades: Trade[]): DecisionGroup[] {
       setup: rep.setup,
       context: rep.context,
       entryDate: rep.entry_date,
+      outcome: rep.decision_outcome ?? legs.find(leg => leg.decision_outcome != null)?.decision_outcome ?? null,
+      resultDetail: rep.decision_result_detail ?? legs.find(leg => leg.decision_result_detail != null)?.decision_result_detail ?? null,
       legs,
       totalQty: legs.reduce((s, l) => s + (l.qty ?? 0), 0),
       totalPnl,
@@ -478,14 +840,25 @@ function buildDecisionGroups(trades: Trade[]): DecisionGroup[] {
 }
 
 function ClosedTradesTable({
-  trades, onEdit, onDelete,
+  groups, focusRequest, onEdit, onDelete,
 }: {
-  trades: Trade[]
+  groups: DecisionGroup[]
+  focusRequest: { decisionId: number; nonce: number } | null
   onEdit: (t: Trade) => void
   onDelete: (id: number) => void
 }) {
-  const groups = useMemo(() => buildDecisionGroups(trades), [trades])
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
+
+  useEffect(() => {
+    if (!focusRequest) return
+    setExpanded(prev => new Set(prev).add(focusRequest.decisionId))
+    window.requestAnimationFrame(() => {
+      document.getElementById(`journal-decision-${focusRequest.decisionId}`)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      })
+    })
+  }, [focusRequest])
 
   function toggle(id: number) {
     setExpanded(prev => {
@@ -498,6 +871,11 @@ function ClosedTradesTable({
 
   return (
     <Card className="p-0 overflow-hidden mt-2">
+      {groups.length === 0 ? (
+        <div className="px-4 py-5 text-xs text-muted-foreground">
+          No hay operaciones en esta categoría. Elegí “Todos” para limpiar el filtro.
+        </div>
+      ) : (
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead className="border-b border-border">
@@ -520,6 +898,7 @@ function ClosedTradesTable({
               return (
                 <Fragment key={g.decisionId}>
                   <tr
+                    id={`journal-decision-${g.decisionId}`}
                     className="border-b border-border/50 last:border-0 hover:bg-muted/20 cursor-pointer"
                     onClick={() => toggle(g.decisionId)}
                   >
@@ -530,7 +909,10 @@ function ClosedTradesTable({
                     <td className="px-3 py-2 font-semibold text-foreground">{g.symbol}</td>
                     <td className="px-3 py-2 text-muted-foreground">{g.setup}</td>
                     <td className="px-3 py-2 text-muted-foreground">{g.context}</td>
-                    <td className={`px-3 py-2 text-right tabular-nums ${colorPnl(g.totalPnl)}`}>{fmtMoney(g.totalPnl)}</td>
+                    <td className="px-3 py-2 text-right">
+                      <div className={`tabular-nums ${colorPnl(g.totalPnl)}`}>{fmtMoney(g.totalPnl)}</div>
+                      {g.resultDetail === 'runner_breakeven' && <RunnerBreakEvenBadge />}
+                    </td>
                     <td className={`px-3 py-2 text-right tabular-nums ${colorPnl(g.weightedR)}`}>{fmtNum(g.weightedR)}</td>
                     <td className="px-3 py-2 text-center tabular-nums text-muted-foreground">
                       {multi
@@ -557,6 +939,7 @@ function ClosedTradesTable({
           </tbody>
         </table>
       </div>
+      )}
     </Card>
   )
 }
@@ -592,6 +975,9 @@ function DecisionDetail({
         <DetailField label="Score" value={rep.system_score_at_entry != null ? rep.system_score_at_entry.toFixed(0) : null} />
         <DetailField label="Group" value={rep.group_strength_at_entry} />
         <DetailField label="From queue" value={rep.from_queue == null ? null : (rep.from_queue ? 'sí' : 'no')} />
+        {group.resultDetail === 'runner_breakeven' && (
+          <DetailField label="Resultado" value={<RunnerBreakEvenBadge />} />
+        )}
       </div>
 
       {/* Executions: one row per leg (partial sells + final exit) */}
@@ -616,7 +1002,11 @@ function DecisionDetail({
                 <td className="px-2 py-1.5 text-muted-foreground/80">
                   {group.legs.length === 1
                     ? 'cierre'
-                    : (leg.parent_trade_id == null ? 'salida final' : 'venta parcial')}
+                    : leg.is_runner_breakeven_exit
+                      ? 'runner BE'
+                      : group.resultDetail === 'runner_breakeven'
+                        ? 'toma parcial'
+                        : (leg.parent_trade_id == null ? 'salida final' : 'venta parcial')}
                 </td>
                 <td className="px-2 py-1.5 text-muted-foreground/80">{leg.exit_reason}</td>
                 <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground/80">
@@ -637,6 +1027,17 @@ function DecisionDetail({
         </table>
       </div>
     </div>
+  )
+}
+
+function RunnerBreakEvenBadge() {
+  return (
+    <span
+      className="mt-1 inline-block whitespace-nowrap rounded border border-green-500/30 bg-green-500/10 px-1.5 py-0.5 text-[9px] font-medium text-green-300"
+      title="La operación terminó con ganancia total; el remanente salió exactamente al precio de entrada."
+    >
+      Ganada parcial · runner BE
+    </span>
   )
 }
 

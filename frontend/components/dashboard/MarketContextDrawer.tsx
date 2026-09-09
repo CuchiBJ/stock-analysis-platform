@@ -115,6 +115,8 @@ export default function MarketContextDrawer({ ctx, onClose }: Props) {
   const repairClean = ctx.health?.repair_clean_days ?? ctx.health?.repair_streak ?? 0
   const severeWindow = ctx.health?.severe_lookback_days ?? 3
   const recentSevere = ctx.health?.recent_severe_days ?? 0
+  const recoveryConfirmation = ctx.health?.recovery_confirmation_streak ?? 0
+  const recoveryConfirmationRequired = ctx.health?.recovery_confirmation_required_days ?? 3
 
   return (
     <div className="fixed inset-0 z-50 flex" onClick={onClose}>
@@ -162,6 +164,24 @@ export default function MarketContextDrawer({ ctx, onClose }: Props) {
                 <p className="text-[11px] text-white/40 mt-2 italic">
                   ↑ {ctx.posture.unlock}
                 </p>
+              )}
+              {ctx.posture.policy && (
+                <div className="mt-3 pt-2 border-t border-white/10 text-[10px] text-white/40 space-y-0.5">
+                  <p>
+                    Policy: base {ctx.posture.policy.base_state} · ceiling {ctx.posture.policy.health_ceiling}
+                    {' '}· final {ctx.posture.policy.final_state}
+                  </p>
+                  <p>
+                    NORMAL {ctx.posture.policy.normal_confirmation_streak}/{ctx.posture.policy.normal_confirmation_required_days}
+                    {' '}· active {ctx.posture.policy.normal_active ? 'yes' : 'no'}
+                    {' '}· DEF {ctx.posture.policy.defensive_active ? 'held' : 'off'}
+                    {' '}· AGRESIVO {ctx.posture.policy.aggressive_active ? 'active' : 'off'}
+                  </p>
+                  <p>
+                    Entry: breadth 60% / leaders 10% · AGRESIVO 70% / 15%
+                    {' '}· exits 55% / 8% and 65% / 12%
+                  </p>
+                </div>
               )}
             </section>
           )}
@@ -228,6 +248,12 @@ export default function MarketContextDrawer({ ctx, onClose }: Props) {
               <MetricRow
                 label="Reparación"
                 value={`${repairClean}/${repairWindow} limpias · ${recentSevere}/${severeWindow} severas`}
+              />
+              <MetricRow
+                label="Confirmación acelerada"
+                value={ctx.health.exceptional_recovery_session
+                  ? `Excepcional · ${recoveryConfirmation}/${recoveryConfirmationRequired}`
+                  : `${recoveryConfirmation}/${recoveryConfirmationRequired} ruedas`}
               />
               <MetricRow label="Racha limpia actual"      value={`${ctx.health.repair_streak} rueda${ctx.health.repair_streak === 1 ? '' : 's'}`} />
               <MetricRow

@@ -126,10 +126,26 @@ class TestClassifyFollowThrough:
 
 
 class TestPostureFollowThroughCeiling:
+    @staticmethod
+    def _posture(participation, leadership, health, **kw):
+        kw.setdefault('index_bullish', True)
+        kw.setdefault('index_above_ema200', True)
+        kw.setdefault('breadth_ratio', 0.65)
+        kw.setdefault('leader_density', 0.12)
+        kw.setdefault('policy_evidence', {
+            'normal_active': True,
+            'aggressive_active': False,
+        })
+        return compute_posture(participation, leadership, health, **kw)
+
     def test_not_paying_caps_a_perfect_day_at_selectivo(self):
         # Anatomy perfect (EXPANDING×EXPANDING, ROBUST) but market not paying.
-        v = compute_posture(
+        v = self._posture(
             "EXPANDING", "EXPANDING", "ROBUST",
+            breadth_ratio=0.75,
+            leader_density=0.18,
+            index_new_high=True,
+            policy_evidence={'normal_active': True, 'aggressive_active': True},
             follow_through="NOT_PAYING", ft_delivery=0.21, ft_baseline=0.45,
         )
         assert v.state == "SELECTIVO"
@@ -137,7 +153,7 @@ class TestPostureFollowThroughCeiling:
         assert any("21%" in r and "45%" in r for r in v.reasons)
 
     def test_not_paying_does_not_raise_defensive_states(self):
-        v = compute_posture(
+        v = self._posture(
             "COLLAPSING", "THINNING", "ROBUST", follow_through="NOT_PAYING",
             ft_delivery=0.20, ft_baseline=0.45,
         )
@@ -147,19 +163,26 @@ class TestPostureFollowThroughCeiling:
 
     def test_paying_never_boosts(self):
         # PAYING is not a boost: STABLE×HEALTHY stays NORMAL.
-        v = compute_posture(
+        v = self._posture(
             "STABLE", "HEALTHY", "ROBUST",
             follow_through="PAYING", ft_delivery=0.60,
         )
         assert v.state == "NORMAL"
 
     def test_unknown_follow_through_is_never_suppressive(self):
-        v = compute_posture("EXPANDING", "EXPANDING", "ROBUST", follow_through="UNKNOWN")
+        v = self._posture(
+            "EXPANDING", "EXPANDING", "ROBUST",
+            breadth_ratio=0.75,
+            leader_density=0.18,
+            index_new_high=True,
+            policy_evidence={'normal_active': True, 'aggressive_active': True},
+            follow_through="UNKNOWN",
+        )
         assert v.state == "AGRESIVO"
 
     def test_ft_cap_stacks_with_health_cap(self):
         # RECOVERING caps at NORMAL; NOT_PAYING caps further at SELECTIVO.
-        v = compute_posture(
+        v = self._posture(
             "EXPANDING", "EXPANDING", "RECOVERING", follow_through="NOT_PAYING",
         )
         assert v.state == "SELECTIVO"

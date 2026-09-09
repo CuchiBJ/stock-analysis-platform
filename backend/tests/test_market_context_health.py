@@ -16,6 +16,8 @@ from app.services.market_health import (
     SEVERE,
     classify_damage_severity,
     compute_health_state,
+    is_confirmed_recovery_session,
+    is_exceptional_recovery_session,
 )
 
 # Engine instance with a sentinel DB — the pure methods never touch it.
@@ -158,10 +160,91 @@ class TestSeverityAwareRecovery:
         assert v['episodes'] == 2
 
 
-def _raw_series(breadth, leaders, universe=700, extension=None):
+class TestAcceleratedRecoveryEvidence:
+    def test_requires_level_and_rate_confirmation_together(self):
+        common = {
+            'index_bullish': True,
+            'breadth_ratio': 0.70,
+            'participation': "EXPANDING",
+            'leader_density': 0.13,
+            'leadership': "EXPANDING",
+            'severity': CLEAN,
+        }
+        assert is_confirmed_recovery_session(**common) is True
+        assert is_confirmed_recovery_session(**{**common, 'breadth_ratio': 0.60}) is False
+        assert is_confirmed_recovery_session(**{**common, 'participation': "STABLE"}) is False
+        assert is_confirmed_recovery_session(**{**common, 'leader_density': 0.10}) is False
+        assert is_confirmed_recovery_session(**{**common, 'leadership': "HEALTHY"}) is False
+        assert is_confirmed_recovery_session(**{**common, 'index_bullish': False}) is False
+
+    def test_severe_session_is_an_absolute_veto(self):
+        assert is_confirmed_recovery_session(
+            index_bullish=True,
+            breadth_ratio=0.70,
+            participation="EXPANDING",
+            leader_density=0.13,
+            leadership="EXPANDING",
+            severity=SEVERE,
+        ) is False
+
+    def test_health_diagnostics_count_only_trailing_confirmation(self):
+        v = compute_health_state(
+            [SEVERE] * 10 + [CLEAN] * 3,
+            [True, False, True, True, True],
+        )
+        assert v['recovery_confirmation_streak'] == 3
+        assert v['recovery_confirmation_required_days'] == 3
+
+    def test_exceptional_session_requires_new_high_strong_levels_and_extreme_rates(self):
+        common = {
+            'index_bullish': True,
+            'index_new_high': True,
+            'breadth_ratio': 0.70,
+            'breadth_delta_pp': 32.77,
+            'participation': "EXPANDING",
+            'leader_density': 0.1348,
+            'leader_density_delta_pct': 149.02,
+            'leadership': "EXPANDING",
+            'severity': CLEAN,
+        }
+        assert is_exceptional_recovery_session(**common) is True
+        assert is_exceptional_recovery_session(
+            **{**common, 'index_new_high': False}
+        ) is False
+        assert is_exceptional_recovery_session(
+            **{**common, 'breadth_delta_pp': 19.99}
+        ) is False
+        assert is_exceptional_recovery_session(
+            **{**common, 'leader_density_delta_pct': 49.99}
+        ) is False
+
+    def test_exceptional_session_never_bypasses_severe_anatomy(self):
+        assert is_exceptional_recovery_session(
+            index_bullish=True,
+            index_new_high=True,
+            breadth_ratio=0.70,
+            breadth_delta_pp=32.77,
+            participation="EXPANDING",
+            leader_density=0.1348,
+            leader_density_delta_pct=149.02,
+            leadership="EXPANDING",
+            severity=SEVERE,
+        ) is False
+
+
+def _raw_series(
+    breadth,
+    leaders,
+    universe=700,
+    extension=None,
+    index_bullish=None,
+    index_new_high=None,
+):
     """Build a raw daily series like _daily_dimension_series returns."""
     n = len(breadth)
     extension = extension or [0] * n
+    index_bullish = index_bullish or [False] * n
+    index_new_high = index_new_high or [False] * n
     start = date(2026, 6, 1)
     return [
         {
@@ -170,6 +253,8 @@ def _raw_series(breadth, leaders, universe=700, extension=None):
             'breadth_ratio':   breadth[i],
             'leader_count':    leaders[i],
             'extension_count': extension[i],
+            'index_bullish':   index_bullish[i],
+            'index_new_high':  index_new_high[i],
         }
         for i in range(n)
     ]
@@ -237,3 +322,34 @@ class TestClassifyHealthDays:
     def test_series_shorter_than_lookback_is_empty(self):
         raw = _raw_series(breadth=[0.50] * 4, leaders=[100] * 4)
         assert _eng._classify_health_days(raw) == []
+
+    def test_current_recovery_shape_confirms_three_sessions(self):
+        # Last three sessions are above the absolute breadth/density levels and
+        # expanding versus their respective five-session references.
+        raw = _raw_series(
+            breadth=[0.40] * 5 + [0.50, 0.52, 0.62, 0.66, 0.70],
+            leaders=[50] * 5 + [60, 65, 75, 82, 91],
+            index_bullish=[True] * 10,
+        )
+        days = _eng._classify_health_days(raw)
+        assert [d['recovery_confirmed'] for d in days[-3:]] == [True, True, True]
+
+    def test_high_levels_without_expanding_rate_do_not_confirm(self):
+        raw = _raw_series(
+            breadth=[0.70] * 10,
+            leaders=[91] * 10,
+            index_bullish=[True] * 10,
+        )
+        days = _eng._classify_health_days(raw)
+        assert all(not d['recovery_confirmed'] for d in days)
+
+    def test_live_like_exceptional_session_is_identified(self):
+        raw = _raw_series(
+            breadth=[0.40] * 5 + [0.50, 0.52, 0.62, 0.66, 0.70],
+            leaders=[50] * 5 + [60, 65, 75, 82, 95],
+            index_bullish=[True] * 10,
+            index_new_high=[False] * 9 + [True],
+        )
+        days = _eng._classify_health_days(raw)
+        assert days[-1]['exceptional_recovery'] is True
+        assert all(not d['exceptional_recovery'] for d in days[:-1])

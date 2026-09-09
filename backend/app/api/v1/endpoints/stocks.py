@@ -1,4 +1,5 @@
 import statistics
+import math
 from datetime import date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +29,19 @@ from app.services.context_decision_filter import (
 from app.services.benchmarks import is_benchmark, compute_index_trend
 
 router = APIRouter()
+
+
+def _json_safe_payload(value):
+    """Recursively convert non-finite floats to JSON-compatible nulls."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _json_safe_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe_payload(item) for item in value]
+    return value
 
 
 @router.get("/", response_model=List[StockSchema])
@@ -186,7 +200,7 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
     }
 
     if not metrics:
-        return {
+        return _json_safe_payload({
             "header": header,
             "note": f"No stock_metrics row found for {sym}. Stock may be delisted or outside the universe.",
             "lists": [],
@@ -194,7 +208,7 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
             "market_context_applied": None,
             "group_strength": None,
             "minervini_status": None,
-        }
+        })
 
     # Metrics history for stateful checks. Fetch 30 days (superset) and slice per
     # consumer so each diagnostic mirrors its service EXACTLY:
@@ -280,7 +294,7 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
             lst["not_applicable"] = True
             lst["na_reason"] = "Índice de referencia — no se evalúa como setup de momentum"
         assessment, benchmark_context = _build_benchmark_assessment(stock, metrics)
-        return {
+        return _json_safe_payload({
             "header": header,
             "lists": lists,
             "transition_history": transition_history,
@@ -289,7 +303,7 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
             "minervini_status": None,
             "assessment": assessment,
             "benchmark_context": benchmark_context,
-        }
+        })
 
     # Compute actual inclusion + rank by hitting the same endpoints/services the UI uses.
     # ALSO captures the sort-key signature so we can explain WHY this symbol is at its rank.
@@ -422,7 +436,7 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
     # Minervini per-criterion breakdown (helpful when quality_leader fails)
     minervini_status = evaluate_minervini_criteria(metrics)
 
-    return {
+    return _json_safe_payload({
         "header": header,
         "lists": lists,
         "transition_history": transition_history,
@@ -430,7 +444,7 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
         "group_strength": group_strength_payload,
         "minervini_status": minervini_status,
         "assessment": assessment,
-    }
+    })
 
 
 def _build_rank_explanation(

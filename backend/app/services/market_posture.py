@@ -19,12 +19,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from app.services.market_posture_policy import POSTURE_THRESHOLDS, thresholds_contract
+
 # Ordered from most to least restrictive — capping = taking the minimum.
 POSTURE_ORDER = ["FUERA", "DEFENSIVO", "SELECTIVO", "NORMAL", "AGRESIVO"]
 _RANK = {s: i for i, s in enumerate(POSTURE_ORDER)}
-
-_ADVERSE_LEADERSHIP = {"THINNING", "COLLAPSING", "EXHAUSTED"}
-_SUPPORTIVE_LEADERSHIP = {"EXPANDING", "HEALTHY"}
 
 # Health state → ceiling on the posture. ROBUST imposes none; UNKNOWN caps at
 # NORMAL (no aggression without memory); the rest implement asymmetric repair.
@@ -43,29 +42,58 @@ class Posture:
     instruction: str          # the one-sentence exposure instruction
     reasons: list = field(default_factory=list)   # which rules fired, human-readable
     unlock: Optional[str] = None                  # what upgrades the state
+    policy: dict = field(default_factory=dict)    # auditable levels, bands and active hysteresis
 
 
-def _base_state(p: str, l: str) -> tuple[str, Optional[str]]:
-    """Today's read from the descriptor pair → (state, reason).
-
-    Mirrors the severity ladder of context_decision_filter's rules table, with
-    one extension: leadership COLLAPSING alone is SELECTIVO (the filter's Phase
-    1 table left that cell neutral, but no committee member buys full size
-    while leaders collapse).
-    """
-    if p == "UNKNOWN" or l == "UNKNOWN":
-        return "NORMAL", "contexto incompleto — sin datos suficientes hoy"
-    if p == "COLLAPSING":
-        return "DEFENSIVO", "participación COLLAPSING — la amplitud se está yendo del mercado"
-    if p == "NARROWING" and l in _ADVERSE_LEADERSHIP:
-        return "SELECTIVO", "amplitud contrayéndose con liderazgo adverso"
-    if l == "EXHAUSTED":
-        return "SELECTIVO", "liderazgo agotado — extensión/clímax en los líderes"
-    if l == "COLLAPSING":
-        return "SELECTIVO", "liderazgo COLLAPSING — los líderes están fallando"
-    if p == "EXPANDING" and l in _SUPPORTIVE_LEADERSHIP:
-        return "AGRESIVO", None
-    return "NORMAL", None
+def _base_state(
+    p: str,
+    l: str,
+    *,
+    index_bullish: bool,
+    breadth_ratio: Optional[float],
+    leader_density: Optional[float],
+    policy_evidence: dict,
+) -> tuple[str, str]:
+    """Explicit level + trend posture before health/follow-through ceilings."""
+    t = POSTURE_THRESHOLDS
+    if p == "COLLAPSING" or l in {"COLLAPSING", "EXHAUSTED"}:
+        return "DEFENSIVO", f"anatomía severa activa — participación {p} / liderazgo {l}"
+    if breadth_ratio is None or leader_density is None or p == "UNKNOWN" or l == "UNKNOWN":
+        return "SELECTIVO", "contexto incompleto — faltan niveles o descriptores confirmados"
+    if (
+        breadth_ratio < t.defensive_breadth_entry
+        or leader_density < t.defensive_leader_density_entry
+    ):
+        return (
+            "DEFENSIVO",
+            f"nivel defensivo — amplitud {breadth_ratio:.0%} (piso {t.defensive_breadth_entry:.0%}) "
+            f"y líderes {leader_density:.1%} (piso {t.defensive_leader_density_entry:.0%})",
+        )
+    if policy_evidence.get("defensive_active", False):
+        return (
+            "DEFENSIVO",
+            f"histeresis defensiva activa — salida exige amplitud ≥{t.defensive_breadth_exit:.0%} "
+            f"y líderes ≥{t.defensive_leader_density_exit:.0%}",
+        )
+    if policy_evidence.get("aggressive_active", False):
+        return "AGRESIVO", "condiciones AGRESIVO confirmadas y dentro de bandas de salida"
+    if policy_evidence.get("normal_active", False):
+        return "NORMAL", "condiciones NORMAL confirmadas y dentro de bandas de salida"
+    if not index_bullish:
+        return "SELECTIVO", "índice sin tendencia alcista confirmada"
+    if (
+        breadth_ratio <= t.normal_breadth_entry
+        or leader_density <= t.normal_leader_density_entry
+    ):
+        return (
+            "SELECTIVO",
+            f"niveles de recuperación — amplitud {breadth_ratio:.0%} / líderes {leader_density:.1%}",
+        )
+    streak = policy_evidence.get("normal_confirmation_streak", 0)
+    required = policy_evidence.get(
+        "normal_confirmation_required_days", t.normal_confirmation_days
+    )
+    return "SELECTIVO", f"confirmación NORMAL en curso: {streak}/{required} ruedas"
 
 
 def _instruction(state: str) -> str:
@@ -91,6 +119,15 @@ def compute_posture(
     repair_window_days: int = 7,
     recent_severe_days: int = 0,
     severe_lookback_days: int = 3,
+    recovery_confirmation_streak: int = 0,
+    recovery_confirmation_required_days: int = 3,
+    exceptional_recovery_session: bool = False,
+    index_bullish: bool = False,
+    index_above_ema200: bool = False,
+    index_new_high: bool = False,
+    breadth_ratio: Optional[float] = None,
+    leader_density: Optional[float] = None,
+    policy_evidence: Optional[dict] = None,
     follow_through: str = "UNKNOWN",
     ft_delivery: Optional[float] = None,
     ft_baseline: Optional[float] = None,
@@ -110,8 +147,16 @@ def compute_posture(
     if h not in _HEALTH_CEILING:
         h = "UNKNOWN"
 
-    base, base_reason = _base_state(p, l)
-    reasons = [base_reason] if base_reason else []
+    evidence = policy_evidence or {}
+    base, base_reason = _base_state(
+        p,
+        l,
+        index_bullish=index_bullish,
+        breadth_ratio=breadth_ratio,
+        leader_density=leader_density,
+        policy_evidence=evidence,
+    )
+    reasons = [base_reason]
 
     ceiling = _HEALTH_CEILING[h]
     if h == "DAMAGED" and base == "DEFENSIVO":
@@ -129,6 +174,46 @@ def compute_posture(
                 "UNKNOWN":    "sin historia suficiente para validar la salud del mercado",
             }[h])
 
+    # Evidence-based early recovery: three consecutive sessions with bullish
+    # index structure, breadth >60% and expanding, and leader density >10% and
+    # expanding may relax DAMAGED from DEFENSIVO to SELECTIVO.  It cannot
+    # override active defensive deterioration or a recent severe session, and
+    # it never grants NORMAL/AGRESIVO; those remain owned by health repair.
+    protective_recovery_conditions = (
+        h == "DAMAGED"
+        and state == "DEFENSIVO"
+        and base not in {"DEFENSIVO", "FUERA"}
+        and recent_severe_days == 0
+    )
+    exceptional_retained = evidence.get("exceptional_retained", False)
+    exceptional_recovery = protective_recovery_conditions and (
+        exceptional_recovery_session or exceptional_retained
+    )
+    accelerated_recovery = (
+        protective_recovery_conditions
+        and recovery_confirmation_streak >= recovery_confirmation_required_days
+    )
+    if exceptional_recovery:
+        state = "SELECTIVO"
+        if exceptional_recovery_session:
+            reasons.append(
+                "momentum excepcional: índice en nuevo máximo, amplitud >65% "
+                "(+20pp) y densidad de líderes >12% (+50%)"
+            )
+        else:
+            age = evidence.get("exceptional_retention_age", 0)
+            limit = evidence.get("exceptional_retention_sessions", 2)
+            reasons.append(
+                f"retención excepcional {age}/{limit}: niveles de salida siguen intactos"
+            )
+    elif accelerated_recovery:
+        state = "SELECTIVO"
+        reasons.append(
+            "recuperación confirmada: "
+            f"{recovery_confirmation_streak} ruedas con índice alcista, "
+            "amplitud >60% en expansión y densidad de líderes >10% en expansión"
+        )
+
     # Follow-through ceiling: the market not paying recent signals caps
     # aggression at SELECTIVO regardless of how the anatomy looks. UNKNOWN is
     # never suppressive (same rule as everywhere else).
@@ -144,12 +229,21 @@ def compute_posture(
     unlock = None
     if h in ("DAMAGED", "FRAGILE"):
         clean_days = repair_streak if repair_clean_days is None else repair_clean_days
-        unlock = (
+        normal_unlock = (
             f"RECOVERING requiere {repair_streak_min} de las últimas "
             f"{repair_window_days} ruedas limpias y 0 deterioros severos en las últimas "
             f"{severe_lookback_days} (actual: {clean_days}/{repair_window_days} limpias, "
             f"{recent_severe_days}/{severe_lookback_days} severas)"
         )
+        if h == "DAMAGED" and not (accelerated_recovery or exceptional_recovery):
+            unlock = (
+                "SELECTIVO anticipado requiere una rueda excepcional o "
+                f"{recovery_confirmation_required_days} ruedas confirmadas de nivel + expansión "
+                f"(actual: {recovery_confirmation_streak}/"
+                f"{recovery_confirmation_required_days}); {normal_unlock}"
+            )
+        else:
+            unlock = normal_unlock
     elif h == "RECOVERING":
         unlock = "ROBUST cuando el daño envejezca fuera de la ventana de 20 ruedas"
 
@@ -158,4 +252,29 @@ def compute_posture(
         instruction=_instruction(state),
         reasons=reasons,
         unlock=unlock,
+        policy={
+            "thresholds": evidence.get("thresholds", thresholds_contract()),
+            "inputs": {
+                "index_bullish": index_bullish,
+                "index_above_ema200": index_above_ema200,
+                "index_new_high": index_new_high,
+                "breadth_ratio": breadth_ratio,
+                "leader_density": leader_density,
+                "participation": p,
+                "leadership": l,
+            },
+            "normal_confirmation_streak": evidence.get("normal_confirmation_streak", 0),
+            "normal_confirmation_required_days": evidence.get(
+                "normal_confirmation_required_days", POSTURE_THRESHOLDS.normal_confirmation_days
+            ),
+            "normal_active": evidence.get("normal_active", False),
+            "defensive_active": evidence.get("defensive_active", False),
+            "aggressive_active": evidence.get("aggressive_active", False),
+            "exceptional_retained": exceptional_retained,
+            "exceptional_retention_age": evidence.get("exceptional_retention_age"),
+            "today": evidence.get("today", {}),
+            "base_state": base,
+            "health_ceiling": ceiling,
+            "final_state": state,
+        },
     )

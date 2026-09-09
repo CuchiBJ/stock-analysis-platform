@@ -165,6 +165,7 @@ class TestBuildingBases:
 
 from app.services.benchmarks import is_benchmark, BENCHMARK_SYMBOLS
 from app.api.v1.endpoints.stocks import _build_benchmark_assessment
+from app.api.v1.endpoints.stocks import _json_safe_payload
 
 
 def _spy_like_metrics():
@@ -242,3 +243,16 @@ class TestComputeIndexTrend:
 
     def test_lateral_on_missing_inputs(self):
         assert compute_index_trend(None, 724.0, 683.0, 691.0, 683.0) == "lateral"
+
+
+class TestDiagnosticJsonSafety:
+    def test_non_finite_metric_values_become_null_recursively(self):
+        payload = {
+            "actual": float("nan"),
+            "nested": [1.0, float("inf"), {"threshold": float("-inf")}],
+        }
+
+        assert _json_safe_payload(payload) == {
+            "actual": None,
+            "nested": [1.0, None, {"threshold": None}],
+        }

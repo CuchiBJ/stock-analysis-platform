@@ -15,6 +15,7 @@ export interface Vocab {
 export interface Trade {
   id: number
   symbol: string
+  direction: 'long'
   setup: string
   context: string
   entry_date: string | null
@@ -46,6 +47,9 @@ export interface Trade {
   is_risk_free: boolean
   parent_trade_id: number | null
   decision_id: number
+  decision_outcome: 'win' | 'loss' | 'breakeven' | null
+  decision_result_detail: 'runner_breakeven' | null
+  is_runner_breakeven_exit: boolean
 }
 
 export interface StopEvent {

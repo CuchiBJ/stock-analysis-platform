@@ -41,3 +41,29 @@ export interface SectorRotation {
   rotating_out: SectorRotationEntry[];
   groups: SectorRotationGroup[];
 }
+
+export type SectorMomentumStatus = 'warming' | 'hot' | 'cooling';
+
+export interface MarketGroupMomentumSignal {
+  name: string;
+  stock_count: number;
+  performance_4w: number;
+  relative_strength_4w: number;
+  relative_strength_5d: number;
+  acceleration_5d: number;
+  weekly_rank: number;
+  status: SectorMomentumStatus;
+  summary: string;
+}
+
+export interface MarketGroupMomentum {
+  benchmark: string;
+  taxonomy: 'Sector Leadership';
+  universe: 'market_groups';
+  as_of: string | null;
+  compared_to: string | null;
+  structural_sessions: number;
+  momentum_sessions: number;
+  hot_now: MarketGroupMomentumSignal[];
+  groups: MarketGroupMomentumSignal[];
+}

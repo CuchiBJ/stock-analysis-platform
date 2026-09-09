@@ -7,6 +7,7 @@ import dynamic from 'next/dynamic'
 
 const MarketContextBar       = dynamic(() => import('@/components/dashboard/MarketContextBar'),       { ssr: false })
 const SectorRotationCallout  = dynamic(() => import('@/components/dashboard/SectorRotationCallout'),  { ssr: false })
+const SectorLeadershipMomentum = dynamic(() => import('@/components/dashboard/SectorEtfMomentum'),   { ssr: false })
 const TopActionableSetups = dynamic(() => import('@/components/dashboard/TopActionableSetups'),  { ssr: false })
 const LiveTransitionFeed  = dynamic(() => import('@/components/dashboard/LiveTransitionFeed'),   { ssr: false })
 const SectorHeatmap       = dynamic(() => import('@/components/charts/SectorHeatmap'),           { ssr: false })
@@ -37,6 +38,7 @@ export default function DashboardPage() {
       <div className="mb-4 space-y-2">
         <MarketContextBar />
         <SectorRotationCallout />
+        <SectorLeadershipMomentum />
       </div>
 
       {/* PRIMARY PANEL — top actionable setups, full width */}
