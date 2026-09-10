@@ -1,6 +1,6 @@
 'use client'
 
-import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 export interface WinRatePoint {
   i: number
@@ -65,13 +65,30 @@ export default function WinRateEvolutionChart({
   const [width, setWidth] = useState(720)
   const [hover, setHover] = useState<number | null>(null)
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!wrapRef.current) return
     const el = wrapRef.current
-    const ro = new ResizeObserver(() => setWidth(el.clientWidth))
-    setWidth(el.clientWidth)
+    let frame: number | null = null
+
+    const updateWidth = () => {
+      const nextWidth = Math.max(1, Math.round(el.getBoundingClientRect().width))
+      setWidth(currentWidth => currentWidth === nextWidth ? currentWidth : nextWidth)
+    }
+
+    const ro = new ResizeObserver(() => {
+      if (frame != null) cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        frame = null
+        updateWidth()
+      })
+    })
+
+    updateWidth()
     ro.observe(el)
-    return () => ro.disconnect()
+    return () => {
+      ro.disconnect()
+      if (frame != null) cancelAnimationFrame(frame)
+    }
   }, [])
 
   const geom = useMemo(() => {
