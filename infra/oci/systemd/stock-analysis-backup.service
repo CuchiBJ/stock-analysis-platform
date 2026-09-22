@@ -1,0 +1,13 @@
+[Unit]
+Description=Back up Stock Analysis PostgreSQL
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+Environment=ROOT_DIR=/opt/stock-analysis
+Environment=BACKUP_DIR=/srv/stock-platform/backups
+EnvironmentFile=/opt/stock-analysis/.env.production
+ExecStart=/opt/stock-analysis/infra/oci/scripts/backup-postgres.sh

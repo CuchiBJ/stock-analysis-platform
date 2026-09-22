@@ -166,7 +166,7 @@ const MINERVINI_LABELS: Record<string, string> = {
   price_above_ema200:         'Precio sobre EMA200',
   price_above_ema50:          'Precio sobre EMA50',
   sma50_gt_sma150:            'SMA50 > SMA150',
-  sma150_gt_sma200_x_105:     'SMA150 > SMA200 × 1.05',
+  sma150_gt_sma200_x_101:     'SMA150 > SMA200 × 1.01',
   range_52w_gte_60pct:        'Rango 52 semanas ≥ 60%',
   price_above_low_gte_70pct:  'Precio sobre mínimo 52w ≥ 70%',
   adr_gte_3pct:               'ADR ≥ 3%',

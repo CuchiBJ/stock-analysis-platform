@@ -470,7 +470,7 @@ class SetupQueueService:
                     f"Strong 13w perf ({perf_proxy:.0f}%) + RS ({m.relative_strength_spy:.0f}) "
                     f"but lacks 12m history for Stage 2"
                 )
-            if 'sma50_gt_sma150' in failed or 'sma150_gt_sma200_x_105' in failed:
+            if 'sma50_gt_sma150' in failed or 'sma150_gt_sma200_x_101' in failed:
                 reason_parts.append("SMA chain not yet established")
             if 'range_52w_gte_60pct' in failed:
                 reason_parts.append("52W range still tight")

@@ -8,12 +8,13 @@ Design: openspec/changes/market-context-engine-phase-1/design.md
 """
 from __future__ import annotations
 
+import asyncio
 import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.stock import StockMetrics, TransitionObservation
@@ -38,7 +39,7 @@ from app.services.market_health import (
     is_exceptional_recovery_session,
 )
 from app.services.market_regime_engine import MarketRegimeAnalysis, MarketRegimeEngine
-from app.services.quality_leader_gate import is_quality_leader
+from app.services.quality_leader_gate import SMA150_SMA200_MIN_RATIO, is_quality_leader
 from app.services.universe_filters import QUALITY_FILTERS
 
 # Calendar-day proxies for trading-day windows (Decision 5 in design).
@@ -136,6 +137,7 @@ class MarketContext:
 # In-memory cache keyed by as_of date (Decision 9).
 # Value: (MarketContext, cached_at datetime).
 _cache: dict = {}
+_cache_lock = asyncio.Lock()
 _CACHE_TTL_SECONDS = 300  # 5 minutes
 
 
@@ -153,13 +155,18 @@ class MarketContextEngine:
 
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
+        self._daily_series_cache: dict[date, list] = {}
 
     async def analyze(self) -> Optional[MarketContext]:
         """Return MarketContext for the latest as_of date, or None if DB is empty."""
         as_of = await self._latest_date()
         if as_of is None:
             return None
-        return await self._analyze_for(as_of, use_cache=True)
+        # Dashboard widgets request the same snapshot concurrently. Only one
+        # cold calculation should reach PostgreSQL; followers wait briefly and
+        # then receive the populated cache instead of duplicating the full job.
+        async with _cache_lock:
+            return await self._analyze_for(as_of, use_cache=True)
 
     async def analyze_as_of(self, target: date) -> Optional[MarketContext]:
         """Reconstruct the market context as it stood on `target`.
@@ -188,9 +195,12 @@ class MarketContextEngine:
         universe_size = await self._universe_size(as_of)
         regime = await MarketRegimeEngine(self._db).detect_regime(as_of)
         participation = await self._participation(as_of)
+        # Build the widest historical window first. The health series is also
+        # reused by leadership level and the short dashboard sparklines, avoiding
+        # dozens of per-day round trips during a cold load.
+        health = await self._health(as_of)
         leadership = await self._leadership(as_of)
         part_hist, lead_hist = await self._history(as_of)
-        health = await self._health(as_of)
         follow_through = await self._follow_through(as_of)
         posture = compute_posture(
             participation.descriptor,
@@ -299,14 +309,13 @@ class MarketContextEngine:
         Cheap and cached: runs once per as_of inside analyze() (5-min TTL),
         reusing the same breadth/leader definitions as the live values.
         """
-        dates = await self._recent_trading_dates(as_of, n)
+        series = await self._daily_dimension_series(as_of, n)
         part_hist: list = []
         lead_hist: list = []
-        for d in dates:
-            ratio, _ = await self._breadth_above_ema21(d)
-            leaders = await self._fetch_leaders(d)
-            part_hist.append({"date": d.isoformat(), "value": round(ratio, 4)})
-            lead_hist.append({"date": d.isoformat(), "value": len(leaders)})
+        for row in series:
+            ratio = row['breadth_ratio'] if row['breadth_ratio'] is not None else 0.0
+            part_hist.append({"date": row['date'].isoformat(), "value": round(ratio, 4)})
+            lead_hist.append({"date": row['date'].isoformat(), "value": row['leader_count']})
         return part_hist, lead_hist
 
     async def _breadth_above_ema21(self, as_of: date) -> tuple:
@@ -324,7 +333,53 @@ class MarketContextEngine:
     # ─── Participation engine ──────────────────────────────────────────────────
 
     async def _participation(self, as_of: date) -> ParticipationAnalysis:
-        universe = await self._universe_size(as_of)
+        # Resolve comparison anchors once, then aggregate every breadth metric
+        # needed by the current snapshot, momentum and persistence in one scan.
+        date_5d_ago = await self._resolve_trading_date(as_of - timedelta(days=_DAYS_5T))
+        date_20d_ago = await self._resolve_trading_date(as_of - timedelta(days=_DAYS_20T))
+        date_5d_ago = date_5d_ago or as_of
+        date_20d_ago = date_20d_ago or as_of
+        persistence_start = as_of - timedelta(days=20)
+        series = await self._daily_dimension_series(
+            as_of, _HEALTH_WINDOW + _HEALTH_DELTA_LOOKBACK
+        )
+        by_date = {row['date']: row for row in series}
+        current_series = by_date.get(as_of)
+
+        # The historical breadth/universe counts come from the shared health
+        # series. Only the current-day metrics unique to participation need one
+        # additional indexed aggregate.
+        current_result = await self._db.execute(
+            select(
+                func.count().filter(
+                    StockMetrics.distance_to_ema50.isnot(None),
+                    StockMetrics.distance_to_ema50 >= 0,
+                ).label('above_ema50'),
+                func.count().filter(
+                    StockMetrics.current_price.isnot(None),
+                    StockMetrics.ema200.isnot(None),
+                ).label('total_with_ema200'),
+                func.count().filter(
+                    StockMetrics.current_price.isnot(None),
+                    StockMetrics.ema200.isnot(None),
+                    StockMetrics.current_price > StockMetrics.ema200,
+                ).label('above_ema200'),
+                func.count().filter(
+                    StockMetrics.distance_to_high_52w_atr.isnot(None),
+                    StockMetrics.distance_to_high_52w_atr >= -1.0,
+                ).label('near_highs'),
+                func.count().filter(
+                    StockMetrics.distance_to_high_52w_atr.isnot(None),
+                    StockMetrics.distance_to_high_52w_atr <= -6.0,
+                ).label('near_lows'),
+            )
+            .where(
+                StockMetrics.date == as_of,
+                *QUALITY_FILTERS,
+            )
+        )
+        current = current_result.one()
+        universe = current_series['universe'] if current_series else 0
         if universe == 0:
             empty_metrics = {
                 'breadth_above_ema21':       0.0,
@@ -344,71 +399,36 @@ class MarketContextEngine:
                 metrics=empty_metrics,
             )
 
-        # Current breadth counts
-        above_ema21 = await self._count_where(
-            as_of,
-            StockMetrics.distance_to_ema21.isnot(None),
-            StockMetrics.distance_to_ema21 >= 0,
-        )
-        above_ema50 = await self._count_where(
-            as_of,
-            StockMetrics.distance_to_ema50.isnot(None),
-            StockMetrics.distance_to_ema50 >= 0,
-        )
-        # breadth_above_ema200 uses stocks with both price and ema200 as denominator
-        total_with_ema200_result = await self._db.execute(
-            select(func.count()).select_from(StockMetrics)
-            .where(
-                StockMetrics.date == as_of,
-                *QUALITY_FILTERS,
-                StockMetrics.current_price.isnot(None),
-                StockMetrics.ema200.isnot(None),
-            )
-        )
-        total_with_ema200 = total_with_ema200_result.scalar_one() or 0
-        above_ema200_result = await self._db.execute(
-            select(func.count()).select_from(StockMetrics)
-            .where(
-                StockMetrics.date == as_of,
-                *QUALITY_FILTERS,
-                StockMetrics.current_price.isnot(None),
-                StockMetrics.ema200.isnot(None),
-                StockMetrics.current_price > StockMetrics.ema200,
-            )
-        )
-        above_ema200 = above_ema200_result.scalar_one() or 0
-
-        near_highs = await self._count_where(
-            as_of,
-            StockMetrics.distance_to_high_52w_atr.isnot(None),
-            StockMetrics.distance_to_high_52w_atr >= -1.0,
-        )
-        # Proxy for near 52w low: distance_to_high_52w_atr <= -6.0
-        # (no distance_to_low_52w_atr column yet — see design Non-Goals for upgrade path)
-        near_lows = await self._count_where(
-            as_of,
-            StockMetrics.distance_to_high_52w_atr.isnot(None),
-            StockMetrics.distance_to_high_52w_atr <= -6.0,
-        )
+        above_ema21 = current_series['above_ema21']
+        above_ema50 = current.above_ema50
+        total_with_ema200 = current.total_with_ema200
+        above_ema200 = current.above_ema200
+        near_highs = current.near_highs
+        near_lows = current.near_lows
 
         breadth_ema21_ratio = above_ema21 / universe
         breadth_ema50_ratio = above_ema50 / universe
         breadth_ema200_ratio = (above_ema200 / total_with_ema200) if total_with_ema200 > 0 else 0.0
         highs_lows_ratio = near_highs / max(near_lows, 1)
 
-        # Historical breadth for momentum (Decision 6: use historical date's universe).
-        # Snap calendar offsets to the nearest available trading date so a weekend
-        # or holiday lookback doesn't silently zero out the comparison.
-        date_5d_ago = await self._resolve_trading_date(as_of - timedelta(days=_DAYS_5T))
-        date_20d_ago = await self._resolve_trading_date(as_of - timedelta(days=_DAYS_20T))
+        def breadth_on(d: date) -> tuple[float, int]:
+            row = by_date.get(d)
+            if row is None or not row['universe']:
+                return 0.0, 0
+            return row['breadth_ratio'], row['universe']
 
-        breadth_5d_ago, _ = await self._breadth_above_ema21(date_5d_ago)
-        breadth_20d_ago, universe_20d = await self._breadth_above_ema21(date_20d_ago)
+        breadth_5d_ago, _ = breadth_on(date_5d_ago)
+        breadth_20d_ago, universe_20d = breadth_on(date_20d_ago)
 
         momentum_5d = breadth_ema21_ratio - breadth_5d_ago
         momentum_20d = breadth_ema21_ratio - breadth_20d_ago
 
-        persistence = await self._participation_persistence(as_of)
+        persistence_ratios = [
+            row['breadth_ratio']
+            for d, row in by_date.items()
+            if d >= persistence_start and row['universe'] and row['breadth_ratio'] is not None
+        ]
+        persistence = statistics.stdev(persistence_ratios) if len(persistence_ratios) >= 2 else 0.0
 
         return ParticipationAnalysis(
             descriptor=self._participation_descriptor(momentum_5d * 100),
@@ -675,16 +695,16 @@ class MarketContextEngine:
         source of truth) and ranks today's density within it. Cached upstream
         per as_of (5-min TTL), so the per-date fetch cost is paid once.
         """
-        dates = await self._recent_trading_dates(as_of, n)
+        series = await self._daily_dimension_series(as_of, n)
         densities: list[float] = []
         today_density: Optional[float] = None
-        for d in dates:
-            universe = await self._universe_size(d)
+        for row in series:
+            universe = row['universe']
             if not universe:
                 continue
-            density = len(await self._fetch_leaders(d)) / universe
+            density = row['leader_count'] / universe
             densities.append(density)
-            if d == as_of:
+            if row['date'] == as_of:
                 today_density = density
         if today_density is None or not densities:
             return "UNKNOWN", None, len(densities)
@@ -781,65 +801,65 @@ class MarketContextEngine:
         A date with no universe rows yields breadth_ratio=None so the classifier
         can skip it (a data gap must never count as damage).
         """
+        cached = self._daily_series_cache.get(as_of)
+        if cached is not None and len(cached) >= n:
+            return cached[-n:]
+
         dates = await self._recent_trading_dates(as_of, n)
         if not dates:
             return []
         start = dates[0]
 
-        universe_result = await self._db.execute(
-            select(StockMetrics.date, func.count().label('cnt'))
-            .where(
-                StockMetrics.date >= start,
-                StockMetrics.date <= as_of,
-                *QUALITY_FILTERS,
-            )
-            .group_by(StockMetrics.date)
+        price_above_low = (
+            (StockMetrics.current_price - StockMetrics.low_52w)
+            / func.nullif(StockMetrics.low_52w, 0)
         )
-        universe_by_date = {row.date: row.cnt for row in universe_result}
-
-        above_result = await self._db.execute(
-            select(StockMetrics.date, func.count().label('cnt'))
-            .where(
-                StockMetrics.date >= start,
-                StockMetrics.date <= as_of,
-                StockMetrics.distance_to_ema21.isnot(None),
-                StockMetrics.distance_to_ema21 >= 0,
-                *QUALITY_FILTERS,
-            )
-            .group_by(StockMetrics.date)
+        range_52w = (
+            (StockMetrics.high_52w - StockMetrics.low_52w)
+            / func.nullif(StockMetrics.low_52w, 0)
         )
-        above_by_date = {row.date: row.cnt for row in above_result}
+        leader_condition = and_(
+            StockMetrics.perf_1y.isnot(None),
+            StockMetrics.ema200.isnot(None),
+            StockMetrics.current_price.isnot(None),
+            StockMetrics.sma50.isnot(None),
+            StockMetrics.sma150.isnot(None),
+            StockMetrics.sma200.isnot(None),
+            StockMetrics.low_52w.isnot(None),
+            StockMetrics.low_52w != 0,
+            StockMetrics.adr_percent.isnot(None),
+            StockMetrics.perf_1y > 30.0,
+            StockMetrics.current_price > StockMetrics.ema200,
+            StockMetrics.distance_to_ema50_atr > 0,
+            StockMetrics.sma50 > StockMetrics.sma150,
+            StockMetrics.sma150 > StockMetrics.sma200 * SMA150_SMA200_MIN_RATIO,
+            price_above_low >= 0.70,
+            StockMetrics.adr_percent >= 3.0,
+            or_(StockMetrics.high_52w.is_(None), range_52w >= 0.60),
+        )
 
-        # Column projection keeps the bulk fetch narrow; is_quality_leader only
-        # does attribute access, so it works on Row objects as well as ORM rows.
-        leader_result = await self._db.execute(
+        dimension_result = await self._db.execute(
             select(
                 StockMetrics.date,
-                StockMetrics.perf_1y,
-                StockMetrics.ema200,
-                StockMetrics.current_price,
-                StockMetrics.sma50,
-                StockMetrics.sma150,
-                StockMetrics.sma200,
-                StockMetrics.low_52w,
-                StockMetrics.high_52w,
-                StockMetrics.adr_percent,
-                StockMetrics.distance_to_ema50_atr,
-                StockMetrics.distance_to_ema21_atr,
+                func.count().label('universe'),
+                func.count().filter(
+                    StockMetrics.distance_to_ema21.isnot(None),
+                    StockMetrics.distance_to_ema21 >= 0,
+                ).label('above_ema21'),
+                func.count().filter(leader_condition).label('leaders'),
+                func.count().filter(
+                    leader_condition,
+                    StockMetrics.distance_to_ema21_atr > 3.0,
+                ).label('extended_leaders'),
             )
             .where(
                 StockMetrics.date >= start,
                 StockMetrics.date <= as_of,
                 *QUALITY_FILTERS,
             )
+            .group_by(StockMetrics.date)
         )
-        leaders_by_date: dict = {}
-        extension_by_date: dict = {}
-        for row in leader_result:
-            if is_quality_leader(row):
-                leaders_by_date[row.date] = leaders_by_date.get(row.date, 0) + 1
-                if row.distance_to_ema21_atr is not None and row.distance_to_ema21_atr > 3.0:
-                    extension_by_date[row.date] = extension_by_date.get(row.date, 0) + 1
+        dimensions_by_date = {row.date: row for row in dimension_result}
 
         index_result = await self._db.execute(
             select(
@@ -885,17 +905,21 @@ class MarketContextEngine:
 
         series = []
         for d in dates:
-            universe = universe_by_date.get(d, 0)
+            dimensions = dimensions_by_date.get(d)
+            universe = dimensions.universe if dimensions else 0
+            above_ema21 = dimensions.above_ema21 if dimensions else 0
             series.append({
                 'date':            d,
                 'universe':        universe,
-                'breadth_ratio':   (above_by_date.get(d, 0) / universe) if universe else None,
-                'leader_count':    leaders_by_date.get(d, 0),
-                'extension_count': extension_by_date.get(d, 0),
+                'above_ema21':     above_ema21,
+                'breadth_ratio':   (above_ema21 / universe) if universe else None,
+                'leader_count':    dimensions.leaders if dimensions else 0,
+                'extension_count': dimensions.extended_leaders if dimensions else 0,
                 'index_bullish':   index_bullish_by_date.get(d, False),
                 'index_above_ema200': index_above_ema200_by_date.get(d, False),
                 'index_new_high':  index_new_high_by_date.get(d, False),
             })
+        self._daily_series_cache[as_of] = series
         return series
 
     def _classify_health_days(self, raw: list) -> list:

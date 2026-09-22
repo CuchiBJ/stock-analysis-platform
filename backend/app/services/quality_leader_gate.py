@@ -7,6 +7,9 @@ setup_queue_service (for U&R and Building Bases queue filtering).
 from app.models.stock import StockMetrics
 
 
+SMA150_SMA200_MIN_RATIO = 1.01
+
+
 def is_quality_leader(m: StockMetrics) -> bool:
     """Eight Minervini SEPA criteria — all must pass.
 
@@ -14,7 +17,7 @@ def is_quality_leader(m: StockMetrics) -> bool:
     2. price > EMA200
     3. price > EMA50 (via distance_to_ema50_atr > 0)
     4. SMA50 > SMA150
-    5. SMA150 > SMA200 * 1.05
+    5. SMA150 > SMA200 * 1.01
     6. 52W range >= 60% (skipped if high_52w is NULL, e.g. FAST cycles)
     7. price_above_low_pct >= 70%
     8. ADR >= 3%
@@ -38,7 +41,7 @@ def is_quality_leader(m: StockMetrics) -> bool:
         m.current_price > m.ema200 and
         (m.distance_to_ema50_atr or 0.0) > 0 and
         m.sma50 > m.sma150 and
-        m.sma150 > m.sma200 * 1.05 and
+        m.sma150 > m.sma200 * SMA150_SMA200_MIN_RATIO and
         price_above_low_pct >= 0.70 and
         m.adr_percent >= 3.0
     )
@@ -89,14 +92,14 @@ def evaluate_minervini_criteria(m: StockMetrics) -> dict:
         result['sma50_gt_sma150'] = {'passes': False, 'detail': 'missing sma50 or sma150'}
 
     if m.sma150 is not None and m.sma200 is not None:
-        threshold = m.sma200 * 1.05
-        result['sma150_gt_sma200_x_105'] = {
+        threshold = m.sma200 * SMA150_SMA200_MIN_RATIO
+        result['sma150_gt_sma200_x_101'] = {
             'passes': m.sma150 > threshold,
             'value': m.sma150,
             'threshold': threshold,
         }
     else:
-        result['sma150_gt_sma200_x_105'] = {'passes': False, 'detail': 'missing sma150 or sma200'}
+        result['sma150_gt_sma200_x_101'] = {'passes': False, 'detail': 'missing sma150 or sma200'}
 
     if m.high_52w is not None and m.low_52w is not None and m.low_52w > 0:
         range_pct = (m.high_52w - m.low_52w) / m.low_52w

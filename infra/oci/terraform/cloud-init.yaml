@@ -1,0 +1,44 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+packages:
+  - ca-certificates
+  - curl
+  - docker-compose-v2
+  - docker.io
+  - fail2ban
+  - git
+  - jq
+  - netfilter-persistent
+  - unattended-upgrades
+
+timezone: UTC
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-stock-analysis-hardening.conf
+    permissions: "0644"
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin no
+      KbdInteractiveAuthentication no
+  - path: /etc/fail2ban/jail.d/sshd.local
+    permissions: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      maxretry = 5
+      bantime = 1h
+
+runcmd:
+  - [systemctl, enable, --now, docker]
+  - [systemctl, enable, --now, fail2ban]
+  - [usermod, -aG, docker, ubuntu]
+  - [mkdir, -p, /opt/stock-analysis/backups]
+  - [chown, -R, "ubuntu:ubuntu", /opt/stock-analysis]
+  - [iptables, -I, INPUT, "5", -p, tcp, --dport, "80", -j, ACCEPT]
+  - [iptables, -I, INPUT, "5", -p, tcp, --dport, "443", -j, ACCEPT]
+  - [iptables, -I, INPUT, "5", -p, udp, --dport, "443", -j, ACCEPT]
+  - [netfilter-persistent, save]
+  - [systemctl, restart, ssh]
+
+final_message: "Stock Analysis host bootstrap finished after $UPTIME seconds"

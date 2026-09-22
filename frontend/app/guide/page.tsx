@@ -185,7 +185,7 @@ export default function GuidePage() {
             <Row label="Precio sobre EMA200"      value="precio > media 200 días"   note="tendencia de largo plazo intacta" />
             <Row label="Precio sobre EMA50"       value="precio > media 50 días"    note="tendencia de mediano plazo intacta" />
             <Row label="SMA50 sobre SMA150"       value="media 50d > media 150d"    note="alineación alcista de mediano plazo" />
-            <Row label="SMA150 sobre SMA200 ×1.05" value="media 150d > media 200d +5%" note="tendencia de largo plazo con pendiente positiva" />
+            <Row label="SMA150 sobre SMA200 ×1.01" value="media 150d > media 200d +1%" note="tendencia de largo plazo con pendiente positiva" />
             <Row label="Rango anual"              value="> 60% del máximo al mínimo" note="el stock tuvo movimiento real, no lateralización" />
             <Row label="Precio sobre mínimo anual" value="> 70% sobre el mínimo del año" note="lejos del piso — el mercado no lo abandonó" />
             <Row label="ADR"                      value="> 3%"                      note="volatilidad operativa suficiente para el setup" />

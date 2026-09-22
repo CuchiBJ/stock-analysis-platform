@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, type ReactElement } from 'react'
 import Link from 'next/link'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
@@ -31,7 +31,7 @@ interface TransitionEvent {
   dist_ema_label?: string
 }
 
-const TRANSITION_ICON: Record<string, JSX.Element> = {
+const TRANSITION_ICON: Record<string, ReactElement> = {
   // Pre-reclaim (foco del sistema)
   entering_pullback:    <ArrowDown className="w-3 h-3 text-yellow-400" />,
   volume_dry_up:        <Volume2 className="w-3 h-3 text-cyan-400" />,
@@ -52,7 +52,7 @@ const TRANSITION_ICON: Record<string, JSX.Element> = {
   stabilizing:          <Activity className="w-3 h-3 text-blue-400" />,
 }
 
-function getIcon(transition: string): JSX.Element {
+function getIcon(transition: string): ReactElement {
   return TRANSITION_ICON[transition] ?? <Activity className="w-3 h-3 text-white/30" />
 }
 

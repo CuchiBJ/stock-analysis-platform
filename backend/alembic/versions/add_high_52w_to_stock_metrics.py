@@ -1,7 +1,7 @@
 """add high_52w to stock_metrics
 
 Revision ID: add_high_52w
-Revises: 
+Revises: c85e71d74bc3
 Create Date: 2026-05-20
 
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = 'add_high_52w'
-down_revision = None
+down_revision = 'c85e71d74bc3'
 branch_labels = None
 depends_on = None
 

@@ -50,7 +50,8 @@ cómodos y los cruzás en semanas**. Esto empuja fuerte hacia **Postgres self-ho
 ## 4. Caminos viables
 
 ### Path A — Oracle Cloud "Always Free" + Vercel  ·  **costo: $0 (indefinido)**
-- VM **ARM Ampere A1**: hasta **4 vCPU / 24 GB RAM / 200 GB disco**, gratis para siempre.
+- VM **ARM Ampere A1**: cuota vigente de hasta **2 OCPU / 12 GB RAM agregados** y 200 GB de
+  Block Volume en la home region dentro de Always Free (verificar términos antes de aplicar).
 - Corrés **todo** en la VM con `docker-compose`: uvicorn+scheduler, Postgres, Redis.
 - Frontend en **Vercel free** (nativo Next.js).
 - **Pros:** gratis de verdad y con margen enorme (RAM y disco de sobra para años de datos);

@@ -38,6 +38,15 @@ build/
 .env.development.local
 .env.test.local
 .env.production.local
+.env.production
+
+# Terraform local state and credentials
+.oci/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!.tfvars.example
 
 # Database
 *.db
@@ -45,6 +54,7 @@ build/
 *.sqlite3
 
 # IDE / agent tooling
+.tools/
 .vscode/
 .idea/
 .windsurf/

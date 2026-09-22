@@ -1,167 +1,227 @@
-# Runbook de deploy — Oracle Cloud Always Free
+# Deploy productivo en Oracle Cloud Infrastructure
 
-> Plan de ejecución. Backend (uvicorn + scheduler + Postgres + Redis) en una VM ARM Ampere
-> "Always Free"; frontend Next.js en Vercel. Fecha: 2026-06-09.
+Runbook reproducible para frontend, API, scheduler, PostgreSQL, Redis y TLS en una VM Ampere A1.
 
-## Arquitectura objetivo
+## Instancia activa
 
+- Región: `us-ashburn-1`.
+- Hostname HTTPS: `129-159-125-184.sslip.io`.
+- IP pública reservada: `129.159.125.184`.
+- Cómputo: `VM.Standard.A1.Flex`, 2 OCPU y 12 GB RAM.
+- Almacenamiento: boot volume de 50 GB y volumen de datos de 100 GB montado en
+  `/srv/stock-platform`.
+- SSH: permitido únicamente desde la IP operativa `/32`; HTTP/HTTPS públicos.
+
+## Estado del repositorio
+
+El entorno productivo está definido en:
+
+- `infra/oci/terraform/`: VCN, subnet pública, reglas 22/80/443, VM Ampere A1, IP pública
+  reservada y `cloud-init` de hardening.
+- `compose.production.yml`: PostgreSQL, Redis, migraciones, API, scheduler, frontend y Caddy.
+- `infra/oci/Caddyfile`: HTTPS automático y reverse proxy.
+- `infra/oci/scripts/`: deploy, backup y restore.
+- `infra/oci/systemd/`: backup diario con retención local de 14 días.
+
+El `docker-compose.yml` de la raíz continúa siendo exclusivamente para desarrollo local.
+
+## Arquitectura
+
+```text
+Internet --HTTPS--> Caddy :443 -- /api, /health --> FastAPI :8000
+                              `-- demás rutas ----> Next.js :3000
+                    red Docker |-> PostgreSQL :5432
+                               |-> Redis :6379
+                               `-> scheduler (proceso separado)
 ```
-  Usuario ──https──>  app.tudominio.com   (Vercel · Next.js · TLS auto)
-                              │
-                              └─ fetch https ─> api.tudominio.com
-                                                     │
-                                          ┌──────────▼───────────┐  Oracle VM (Ampere, Ubuntu)
-                                          │  Caddy (reverse proxy │
-                                          │   + TLS Let's Encrypt)│
-                                          │        │             │
-                                          │   uvicorn :8000      │  docker-compose
-                                          │   postgres :5432     │  (red interna)
-                                          │   redis    :6379     │
-                                          └──────────────────────┘
-```
 
-Regla de oro: el frontend va por **https** (Vercel), así que el backend **también tiene que ser
-https**. Un backend en `http://<ip>` sería bloqueado por *mixed content* desde el navegador. De ahí
-que el dominio (al menos un subdominio para la API) sea **necesario**, no opcional.
+PostgreSQL, Redis y FastAPI no publican puertos en la VM. Sólo SSH, HTTP y HTTPS se permiten
+desde la VCN; SSH debe limitarse a la IP del operador.
 
----
+## Límite Always Free vigente
 
-## El tema dominio (lo que preguntaste)
+La cuota Ampere A1 Always Free actual es de **2 OCPU y 12 GB de RAM agregados** por tenancy,
+con 200 GB agregados de Block Volume en la home region. La configuración por defecto usa una
+VM `VM.Standard.A1.Flex` de 2 OCPU/12 GB y un boot volume de 100 GB.
 
-### ¿Necesito un dominio?
-**Sí, para la API.** No por estética, sino porque:
-- Let's Encrypt **no emite certificados TLS para una IP pelada** → sin dominio no hay https en el backend.
-- Sin https en el backend, el frontend https de Vercel no lo puede llamar (mixed content).
-- El **frontend** en cambio **no** necesita dominio propio: Vercel te da `tu-proyecto.vercel.app`
-  con https gratis. Podés vivir con eso y comprar dominio solo más adelante.
+Verificá los límites en la documentación oficial antes de ejecutar `terraform apply`; superar
+la cuota o crear recursos fuera de la home region puede generar cargos.
 
-Conclusión: necesitás **un hostname con https apuntando a la VM** para la API. Hay dos formas:
+## 1. Requisitos de cuenta y DNS
 
-### Opción 1 — Dominio propio (recomendado, ~US$10–15/año)
-1. Comprar el dominio en un **registrar barato**:
-   - **Cloudflare Registrar**: lo vende **a precio costo** (sin markup), el renovado más barato a largo plazo. Requiere usar Cloudflare como DNS (gratis).
-   - Alternativas: Namecheap, Porkbun.
-2. DNS (en Cloudflare o el registrar):
-   - `api`  → **A record** → IP pública de la VM Oracle.
-   - `app`  → **CNAME/A** según lo que indique Vercel (al agregar el dominio en el panel de Vercel).
-3. En la VM, **Caddy** detecta el dominio y **auto-provisiona y renueva** el cert Let's Encrypt. Cero trabajo manual de TLS.
+Necesitás:
 
-> Si usás Cloudflare como DNS, dejá el registro `api` en modo **DNS-only (nube gris)** para que Caddy
-> maneje Let's Encrypt directo. (Si activás el proxy naranja, hay que configurar TLS "Full strict"
-> con origin cert — más vueltas; para empezar, gris es lo simple.)
+1. Una cuenta OCI y su **home region**.
+2. Los OCID de tenancy y compartment.
+3. Autenticación local del provider de OCI (archivo `~/.oci/config` o variables de entorno
+   compatibles con el provider).
+4. Terraform >= 1.6.
+5. Una clave SSH pública.
+6. Un hostname para la aplicación, por ejemplo `app.example.com`.
 
-### Opción 2 — Dominio gratis (hobby, $0)
-Hostnames gratis que **sí soportan Let's Encrypt**:
-- **DuckDNS** → `tunombre.duckdns.org` (subdominio gratis, clásico para self-hosting).
-- **sslip.io / nip.io** → DNS wildcard que mapea la IP en el propio nombre, ej.
-  `api-129-146-1-2.sslip.io` resuelve a `129.146.1.2` sin configurar nada. Caddy puede sacar cert para ese hostname.
-- Evitar **Freenom** (.tk/.ml): prácticamente muerto/poco confiable.
+Se puede usar dominio propio o un hostname compatible con Let's Encrypt como `sslip.io`
+durante la transición.
 
-Trade-off: gratis y funcional, pero el nombre se ve menos "pro". Perfecto para uso personal; podés
-migrar a dominio propio después sin tocar la arquitectura (solo cambiás el hostname en Caddy y en
-la env var del frontend).
+## 2. Provisionar OCI con Terraform
 
-### IP estática (importante, no te saltees esto)
-La IP pública de la VM por defecto es **efímera**. Si parás/reiniciás la instancia, **puede cambiar**
-y te rompe el A record. Solución: **reservar la IP pública** en Oracle (*Reserved Public IP*, dentro
-de los límites Always Free) y asignarla a la VNIC de la VM. Así el A record nunca se desincroniza.
-
----
-
-## Fase 0 — Pre-requisitos
-- Cuenta Oracle Cloud (pide tarjeta para verificar; Always Free no cobra).
-- Cuenta Vercel (gratis, login con GitHub).
-- (Opción 1) un dominio comprado.
-- Las API keys de datos a mano (Polygon, Finnhub, Alpha Vantage, etc.).
-
-## Fase 1 — Provisionar la VM
-1. Crear instancia **VM.Standard.A1.Flex** (Ampere ARM). Pedir p. ej. **2 OCPU / 12 GB RAM**
-   (entrás holgado en Always Free, que permite hasta 4 OCPU / 24 GB).
-   - Imagen: **Ubuntu 22.04 (aarch64)**.
-   - Guardar la **clave SSH** que generes.
-   - Si la región tira "out of capacity" para Ampere, reintentar (otro AD/región) — gotcha conocido.
-2. **Reservar IP pública** y asignarla a la instancia.
-3. **Abrir puertos — son DOS firewalls** (gotcha clásico de Oracle):
-   - **VCN Security List / NSG** (firewall del cloud): ingress TCP **80** y **443** desde `0.0.0.0/0`.
-   - **iptables de Ubuntu** (la imagen viene restrictiva): abrir 80/443 también, o el tráfico igual no entra.
-     ```
-     sudo iptables -I INPUT 5 -p tcp --dport 80  -j ACCEPT
-     sudo iptables -I INPUT 5 -p tcp --dport 443 -j ACCEPT
-     sudo netfilter-persistent save
-     ```
-
-## Fase 2 — Setup del host
 ```bash
-ssh ubuntu@<IP>
-sudo apt update && sudo apt -y upgrade
-# Docker + compose
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker ubuntu      # relogin después
-# Clonar repo
-git clone git@github.com:CuchiBJ/stock-analysis-platform.git
-cd stock-analysis-platform
+cd infra/oci/terraform
+cp terraform.tfvars.example terraform.tfvars
 ```
-- Confirmar que el reloj/NTP está activo (`timedatectl`) — en VM viene por defecto; esto elimina la
-  causa raíz del skew que vimos en la laptop.
 
-## Fase 3 — Contenerizar (trabajo de código pendiente)
-Falta agregar al repo:
-- **`backend/Dockerfile`** — Python 3.9-slim (arm64), instala `requirements.txt`, arranca uvicorn
-  **sin** `--reload` (en prod no se usa).
-- **`docker-compose.yml`** (raíz) con servicios:
-  - `db` (postgres:16), volumen persistente en el disco de la VM.
-  - `redis` (redis:7).
-  - `api` (build del backend), `depends_on` db/redis, `restart: always`, lee env del `.env`.
-  - `caddy` (caddy:2) como reverse proxy → TLS automático para `api.tudominio.com` → `api:8000`.
-- **`Caddyfile`**:
-  ```
-  api.tudominio.com {
-      reverse_proxy api:8000
-  }
-  ```
-- **`.env`** en la VM (NO se commitea; ya gitignoreado) con `DATABASE_URL`, `REDIS_URL`, API keys.
+Completá `terraform.tfvars`. Para obtener tu IP pública y restringir SSH:
 
-> Cuando quieras, esto lo armo yo: Dockerfile + compose + Caddyfile son reutilizables y es el próximo
-> paso natural.
-
-## Fase 4 — Migrar la base (370 MB)
 ```bash
-# en la laptop:
-pg_dump --no-owner --format=custom stock_analysis > dump.pgcustom
-scp dump.pgcustom ubuntu@<IP>:~
-# en la VM (con el contenedor db corriendo):
-docker compose exec -T db pg_restore --no-owner -d stock_analysis < ~/dump.pgcustom
-# correr migraciones alembic por las dudas:
-docker compose exec api alembic upgrade head
+curl -4 https://ifconfig.me
+# ssh_allowed_cidr = "TU_IP/32"
 ```
 
-## Fase 5 — Levantar y verificar
+Inicializá y revisá el plan:
+
 ```bash
-docker compose up -d --build
-curl https://api.tudominio.com/api/v1/health/data-freshness   # is_stale:false, heartbeats ok
+terraform init
+terraform fmt -check
+terraform validate
+terraform plan -out=tfplan
+terraform apply tfplan
 ```
-- Confirmar que el scheduler arranca y escribe (ver heartbeats).
 
-## Fase 6 — Frontend en Vercel
-1. Importar el repo en Vercel, root = `frontend/`.
-2. Env var `NEXT_PUBLIC_API_URL=https://api.tudominio.com` (o el `*.vercel.app` si todavía no comprás dominio — pero entonces la API necesita igual su https vía Opción 2).
-3. (Opcional) agregar `app.tudominio.com` como dominio del proyecto en Vercel.
+Si Oracle devuelve `Out of host capacity`, cambiá `availability_domain_number` a otro índice
+disponible y repetí el plan. No aumentes OCPU/RAM para resolver capacidad.
 
-## Fase 7 — Operación
-- **Backups Postgres** desde el día 1: cron diario `pg_dump` → Object Storage de Oracle (Always Free
-  da 20 GB) o a otro lado.
-- **Auto-arranque**: `restart: always` en compose hace que todo vuelva solo si la VM reinicia.
-- **Updates**: `git pull && docker compose up -d --build` para desplegar cambios.
-- **Monitoreo**: el panel `/health` + el PipelineHealthChip ya te muestran si el scheduler está vivo.
+El output `reserved_public_ip` es la IP estable que debe recibir el A record del hostname de API.
+Esperá a que `cloud-init` termine antes de desplegar:
 
----
-
-## Checklist de gotchas
-- [ ] IP pública **reservada** (no efímera).
-- [ ] Puertos 80/443 abiertos en **ambos** firewalls (VCN **y** iptables).
-- [ ] A record `api` → IP de la VM; en Cloudflare dejarlo **DNS-only** si Caddy maneja TLS.
-- [ ] uvicorn en prod **sin `--reload`**.
-- [ ] `.env` con secrets **no** commiteado.
-- [ ] Cron de backup configurado.
-- [ ] Capacidad Ampere: reintentar si "out of capacity".
+```bash
+ssh ubuntu@IP_RESERVADA 'cloud-init status --wait'
 ```
+
+## 3. Publicar el código en la VM
+
+El directorio esperado es `/opt/stock-analysis`. Si la VM puede leer el repo por SSH:
+
+```bash
+ssh ubuntu@IP_RESERVADA
+git clone git@github.com:CuchiBJ/stock-analysis-platform.git /opt/stock-analysis
+cd /opt/stock-analysis
+```
+
+Para un repo privado, agregá primero una deploy key de sólo lectura o copiá el checkout desde
+la máquina local con `rsync`. No copies `.env`, dumps ni el estado local de Terraform.
+
+## 4. Configurar secretos
+
+En la VM:
+
+```bash
+cd /opt/stock-analysis
+cp .env.production.example .env.production
+chmod 600 .env.production
+openssl rand -hex 32
+```
+
+Usá el valor hexadecimal como `POSTGRES_PASSWORD` y dentro de `DATABASE_URL`. Completá además:
+
+- `POLYGON_API_KEY`.
+- `ANTHROPIC_API_KEY`, sólo si se usa el chat integrado.
+- `IBKR_FLEX_TOKEN` y `IBKR_FLEX_QUERY_ID`, sólo si se usa el sync.
+- `CORS_ORIGINS`, con los orígenes HTTPS adicionales que necesiten llamar a la API.
+- `API_DOMAIN`, el hostname cuyo A record apunta a la IP reservada.
+
+`.env.production` está ignorado por Git. No pongas secretos en `terraform.tfvars`, `cloud-init` ni
+el historial del shell.
+
+## 5. Restaurar la base existente
+
+En la máquina local:
+
+```bash
+pg_dump --format=custom --no-owner --no-acl stock_analysis > stock_analysis.dump
+scp stock_analysis.dump ubuntu@IP_RESERVADA:/opt/stock-analysis/backups/
+```
+
+En la VM, iniciá sólo PostgreSQL y restaurá:
+
+```bash
+cd /opt/stock-analysis
+docker compose --env-file .env.production -f compose.production.yml up -d postgres
+infra/oci/scripts/restore-postgres.sh /opt/stock-analysis/backups/stock_analysis.dump
+```
+
+El restore exige escribir `RESTORE`, detiene API/scheduler, aplica `pg_restore` y luego Alembic.
+
+Si se trata de una instalación vacía, omití el dump: el servicio `migrate` crea/aplica el esquema
+antes de iniciar la API y el scheduler.
+
+## 6. Desplegar y habilitar backups
+
+```bash
+cd /opt/stock-analysis
+infra/oci/scripts/deploy.sh
+sudo infra/oci/scripts/install-operations.sh
+```
+
+Verificaciones:
+
+```bash
+docker compose --env-file .env.production -f compose.production.yml ps
+curl -fsS https://API_DOMAIN/health
+curl -fsS https://API_DOMAIN/api/v1/health/data-freshness
+systemctl list-timers stock-analysis-backup.timer
+```
+
+La primera emisión del certificado sólo funciona después de que DNS resuelva a la IP reservada
+y los puertos TCP 80/443 sean accesibles. QUIC/HTTP3 usa UDP 443 y también está habilitado.
+
+Los backups diarios quedan en `/srv/stock-platform/backups`. Son una primera red de seguridad,
+pero no protegen contra pérdida de la VM: antes de producción real, agregá copia off-host a OCI
+Object Storage o a otro proveedor.
+
+## 7. Frontend
+
+El frontend se construye con `frontend/Dockerfile.production`. Compose inyecta
+`NEXT_PUBLIC_API_URL=https://API_DOMAIN` durante el build y Caddy lo publica en el mismo
+hostname. `/api/*`, `/health`, `/docs*`, `/redoc*` y `/openapi.json` se enrutan a FastAPI;
+las demás rutas se enrutan a Next.js.
+
+Para reconstruir únicamente la interfaz:
+
+```bash
+docker compose --env-file .env.production -f compose.production.yml build frontend
+docker compose --env-file .env.production -f compose.production.yml up -d frontend caddy
+```
+
+## 8. Actualizaciones y rollback
+
+Deploy normal:
+
+```bash
+cd /opt/stock-analysis
+git fetch --all --prune
+git switch main
+git pull --ff-only
+infra/oci/scripts/deploy.sh
+```
+
+Antes de una migración relevante:
+
+```bash
+infra/oci/scripts/backup-postgres.sh
+```
+
+Para volver código atrás, seleccioná un commit conocido y ejecutá el deploy. No reviertas una
+migración de base a ciegas; restaurá un backup validado si el cambio de esquema no es compatible.
+
+## Checklist de salida
+
+- [ ] La infraestructura está en la home region y no incluye recursos pagos inesperados.
+- [ ] La IP es `RESERVED`, no efímera.
+- [ ] SSH está limitado a una IP `/32`.
+- [ ] DNS A resuelve a la IP reservada.
+- [ ] `.env.production` tiene permisos 600 y no está en Git.
+- [ ] Frontend, API, scheduler, PostgreSQL, Redis y Caddy están `running/healthy`.
+- [ ] Alembic llegó a `head`.
+- [ ] `/health` responde por HTTPS.
+- [ ] El endpoint de data freshness muestra heartbeats recientes.
+- [ ] El timer de backup está activo y un restore de prueba fue validado.
+- [ ] El dashboard carga datos reales y WebSocket por HTTPS.

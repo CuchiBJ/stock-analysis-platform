@@ -18,13 +18,10 @@ class SectorService:
         """Groups by market_group (~25 momentum-trading groups) — see market_group_mapping.py.
         The endpoint path /sectors/performance is preserved for compat but the unit of grouping
         changed from GICS L1 to market_group in 2026-05."""
-        # Window function avoids a second GROUP BY aggregation pass
+        # Sector leadership is a same-day market snapshot. Restricting the query
+        # to the newest snapshot lets PostgreSQL use the date index and avoids
+        # ranking every historical metric row on the first dashboard load.
         result = await self.db.execute(text("""
-            WITH latest AS (
-                SELECT *,
-                       ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) AS rn
-                FROM stock_metrics
-            )
             SELECT
                 s.market_group,
                 l.symbol,
@@ -33,9 +30,9 @@ class SectorService:
                 l.relative_volume,
                 l.pullback_quality_score,
                 l.relative_strength_spy
-            FROM latest l
+            FROM stock_metrics l
             JOIN stocks s ON s.symbol = l.symbol
-            WHERE l.rn = 1
+            WHERE l.date = (SELECT MAX(date) FROM stock_metrics)
               AND s.market_group IS NOT NULL
               AND l.avg_volume_10d  >= 800000
               AND l.current_price   >= 5.0
