@@ -104,10 +104,11 @@ def _bool(name: str, passes: bool, detail: str = "") -> Criterion:
 # ─── Per-list diagnostics ────────────────────────────────────────────────────
 
 def diagnose_actionable(m: StockMetrics) -> ListCheck:
-    """Mirrors _INSTITUTIONAL_SETUP + EMA trigger + /actionable extras."""
+    """Mirrors the actionable-only structural filter, trigger, and extras."""
     crit: list[Criterion] = []
 
-    # Institutional setup (9 conditions)
+    # Institutional setup. Distance to the 52-week high is a graded input to
+    # pullback_quality_score, not a Top Actionable eligibility condition.
     crit.append(_ge("avg_volume_10d ≥ 800k",            m.avg_volume_10d, 800_000))
     crit.append(_ge("adr_percent ≥ 4%",                  m.adr_percent, 4.0))
     crit.append(_ge("current_price ≥ $5",                m.current_price, 5.0))
@@ -115,7 +116,6 @@ def diagnose_actionable(m: StockMetrics) -> ListCheck:
     crit.append(_gt_field("price > EMA50",               m.current_price, m.ema50))
     crit.append(_gt_field("price > SMA150",              m.current_price, m.sma150))
     crit.append(_gt_field("SMA150 > SMA200",             m.sma150, m.sma200))
-    crit.append(_ge("distance to 52W high ≥ -3 ATR",     m.distance_to_high_52w_atr, -3.0))
     if m.current_price is not None and m.low_52w is not None:
         crit.append(Criterion(
             "price ≥ 52W low × 1.5",

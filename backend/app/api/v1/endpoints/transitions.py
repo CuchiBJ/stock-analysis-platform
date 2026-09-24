@@ -22,6 +22,10 @@ from app.services.regime_aware_engine import RegimeAwareEngine
 from app.services.context_decision_filter import compute_context_multiplier
 from app.services.group_strength_service import fetch_current_group_strengths, compute_group_multiplier
 from app.services.market_context_engine import MarketContextEngine
+from app.services.actionable_ranking import (
+    calculate_relative_strength_pullback_score,
+    get_rs_pullback_baselines,
+)
 from app.services.websocket_manager import websocket_manager
 from app.models.stock import Stock, StockMetrics, TransitionObservation
 from sqlalchemy import select, and_, or_, func, text
@@ -41,14 +45,13 @@ router = APIRouter()
 # - Strong long-term performance:        perf_1y > 30%
 # - Price above primary trend EMAs:      price > EMA50, price > SMA150
 # - Long-term trend confirmed:           SMA150 > SMA200
-# - Near 52-week high, far from low:     distance_to_high_52w_atr >= -3 ATR
-#                                        price >= 52w_low * 1.5
+# - Far from the 52-week low:            price >= 52w_low * 1.5
 # - Liquid and tradable:                 avg_volume_10d >= 800k, ADR >= 4%
 _LARGE_CAP_SYMBOLS = (
     select(Stock.symbol).where(Stock.market_cap >= 600_000_000)
 )
 
-_INSTITUTIONAL_SETUP = and_(
+_INSTITUTIONAL_SETUP_BASE = and_(
     # Universe membership: market cap ≥ $600M (excludes small/micro-caps + NULLs)
     StockMetrics.symbol.in_(_LARGE_CAP_SYMBOLS),
 
@@ -63,9 +66,16 @@ _INSTITUTIONAL_SETUP = and_(
     StockMetrics.current_price > StockMetrics.sma150,
     StockMetrics.sma150 > StockMetrics.sma200,
 
-    # Structural position
-    StockMetrics.distance_to_high_52w_atr >= -3.0,
+    # Structural position. Distance to the 52-week high is graded inside
+    # pullback_quality_score; it is intentionally not an actionable hard gate.
     StockMetrics.current_price >= StockMetrics.low_52w * 1.5,
+)
+
+# The live transition feed retains its stricter near-high universe. Top
+# Actionable Setups deliberately uses the base structure below instead.
+_INSTITUTIONAL_SETUP = and_(
+    _INSTITUTIONAL_SETUP_BASE,
+    StockMetrics.distance_to_high_52w_atr >= -3.0,
 )
 
 # ─── EMA trigger — near or just lost EMA9/EMA21 ──────────────────────────────
@@ -104,7 +114,7 @@ def _passes_breakout_trigger(metrics: StockMetrics) -> bool:
 
 # Combined: institutional quality REQUIRED + at least one EMA trigger zone
 _ACTIONABLE_FILTER = and_(
-    _INSTITUTIONAL_SETUP,
+    _INSTITUTIONAL_SETUP_BASE,
     or_(_EMA9_TRIGGER, _EMA21_TRIGGER),
 )
 
@@ -395,7 +405,7 @@ async def get_actionable_setups(
     - Transition strength (40%)
     - Freshness (25%)
     - Regime alignment (20%)
-    - Leader quality (15%)
+    - Relative strength during pullback (15%)
     """
     try:
         transition_engine = TransitionEngine(db)
@@ -422,7 +432,9 @@ async def get_actionable_setups(
         # Fetch group strength snapshot once — used for per-setup group multiplier
         group_perfs = await fetch_current_group_strengths(db)
 
-        # Get active setups with high pullback quality (latest date per symbol)
+        # Get active setups with high pullback quality (latest date per symbol).
+        # 52-week-high distance is already graded by pullback_quality_score and
+        # is not repeated as a discontinuous eligibility gate here.
         # Use subquery to filter to latest date per symbol
         subquery = (
             select(StockMetrics.symbol, func.max(StockMetrics.date).label('max_date'))
@@ -439,7 +451,6 @@ async def get_actionable_setups(
             .where(
                 and_(
                     StockMetrics.pullback_quality_score >= 55,
-                    StockMetrics.distance_to_high_52w_atr >= -3.0,
                     StockMetrics.avg_volume_10d >= 700000,
                     StockMetrics.adr_percent >= 3,
                     _EMA_PULLBACK_FILTER,
@@ -449,6 +460,8 @@ async def get_actionable_setups(
             .limit(50)
         )
         setups = result.scalars().all()
+
+        rs_baseline_map = await get_rs_pullback_baselines(db, setups)
 
         # Fetch real days_in_state from state log for all setup symbols at once
         setup_symbols = [s.symbol for s in setups]
@@ -494,7 +507,12 @@ async def get_actionable_setups(
         for setup in setups:
             days_in_state = days_in_state_map.get(setup.symbol, 1)
             priority_score, score_breakdown = await _calculate_priority_score_with_breakdown(
-                setup, regime, transition_engine, db, days_in_state
+                setup,
+                regime,
+                transition_engine,
+                db,
+                days_in_state,
+                rs_baseline_map.get(setup.symbol),
             )
             setup_type = _classify_setup_type(setup)
             narrative = _generate_priority_narrative(setup, priority_score, setup_type)
@@ -703,6 +721,7 @@ async def _calculate_priority_score(
     transition_engine: TransitionEngine,
     db: AsyncSession,
     days_in_state: int = 1,
+    rs_baseline: Optional[float] = None,
 ) -> float:
     """Calculate priority score for actionable setup.
 
@@ -710,7 +729,7 @@ async def _calculate_priority_score(
     that don't need the component-level detail.
     """
     score, _ = await _calculate_priority_score_with_breakdown(
-        setup, regime, transition_engine, db, days_in_state
+        setup, regime, transition_engine, db, days_in_state, rs_baseline
     )
     return score
 
@@ -835,6 +854,7 @@ async def _calculate_priority_score_with_breakdown(
     transition_engine: TransitionEngine,
     db: AsyncSession,
     days_in_state: int = 1,
+    rs_baseline: Optional[float] = None,
 ) -> tuple[float, dict]:
     """Calculate priority score AND return a per-component breakdown.
 
@@ -890,20 +910,25 @@ async def _calculate_priority_score_with_breakdown(
         'note': f'Current regime: {regime.regime.value}. Market-wide, uncontrollable per-symbol.',
     })
 
-    # ── 4. Leader quality (15%, same input as pq) ────────────────────────
-    lq_contrib = 0.15 * pq
+    # ── 4. Relative strength during pullback (15%) ──────────────────────
+    rs_pullback, rs_detail = calculate_relative_strength_pullback_score(
+        setup.relative_strength_spy,
+        rs_baseline,
+    )
+    rs_contrib = 0.15 * (rs_pullback / 100.0)
     components.append({
-        'name': 'leader_quality',
-        'value': pq * 100,
+        'name': 'relative_strength_pullback',
+        'value': rs_pullback,
         'max_value': 100.0,
-        'contribution': lq_contrib,
+        'contribution': rs_contrib,
         'max_contribution': 0.15,
-        'to_improve': round(0.15 - lq_contrib, 4),
+        'to_improve': round(0.15 - rs_contrib, 4),
         'kind': 'symbol_controllable',
-        'note': 'Same input as pullback_quality (raises both contributions together).',
+        'note': '60% current RS vs SPY level + 40% five-session RS trend; missing history is neutral.',
+        'detail': rs_detail,
     })
 
-    base_score = pq_contrib + fr_contrib + regime_val + lq_contrib
+    base_score = pq_contrib + fr_contrib + regime_val + rs_contrib
 
     # ── 5. Regime × setup-state confidence adjust (RegimeAwareEngine) ────
     setup_type = _classify_setup_type(setup)

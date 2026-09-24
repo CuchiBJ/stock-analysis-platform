@@ -27,6 +27,7 @@ from app.services.context_decision_filter import (
     compute_context_multiplier,
 )
 from app.services.benchmarks import is_benchmark, compute_index_trend
+from app.services.actionable_ranking import get_rs_pullback_baselines
 
 router = APIRouter()
 
@@ -401,8 +402,14 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
             from app.api.v1.endpoints.transitions import _get_days_in_state
             dis_map = await _get_days_in_state(db, [sym])
             days_in_state = dis_map.get(sym, 1)
+            rs_baseline_map = await get_rs_pullback_baselines(db, [metrics])
             base_score, breakdown = await _calculate_priority_score_with_breakdown(
-                metrics, regime, t_engine, db, days_in_state
+                metrics,
+                regime,
+                t_engine,
+                db,
+                days_in_state,
+                rs_baseline_map.get(sym),
             )
             ctx_v = ctx_mult.score_multiplier
             grp_v = group_mult.score_multiplier

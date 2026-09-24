@@ -176,7 +176,7 @@ const SCORE_COMPONENT_LABELS: Record<string, string> = {
   pullback_quality:  'Calidad del pullback',
   freshness:         'Freshness — días en estado',
   regime_alignment:  'Alineación con régimen',
-  leader_quality:    'Calidad de líder',
+  relative_strength_pullback: 'RS durante el pullback',
 }
 
 // Human-readable labels for list criteria — keyed on the backend's stable

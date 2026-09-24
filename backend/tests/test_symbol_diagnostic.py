@@ -78,6 +78,15 @@ class TestActionable:
         check = diagnose_actionable(m)
         assert not check.passes
 
+    def test_far_from_52w_high_remains_eligible_when_other_gates_pass(self):
+        m = _passing_metrics()
+        m.distance_to_high_52w_atr = -4.39
+
+        check = diagnose_actionable(m)
+
+        assert check.passes
+        assert not any(c.name == "distance to 52W high ≥ -3 ATR" for c in check.criteria)
+
 
 class TestLive:
     def test_passes_with_recent_obs(self):
@@ -87,6 +96,16 @@ class TestLive:
     def test_fails_without_recent_obs(self):
         check = diagnose_live(_passing_metrics(), has_recent_non_stable_obs=False)
         assert not check.passes
+
+    def test_retains_near_52w_high_gate(self):
+        m = _passing_metrics()
+        m.distance_to_high_52w_atr = -4.39
+
+        check = diagnose_live(m, has_recent_non_stable_obs=True)
+
+        assert not check.passes
+        near_high = next(c for c in check.criteria if c.name == "distance to 52W high ≥ -3 ATR")
+        assert not near_high.passes
 
 
 class TestUAndR:
