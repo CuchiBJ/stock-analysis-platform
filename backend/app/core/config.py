@@ -12,8 +12,11 @@ class Settings(BaseSettings):
     redis_url: str = Field("redis://localhost:6379/0", env="REDIS_URL")
 
     # Public account links and mail delivery. Development captures messages in
-    # memory; production startup validation requires an HTTPS origin and SMTP.
+    # memory; production requires HTTPS and either disabled public flows or SMTP.
     public_base_url: str = Field("http://localhost:3000", env="PUBLIC_BASE_URL")
+    auth_public_account_flows_enabled: bool = Field(
+        True, env="AUTH_PUBLIC_ACCOUNT_FLOWS_ENABLED"
+    )
     mailer_backend: str = Field("capture", env="MAILER_BACKEND")
     smtp_host: Optional[str] = Field(None, env="SMTP_HOST")
     smtp_port: int = Field(587, ge=1, le=65535, env="SMTP_PORT")

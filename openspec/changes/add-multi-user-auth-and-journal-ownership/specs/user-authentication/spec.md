@@ -120,3 +120,23 @@ The system SHALL provide an idempotent server-side bootstrap operation that crea
 - **GIVEN** the target administrator already exists with the expected role
 - **WHEN** the same bootstrap command is rerun
 - **THEN** it reports the existing identity and creates no duplicate account
+
+### Requirement: Production may run in explicit administrator-only mode
+The system SHALL support a production mode without SMTP only when public registration, verification, resend, and password-recovery/reset flows are explicitly disabled. Those endpoints MUST fail before creating accounts or tokens, the frontend SHALL expose login as the only public account page, and administrator password recovery SHALL remain available through the server-side CLI. Enabling public account flows in production MUST continue to require complete encrypted SMTP configuration.
+
+**Implementation:** `backend/app/core/config.py`, `backend/app/api/v1/endpoints/auth.py`, `backend/app/services/mailer.py`, `frontend/lib/auth-navigation.ts`, `compose.production.yml`
+
+#### Scenario: Administrator-only production starts without SMTP
+- **GIVEN** a public HTTPS base URL, `AUTH_PUBLIC_ACCOUNT_FLOWS_ENABLED=false`, and `MAILER_BACKEND=disabled`
+- **WHEN** the production application starts
+- **THEN** login/session/logout remain available while mail configuration is not required
+
+#### Scenario: Visitor attempts a disabled public account flow
+- **GIVEN** administrator-only mode
+- **WHEN** a visitor requests registration, verification, resend, forgot-password, or reset-password
+- **THEN** the request is rejected before any account, token, or mail mutation and the frontend offers no navigation to that flow
+
+#### Scenario: Public account mode is enabled without SMTP
+- **GIVEN** production has public account flows enabled
+- **WHEN** SMTP credentials or encrypted transport are incomplete
+- **THEN** startup fails closed

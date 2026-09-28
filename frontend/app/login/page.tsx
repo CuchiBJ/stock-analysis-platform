@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { FormEvent, useEffect, useState } from 'react'
 import { AuthShell, buttonClassName, FormMessage, inputClassName } from '@/components/auth/AuthShell'
 import { safePostLoginPath, useAuth } from '@/components/auth/AuthProvider'
+import { PUBLIC_ACCOUNT_FLOWS_ENABLED } from '@/lib/auth-navigation'
 import { ApiError } from '@/lib/api-client'
 import { validateEmail } from '@/lib/auth-validation'
 
@@ -43,7 +44,9 @@ export default function LoginPage() {
     <AuthShell
       title="Sign in"
       description="Access your private trading workspace."
-      footer={<span>New here? <Link className="text-foreground underline" href="/register">Create an account</Link></span>}
+      footer={PUBLIC_ACCOUNT_FLOWS_ENABLED
+        ? <span>New here? <Link className="text-foreground underline" href="/register">Create an account</Link></span>
+        : <span>Administrator access only. Account creation and email recovery are disabled.</span>}
     >
       <form onSubmit={submit} noValidate className="space-y-4">
         {error && <FormMessage kind="error">{error}</FormMessage>}
@@ -53,7 +56,7 @@ export default function LoginPage() {
         <label className="block text-sm font-medium" htmlFor="password">Password
           <input id="password" name="password" type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} className={inputClassName} disabled={busy} />
         </label>
-        <div className="text-right"><Link href="/forgot-password" className="text-sm underline">Forgot password?</Link></div>
+        {PUBLIC_ACCOUNT_FLOWS_ENABLED && <div className="text-right"><Link href="/forgot-password" className="text-sm underline">Forgot password?</Link></div>}
         <button className={buttonClassName} disabled={busy} type="submit">{busy ? 'Signing in…' : 'Sign in'}</button>
       </form>
     </AuthShell>

@@ -90,3 +90,10 @@
 - [x] 10.4 [user-profile] Verify registration creates exactly one profile, profile edits are owner-only, privileged fields remain immutable, and the account menu updates correctly.
 - [x] 10.5 [user-authentication] Run frontend lint/typecheck/build plus browser smoke tests over HTTPS for register, verify, login, recovery, protected navigation, profile, logout, and session expiry.
 - [x] 10.6 [journal-ownership] Perform the final release verification: admin sees every historical operation unchanged, a newly registered user starts with an empty journal, each user can independently import/create/manage/export trades, and neither can observe the other's private data.
+
+## 11. Administrator-only production mode
+
+- [x] 11.1 [user-authentication] Add explicit fail-closed configuration that permits production without SMTP only when public account flows and mail delivery are disabled.
+- [x] 11.2 [user-authentication] Reject disabled registration/verification/recovery endpoints before mutation and expose login as the sole public account page in administrator-only builds.
+- [x] 11.3 [user-authentication] Update Compose, environment examples, provisioning, and the OCI runbook for administrator-only deployment with later SMTP enablement.
+- [x] 11.4 [user-authentication] Add backend/frontend coverage and run static, build, and focused authentication verification.

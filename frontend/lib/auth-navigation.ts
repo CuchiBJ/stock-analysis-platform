@@ -1,9 +1,11 @@
+export const PUBLIC_ACCOUNT_FLOWS_ENABLED =
+  process.env.NEXT_PUBLIC_PUBLIC_ACCOUNT_FLOWS_ENABLED !== 'false'
+
 export const PUBLIC_AUTH_PATHS = [
   '/login',
-  '/register',
-  '/verify-email',
-  '/forgot-password',
-  '/reset-password',
+  ...(PUBLIC_ACCOUNT_FLOWS_ENABLED
+    ? ['/register', '/verify-email', '/forgot-password', '/reset-password']
+    : []),
 ] as const
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/

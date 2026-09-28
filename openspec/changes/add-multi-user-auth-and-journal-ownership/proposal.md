@@ -6,7 +6,7 @@ This change extends principle 6 (operational clarity over feature richness) and 
 
 ## What Changes
 
-- Add public email-and-password registration, login, logout, persistent authenticated sessions, and a minimal account-recovery flow suitable for the public web deployment.
+- Add email-and-password login, logout, persistent authenticated sessions, and optional public registration/recovery flows that can remain disabled for an administrator-only deployment without SMTP.
 - Add a user account and profile model with a stable identifier, unique normalized email, display name, role (`user` or `admin`), lifecycle state, and timestamps.
 - Protect application pages and private API operations; unauthenticated users are directed to authentication instead of receiving application or journal data.
 - Make every journal trade belong to exactly one user and scope all journal reads, statistics, imports, exports, draft-to-trade actions, edits, closes, stop histories, backfills, and deletes to the authenticated owner.
@@ -34,7 +34,7 @@ None. The current canonical specs do not define authentication, profiles, or jou
 - Backend: new user/profile persistence, password hashing and token/session infrastructure, authentication dependencies, journal query/mutation scoping, migration/backfill tooling, and authorization tests.
 - Frontend: registration, login, password-recovery and profile surfaces; authenticated session provider/API client; protected layouts; account navigation; authenticated CSV export.
 - Database: new user/profile/session or recovery-token tables, non-null journal owner foreign key, per-owner indexes/constraints, and an idempotent legacy-data assignment migration.
-- Deployment: new authentication secrets and public-origin/cookie settings, HTTPS-only production cookies, and an administrator bootstrap procedure integrated with backup/restore and deploy runbooks.
+- Deployment: explicit administrator-only and public-account modes, public-origin/cookie settings, HTTPS-only production cookies, and an administrator bootstrap procedure integrated with backup/restore and deploy runbooks.
 - APIs: journal operations become authenticated and return only the caller's resources; cross-owner resource identifiers are treated as not found.
 - Verification: automated tenant-isolation tests, migration rehearsal against a restored production backup, and public registration/login/profile/journal smoke tests.
 

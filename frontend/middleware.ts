@@ -15,5 +15,18 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/dashboard/:path*', '/queue/:path*', '/calibration/:path*', '/journal/:path*', '/chat/:path*', '/guide/:path*', '/stock/:path*', '/profile/:path*'],
+  matcher: [
+    '/dashboard/:path*',
+    '/queue/:path*',
+    '/calibration/:path*',
+    '/journal/:path*',
+    '/chat/:path*',
+    '/guide/:path*',
+    '/stock/:path*',
+    '/profile/:path*',
+    '/register/:path*',
+    '/verify-email/:path*',
+    '/forgot-password/:path*',
+    '/reset-password/:path*',
+  ],
 }

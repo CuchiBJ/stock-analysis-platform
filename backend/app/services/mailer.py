@@ -98,6 +98,20 @@ class CaptureMailer:
         )
 
 
+class DisabledMailer:
+    """Fail-closed adapter used only when every public account flow is disabled."""
+
+    async def send_verification_email(
+        self, *, recipient: str, verification_url: str
+    ) -> None:
+        raise MailConfigurationError("public account email delivery is disabled")
+
+    async def send_password_reset_email(
+        self, *, recipient: str, reset_url: str
+    ) -> None:
+        raise MailConfigurationError("public account email delivery is disabled")
+
+
 class SMTPMailer:
     """SMTP adapter whose blocking network work runs outside the event loop."""
 
@@ -205,9 +219,13 @@ def create_mailer(app_settings: Settings = settings) -> Mailer:
     backend = app_settings.mailer_backend.strip().casefold()
     if backend == "capture":
         return CaptureMailer()
+    if backend == "disabled":
+        return DisabledMailer()
     if backend == "smtp":
         return SMTPMailer(app_settings)
-    raise MailConfigurationError("MAILER_BACKEND must be 'capture' or 'smtp'")
+    raise MailConfigurationError(
+        "MAILER_BACKEND must be 'capture', 'disabled', or 'smtp'"
+    )
 
 
 def build_verification_url(
@@ -235,7 +253,14 @@ def validate_production_mail_settings(app_settings: Settings = settings) -> None
         raise MailConfigurationError(
             "PUBLIC_BASE_URL must use a public hostname in production"
         )
-    if app_settings.mailer_backend.strip().casefold() != "smtp":
+    backend = app_settings.mailer_backend.strip().casefold()
+    if not app_settings.auth_public_account_flows_enabled:
+        if backend != "disabled":
+            raise MailConfigurationError(
+                "MAILER_BACKEND must be 'disabled' when public account flows are disabled"
+            )
+        return
+    if backend != "smtp":
         raise MailConfigurationError("MAILER_BACKEND must be 'smtp' in production")
     _validate_smtp_settings(app_settings, require_credentials=True)
 
@@ -314,6 +339,7 @@ def _validate_action_url(value: str) -> str:
 __all__ = [
     "CaptureMailer",
     "CapturedEmail",
+    "DisabledMailer",
     "EmailKind",
     "Mailer",
     "MailConfigurationError",

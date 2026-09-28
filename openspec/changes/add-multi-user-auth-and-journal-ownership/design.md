@@ -44,6 +44,8 @@ Registration sends a verification link whose token expires after 24 hours. Passw
 
 Define a small mailer interface with an SMTP production adapter and a capture/log-safe development adapter; production refuses to start public auth if required mail settings are absent. This avoids coupling account logic to one email vendor while still making the public flow complete. Deferring all verification/recovery was rejected because it leaves public accounts unrecoverable and allows email-address squatting.
 
+Production also supports an explicit administrator-only mode for installations without a sender domain. In that mode the mailer is `disabled`, registration, verification, resend, and password-recovery/reset endpoints fail closed before mutation, and the frontend exposes login only. The bootstrapped verified administrator remains recoverable through the non-echoing server-side reset CLI. Public account flows cannot be enabled until production has complete encrypted SMTP configuration.
+
 ### 3. Authentication is enforced once at router/layout boundaries
 
 FastAPI exposes `/api/v1/auth/*` and `/api/v1/profile`. Every `/api/v1/*` route other than registration/login/verification/recovery and explicit health endpoints depends on `get_current_user`; protected WebSocket connections authenticate during the handshake. Caddy continues to expose root `/health` without auth for container and load-balancer checks.
@@ -106,7 +108,7 @@ The claim command supports `--dry-run` and emits counts, never journal contents.
 ## Migration Plan
 
 1. Rehearse the complete expand/bootstrap/claim/contract flow against a restored production backup and save the validation report.
-2. Configure session, CSRF, trusted-origin, SMTP, and public-base-URL secrets; confirm they are excluded from source control and logs.
+2. Configure session, CSRF, trusted-origin, and public-base-URL settings. Choose administrator-only mode with disabled mail, or configure encrypted SMTP before enabling public account flows; confirm secrets are excluded from source control and logs.
 3. Put the journal into a maintenance window, take an off-host-capable backup, and execute the staged migration described above.
 4. Deploy API and frontend together, then verify admin login and historical counts before reopening registration.
 5. Run two-account isolation, registration/verification, recovery, profile, import/export, create/edit/close/delete, and logout cache-clearing smoke tests over HTTPS.
@@ -116,5 +118,5 @@ Rollback before the contract migration is transaction rollback plus the prior ap
 
 ## Open Questions
 
-- Which SMTP service and sender domain will be used in production? The contract is provider-neutral, but credentials and DNS records must exist before public registration is enabled.
+- Which SMTP service and sender domain will be used if public accounts are enabled later? Administrator-only mode does not require one.
 - What final public hostname replaces the temporary `sslip.io` address? Cookie host scope and verification/reset links require a stable HTTPS base URL before launch.

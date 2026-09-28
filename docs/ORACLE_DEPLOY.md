@@ -58,7 +58,7 @@ Necesitás:
 4. Terraform >= 1.6.
 5. Una clave SSH pública.
 6. Un hostname público y estable para la aplicación, por ejemplo `app.example.com`.
-7. Un proveedor SMTP con TLS y un dominio remitente verificado.
+7. Sólo si se habilitan cuentas públicas: un proveedor SMTP con TLS y un dominio remitente verificado.
 
 Se puede usar dominio propio o un hostname compatible con Let's Encrypt como `sslip.io`
 durante la transición.
@@ -134,16 +134,19 @@ Usá el valor hexadecimal como `POSTGRES_PASSWORD` y dentro de `DATABASE_URL`. C
 - `IBKR_FLEX_TOKEN` y `IBKR_FLEX_QUERY_ID`, sólo si se usa el sync.
 - `CORS_ORIGINS`, con los orígenes HTTPS adicionales que necesiten llamar a la API.
 - `API_DOMAIN`, el hostname cuyo A record apunta a la IP reservada.
-- `PUBLIC_BASE_URL=https://API_DOMAIN`, sin path, query ni credenciales. Se usa para los links
-  de verificación y recuperación.
-- `MAILER_BACKEND=smtp`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
-  `SMTP_FROM_EMAIL` y el modo TLS (`SMTP_USE_STARTTLS=true` o `SMTP_USE_SSL=true`, nunca ambos).
+- `PUBLIC_BASE_URL=https://API_DOMAIN`, sin path, query ni credenciales.
+- Para una instalación personal sin correo: `AUTH_PUBLIC_ACCOUNT_FLOWS_ENABLED=false` y
+  `MAILER_BACKEND=disabled`; dejá vacías las variables SMTP.
+- Para habilitar cuentas públicas: `AUTH_PUBLIC_ACCOUNT_FLOWS_ENABLED=true`,
+  `MAILER_BACKEND=smtp`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
+  `SMTP_FROM_EMAIL` y un solo modo TLS (`SMTP_USE_STARTTLS=true` o `SMTP_USE_SSL=true`).
 
-En producción la API rechaza al iniciar una URL pública que no sea HTTPS, el backend de correo
-de captura y una configuración SMTP incompleta o sin transporte cifrado. La sesión usa el
-cookie host-only `__Host-session` (`Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`), con vencimiento
-absoluto a 30 días; las mutaciones autenticadas requieren el header `X-CSRF-Token`. Estos son
-contratos fijos del código y no secretos configurables.
+En producción la API rechaza una URL pública que no sea HTTPS y cualquier combinación ambigua:
+modo administrador requiere mailer `disabled`; modo público requiere SMTP completo y cifrado.
+El modo administrador bloquea registro, verificación, reenvío y recuperación/reset por email antes
+de escribir en la base. La sesión usa el cookie host-only `__Host-session` (`Secure`, `HttpOnly`,
+`SameSite=Lax`, `Path=/`), vence a 30 días y las mutaciones autenticadas requieren
+`X-CSRF-Token`.
 
 `.env.production` está ignorado por Git. No pongas secretos en `terraform.tfvars`, `cloud-init` ni
 el historial del shell.
@@ -302,10 +305,11 @@ de la VM.
    infra/oci/scripts/deploy.sh
    ```
 
-7. Verificá por HTTPS que el administrador puede iniciar sesión y conserva todas sus operaciones;
-   registrá un usuario de prueba, verificá su email y confirmá que empieza con journal vacío. Recién
-   entonces retirale el modo mantenimiento o la restricción temporal a Caddy. Al quedar públicas
-   las rutas de la aplicación, el registro público queda habilitado; no hay un flag separado.
+7. Verificá por HTTPS que el administrador puede iniciar sesión y conserva todas sus operaciones.
+   En modo administrador confirmá además que `/register`, `/verify-email`, `/forgot-password` y
+   `/reset-password` redirigen a login y que sus APIs responden `404`. Si habilitaste cuentas
+   públicas, registrá un usuario de prueba, verificá su email y confirmá que empieza con journal
+   vacío. Recién entonces retirale el modo mantenimiento o la restricción temporal a Caddy.
 
 Antes del paso 5, el rollback consiste en mantener los servicios detenidos, corregir la causa y
 repetir el claim; la simulación siempre hace rollback y la expansión todavía permite ownership
@@ -340,9 +344,10 @@ integrá el stream de logs en el monitor externo.
 - [ ] La IP es `RESERVED`, no efímera.
 - [ ] SSH está limitado a una IP `/32`.
 - [ ] DNS A resuelve a la IP reservada.
-- [ ] SPF, DKIM y DMARC están publicados y el remitente SMTP fue validado.
+- [ ] Si las cuentas públicas están habilitadas, SPF, DKIM y DMARC están publicados y el remitente SMTP fue validado.
 - [ ] `.env.production` tiene permisos 600 y no está en Git.
 - [ ] `PUBLIC_BASE_URL`, CORS y `API_DOMAIN` describen el mismo origen HTTPS canónico.
+- [ ] El modo de cuentas es explícito: administrador + mailer disabled, o público + SMTP cifrado.
 - [ ] Frontend, API, scheduler, PostgreSQL, Redis y Caddy están `running/healthy`.
 - [ ] Alembic llegó a `head`.
 - [ ] `/health` responde por HTTPS.

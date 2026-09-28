@@ -18,3 +18,17 @@ test('only explicit authentication pages are public', () => {
   assert.equal(isPublicAuthPath('/reset-password'), true)
   assert.equal(isPublicAuthPath('/journal'), false)
 })
+
+test('admin-only build exposes login as the sole public account page', async () => {
+  const previous = process.env.NEXT_PUBLIC_PUBLIC_ACCOUNT_FLOWS_ENABLED
+  process.env.NEXT_PUBLIC_PUBLIC_ACCOUNT_FLOWS_ENABLED = 'false'
+  try {
+    const adminOnly = await import(`./auth-navigation.ts?admin-only=${Date.now()}`)
+    assert.deepEqual(adminOnly.PUBLIC_AUTH_PATHS, ['/login'])
+    assert.equal(adminOnly.isPublicAuthPath('/register'), false)
+    assert.equal(adminOnly.isPublicAuthPath('/forgot-password'), false)
+  } finally {
+    if (previous === undefined) delete process.env.NEXT_PUBLIC_PUBLIC_ACCOUNT_FLOWS_ENABLED
+    else process.env.NEXT_PUBLIC_PUBLIC_ACCOUNT_FLOWS_ENABLED = previous
+  }
+})

@@ -124,6 +124,82 @@ def test_registration_rejects_blank_display_name_and_normalizes_surrounding_spac
     assert payload.display_name == "Person Name"
 
 
+def test_admin_only_mode_rejects_registration_before_rate_limit_or_database_work(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        auth_api.settings, "auth_public_account_flows_enabled", False
+    )
+    db = _Database()
+    limiter = _Limiter()
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(
+            auth_api.register(
+                RegistrationRequest(
+                    email="person@example.com",
+                    password=VALID_PASSWORD,
+                    display_name="Person",
+                ),
+                _request(),
+                None,
+                db,
+                limiter,
+                CaptureMailer(),
+            )
+        )
+
+    assert raised.value.status_code == 404
+    assert raised.value.detail == auth_api.PUBLIC_ACCOUNT_FLOWS_DISABLED
+    assert limiter.calls == []
+    assert (db.commits, db.rollbacks) == (0, 0)
+
+
+def test_admin_only_mode_rejects_every_token_and_recovery_flow_before_mutation(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        auth_api.settings, "auth_public_account_flows_enabled", False
+    )
+    db = _Database()
+    limiter = _Limiter()
+    mailer = CaptureMailer()
+    operations = (
+        lambda: auth_api.verify_email(TokenRequest(token=ACTION_TOKEN), None, db),
+        lambda: auth_api.resend_verification(
+            EmailRequest(email="person@example.com"),
+            _request(),
+            None,
+            db,
+            limiter,
+            mailer,
+        ),
+        lambda: auth_api.forgot_password(
+            EmailRequest(email="person@example.com"),
+            _request(),
+            None,
+            db,
+            limiter,
+            mailer,
+        ),
+        lambda: auth_api.complete_password_reset(
+            PasswordResetRequest(token=ACTION_TOKEN, new_password=VALID_PASSWORD),
+            None,
+            db,
+        ),
+    )
+
+    for operation in operations:
+        with pytest.raises(HTTPException) as raised:
+            asyncio.run(operation())
+        assert raised.value.status_code == 404
+        assert raised.value.detail == auth_api.PUBLIC_ACCOUNT_FLOWS_DISABLED
+
+    assert limiter.calls == []
+    assert (db.commits, db.rollbacks) == (0, 0)
+    assert mailer.messages == ()
+
+
 @pytest.mark.parametrize("account_exists", [False, True])
 def test_register_returns_same_accepted_message_for_new_and_duplicate_email(
     monkeypatch,

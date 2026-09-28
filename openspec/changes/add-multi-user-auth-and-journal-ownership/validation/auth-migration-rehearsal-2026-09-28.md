@@ -73,14 +73,15 @@ The unchanged source backup was restored again into a second empty PostgreSQL vo
 
 ## Application verification
 
-- Backend official suite: 451 tests passed.
-- Focused migration/admin/two-user matrix: 16 tests passed.
-- Frontend unit tests: 14 passed.
+- Backend official suite: 456 tests passed.
+- Focused administrator-only authentication matrix: 22 tests passed.
+- Frontend unit tests: 15 passed.
 - Frontend lint, typecheck, and production build passed.
+- Administrator-only production smoke passed: login rendered normally while registration and recovery redirected to login.
 - HTTPS Chromium smoke passed for protected redirect, registration, email verification, login, profile read/update, logout, recovery/reset, post-reset login, and expired-session rejection.
 - Shared-browser Chromium smoke passed: the second user observed no first-user profile, journal rows, statistics, drafts, or account balance.
 - The adversarial API matrix passed for independent list, stats, export, import/replace, create, edit, close, delete, stop history, queue-to-trade, backfill, and broker-ID behavior; foreign identifiers returned indistinguishable not-found responses without mutation.
 
 ## Result
 
-The migration is operationally rehearsed and its data invariants pass. Production execution still requires a maintenance window, real administrator identity, production SMTP configuration, and explicit execution of the documented backup/preflight/expand/bootstrap/claim/contract sequence.
+The migration is operationally rehearsed and its data invariants pass. Production execution still requires a maintenance window, real administrator identity, and explicit execution of the documented backup/preflight/expand/bootstrap/claim/contract sequence. SMTP is required only if public account flows are enabled; the selected administrator-only mode uses the disabled mailer and server-side password reset.

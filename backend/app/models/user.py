@@ -239,3 +239,8 @@ class PasswordResetToken(_SingleUseToken, Base):
         ),
         Index("ix_password_reset_tokens_user_expires", "user_id", "expires_at"),
     )
+
+
+# Register the journal side of User.journal_trades when identity models are
+# imported in isolation (CLI commands and focused auth tests do this).
+from app.models import stock as _stock_models  # noqa: E402,F401

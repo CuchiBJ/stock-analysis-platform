@@ -68,6 +68,7 @@ router = APIRouter(prefix="/auth")
 GENERIC_ACCOUNT_MESSAGE = "If the account is eligible, an email has been sent."
 GENERIC_LOGIN_ERROR = "Invalid email or password."
 INVALID_TOKEN_ERROR = "The token is invalid or expired."
+PUBLIC_ACCOUNT_FLOWS_DISABLED = "Public account flows are disabled."
 
 
 def get_auth_rate_limiter() -> AuthRateLimiter:
@@ -76,6 +77,14 @@ def get_auth_rate_limiter() -> AuthRateLimiter:
 
 def get_mailer() -> Mailer:
     return create_mailer(settings)
+
+
+def require_public_account_flows() -> None:
+    if not settings.auth_public_account_flows_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=PUBLIC_ACCOUNT_FLOWS_DISABLED,
+        )
 
 
 def _request_source(request: Request) -> str:
@@ -131,6 +140,7 @@ async def register(
     limiter: Annotated[AuthRateLimiter, Depends(get_auth_rate_limiter)],
     mailer: Annotated[Mailer, Depends(get_mailer)],
 ) -> AuthMessage:
+    require_public_account_flows()
     await _enforce_rate_limit(
         limiter, AuthRateLimitAction.REGISTRATION, request, payload.email
     )
@@ -165,6 +175,7 @@ async def verify_email(
     _origin: Annotated[None, Depends(require_trusted_origin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AuthMessage:
+    require_public_account_flows()
     user = await verify_email_token(db, payload.token)
     if user is None:
         await db.rollback()
@@ -190,6 +201,7 @@ async def resend_verification(
     limiter: Annotated[AuthRateLimiter, Depends(get_auth_rate_limiter)],
     mailer: Annotated[Mailer, Depends(get_mailer)],
 ) -> AuthMessage:
+    require_public_account_flows()
     await _enforce_rate_limit(
         limiter, AuthRateLimitAction.VERIFICATION_RESEND, request, payload.email
     )
@@ -289,6 +301,7 @@ async def forgot_password(
     limiter: Annotated[AuthRateLimiter, Depends(get_auth_rate_limiter)],
     mailer: Annotated[Mailer, Depends(get_mailer)],
 ) -> AuthMessage:
+    require_public_account_flows()
     await _enforce_rate_limit(limiter, AuthRateLimitAction.RECOVERY, request, payload.email)
     issued = await issue_password_reset_token(db, payload.email)
     await db.commit()
@@ -306,6 +319,7 @@ async def complete_password_reset(
     _origin: Annotated[None, Depends(require_trusted_origin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AuthMessage:
+    require_public_account_flows()
     user = await reset_password(
         db,
         raw_token=payload.token,
