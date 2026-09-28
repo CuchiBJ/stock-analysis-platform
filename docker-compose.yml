@@ -16,6 +16,18 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: stock-analysis-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: ./backend
@@ -23,12 +35,18 @@ services:
     container_name: stock-analysis-backend
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/stock_analysis
+      REDIS_URL: redis://redis:6379/0
       POLYGON_API_KEY: ${POLYGON_API_KEY:-}
       CORS_ORIGINS: http://localhost:3000
+      APP_ENVIRONMENT: development
+      PUBLIC_BASE_URL: http://localhost:3000
+      MAILER_BACKEND: capture
     ports:
       - "8000:8000"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     volumes:
       - ./backend:/app
@@ -52,3 +70,4 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:

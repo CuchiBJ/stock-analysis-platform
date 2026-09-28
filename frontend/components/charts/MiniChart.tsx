@@ -11,7 +11,6 @@ interface MiniChartProps {
 
 export default function MiniChart({ data, color = 'neutral', height = 40 }: MiniChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null)
-  const chartRef = useRef<any>(null)
 
   useEffect(() => {
     if (!chartContainerRef.current || data.length < 2) return
@@ -52,8 +51,6 @@ export default function MiniChart({ data, color = 'neutral', height = 40 }: Mini
 
     lineSeries.setData(chartData)
     chart.timeScale().fitContent()
-
-    chartRef.current = chart
 
     const handleResize = () => {
       if (chartContainerRef.current) {

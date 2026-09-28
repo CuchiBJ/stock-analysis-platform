@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 import DashboardLayout from '@/components/layout/DashboardLayout'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
@@ -143,7 +143,7 @@ export default function CalibrationPage() {
 
   useEffect(() => {
     let cancelled = false
-    fetch(`${API_URL}/api/v1/calibration/by-transition-type`)
+    apiFetch('/api/v1/calibration/by-transition-type')
       .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
       .then(payload => { if (!cancelled) { setData(payload); setError(null) } })
       .catch(reason => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)) })

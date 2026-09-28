@@ -1,4 +1,4 @@
-"""Deterministic ranking inputs used by Top Actionable Setups."""
+"""Legacy deterministic RS helper retained for historical calibration tests."""
 
 from typing import Optional
 

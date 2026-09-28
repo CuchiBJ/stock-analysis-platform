@@ -16,7 +16,7 @@ For live trades created from this point on, take_entry_snapshot at POST time
 captures all 4 fields properly.
 
 Usage:
-    python scripts/backfill_journal_snapshots.py [--dry-run]
+    python scripts/backfill_journal_snapshots.py --owner-email user@example.com [--dry-run]
 
 Exit code: 0 on success, 1 on uncaught exception.
 """
@@ -26,31 +26,43 @@ import argparse
 import asyncio
 import sys
 
-from sqlalchemy import select, or_
+from sqlalchemy import select
 
 from app.core.deps import AsyncSessionLocal
 from app.models.stock import JournalTrade
+from app.models.user import User, normalize_email
+from app.repositories.journal_repository import JournalRepository
 from app.services.journal_snapshot_service import (
     _snapshot_group_strength,
     _snapshot_system_score,
 )
 
 
-async def main(dry_run: bool) -> int:
+async def main(dry_run: bool, owner_email: str) -> int:
     updated = 0
     missing_all = 0
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(JournalTrade).where(
-                or_(
-                    JournalTrade.regime_at_entry.is_(None),
-                    JournalTrade.system_score_at_entry.is_(None),
-                    JournalTrade.group_strength_at_entry.is_(None),
-                    JournalTrade.leader_health_at_entry.is_(None),
+        owner = await db.scalar(
+            select(User).where(User.email == normalize_email(owner_email))
+        )
+        if owner is None:
+            raise ValueError("owner account not found")
+        owner_rows = await JournalRepository(db).list_trades(
+            owner_user_id=owner.id
+        )
+        rows = [
+            trade
+            for trade in owner_rows
+            if any(
+                value is None
+                for value in (
+                    trade.regime_at_entry,
+                    trade.system_score_at_entry,
+                    trade.group_strength_at_entry,
+                    trade.leader_health_at_entry,
                 )
             )
-        )
-        rows = list(result.scalars())
+        ]
         print(f"Candidates: {len(rows)} trades with at least one null snapshot field")
 
         for trade in rows:
@@ -83,6 +95,7 @@ async def main(dry_run: bool) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--owner-email", required=True)
     parser.add_argument("--dry-run", action="store_true", help="Compute but do not commit")
     args = parser.parse_args()
-    sys.exit(asyncio.run(main(dry_run=args.dry_run)))
+    sys.exit(asyncio.run(main(dry_run=args.dry_run, owner_email=args.owner_email)))

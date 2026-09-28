@@ -12,7 +12,6 @@ interface SparklineProps {
 
 export default function Sparkline({ data, color = '#22c55e', width = 100, height = 30 }: SparklineProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null)
-  const chartRef = useRef<any>(null)
 
   useEffect(() => {
     if (!chartContainerRef.current || data.length < 2) return
@@ -36,7 +35,7 @@ export default function Sparkline({ data, color = '#22c55e', width = 100, height
 
     const lineSeries = chart.addLineSeries({
       color,
-      lineWidth: 2 as any,
+      lineWidth: 2,
     })
 
     const chartData = data.map((value, index) => ({
@@ -46,8 +45,6 @@ export default function Sparkline({ data, color = '#22c55e', width = 100, height
 
     lineSeries.setData(chartData)
     chart.timeScale().fitContent()
-
-    chartRef.current = chart
 
     return () => {
       chart.remove()

@@ -1,7 +1,9 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
+import { useAuth } from '@/components/auth/AuthProvider'
+import { readJournalStorage, writeJournalStorage } from '@/lib/private-state'
 import { X } from 'lucide-react'
 
 export interface Vocab {
@@ -61,17 +63,7 @@ export interface StopEvent {
   auto_classified: boolean
 }
 
-const ACCOUNT_BALANCE_LS_KEY = 'journal_account_balance'
-
-function loadAccountBalance(): string {
-  if (typeof window === 'undefined') return ''
-  return window.localStorage.getItem(ACCOUNT_BALANCE_LS_KEY) || ''
-}
-
-function saveAccountBalance(value: string) {
-  if (typeof window === 'undefined') return
-  if (value) window.localStorage.setItem(ACCOUNT_BALANCE_LS_KEY, value)
-}
+const ACCOUNT_BALANCE_STORAGE_NAME = 'account-balance'
 
 export function StopEventBadge({ kind }: { kind: string }) {
   const styles: Record<string, string> = {
@@ -137,6 +129,7 @@ export function NewTradeModal({
   onSaved: () => void
   prefill?: TradeDraftPrefill
 }) {
+  const { user } = useAuth()
   const hasPrefill = !!prefill
   const [symbol, setSymbol] = useState(prefill?.symbol ?? '')
   const [entryDate, setEntryDate] = useState(today())
@@ -148,7 +141,9 @@ export function NewTradeModal({
   // Field stays in payload as 'unknown' default so backend NOT NULL stays happy.
   const [entryReason, setEntryReason] = useState(prefill?.entry_reason ?? 'discretionary')
   const [plannedRiskDollars, setPlannedRiskDollars] = useState('')
-  const [accountBalance, setAccountBalance] = useState(loadAccountBalance())
+  const [accountBalance, setAccountBalance] = useState(
+    () => user ? readJournalStorage(user.id, ACCOUNT_BALANCE_STORAGE_NAME) ?? '' : '',
+  )
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -167,7 +162,7 @@ export function NewTradeModal({
     e.preventDefault()
     setSaving(true); setErr(null)
     try {
-      const body: any = {
+      const body: Record<string, string | number | boolean | null> = {
         symbol, entry_date: entryDate,
         entry_price: entryNum, qty: qtyNum,
         setup, context: 'unknown',
@@ -177,11 +172,11 @@ export function NewTradeModal({
       if (plannedRiskNum > 0) body.planned_risk_dollars = plannedRiskNum
       if (balanceNum > 0) {
         body.account_balance_at_entry = balanceNum
-        saveAccountBalance(accountBalance)
+        if (user) writeJournalStorage(user.id, ACCOUNT_BALANCE_STORAGE_NAME, accountBalance)
       }
       // When prefilled from queue, persist the provenance flag
       if (hasPrefill && prefill?.from_queue) body.from_queue = true
-      const res = await fetch(`${API_URL}/api/v1/journal/trades`, {
+      const res = await apiFetch('/api/v1/journal/trades', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       })
       if (!res.ok) {
@@ -190,8 +185,8 @@ export function NewTradeModal({
       }
       onSaved()
       onClose()
-    } catch (e: any) {
-      setErr(e.message)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
     } finally {
       setSaving(false)
     }
@@ -308,7 +303,7 @@ export function CloseTradeModal({
     e.preventDefault()
     setSaving(true); setErr(null)
     try {
-      const body: any = {
+      const body: Record<string, string | number | boolean | null> = {
         exit_date: exitDate, exit_price: exitNum,
         error_note: errorNote || null, post_venta: postVenta || null,
       }
@@ -316,7 +311,7 @@ export function CloseTradeModal({
       if (isPartial) body.qty = qtyNum
       // exit_reason: empty string = auto-infer (backend assigns partial_take on partial, keeps current on full)
       if (exitReason) body.exit_reason = exitReason
-      const res = await fetch(`${API_URL}/api/v1/journal/trades/${trade.id}/close`, {
+      const res = await apiFetch(`/api/v1/journal/trades/${trade.id}/close`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       })
       if (!res.ok) {
@@ -324,8 +319,8 @@ export function CloseTradeModal({
         throw new Error(d.detail || `HTTP ${res.status}`)
       }
       onSaved(); onClose()
-    } catch (e: any) {
-      setErr(e.message)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
     } finally {
       setSaving(false)
     }
@@ -406,6 +401,7 @@ export function EditTradeModal({
   onClose: () => void
   onSaved: () => void
 }) {
+  const { user } = useAuth()
   const [symbol, setSymbol] = useState(trade.symbol)
   const [setup, setSetup] = useState(trade.setup)
   const [context, setContext] = useState(trade.context)
@@ -423,14 +419,20 @@ export function EditTradeModal({
   const [entryReason, setEntryReason] = useState(trade.entry_reason || 'other')
   const [exitReason, setExitReason] = useState(trade.exit_reason || 'unknown')
   const [plannedRiskDollars, setPlannedRiskDollars] = useState(trade.planned_risk_dollars != null ? String(trade.planned_risk_dollars) : '')
-  const [accountBalance, setAccountBalance] = useState(trade.account_balance_at_entry != null ? String(trade.account_balance_at_entry) : loadAccountBalance())
+  const [accountBalance, setAccountBalance] = useState(
+    () => trade.account_balance_at_entry != null
+      ? String(trade.account_balance_at_entry)
+      : user
+        ? readJournalStorage(user.id, ACCOUNT_BALANCE_STORAGE_NAME) ?? ''
+        : '',
+  )
   const [stopEvents, setStopEvents] = useState<StopEvent[]>([])
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    fetch(`${API_URL}/api/v1/journal/trades/${trade.id}/stop-history`)
+    apiFetch(`/api/v1/journal/trades/${trade.id}/stop-history`)
       .then(r => r.ok ? r.json() : Promise.reject(r.status))
       .then(d => { if (!cancelled) setStopEvents(d.events || []) })
       .catch(e => console.warn('stop-history fetch failed', e))
@@ -451,7 +453,7 @@ export function EditTradeModal({
     e.preventDefault()
     setSaving(true); setErr(null)
     try {
-      const body: any = {
+      const body: Record<string, string | number | boolean | null> = {
         symbol, setup, context,
         entry_date: entryDate || null,
         entry_price: parseFloat(entryPrice),
@@ -467,8 +469,10 @@ export function EditTradeModal({
         planned_risk_dollars: editPlannedRiskNum > 0 ? editPlannedRiskNum : null,
         account_balance_at_entry: editBalanceNum > 0 ? editBalanceNum : null,
       }
-      if (editBalanceNum > 0) saveAccountBalance(accountBalance)
-      const res = await fetch(`${API_URL}/api/v1/journal/trades/${trade.id}`, {
+      if (editBalanceNum > 0 && user) {
+        writeJournalStorage(user.id, ACCOUNT_BALANCE_STORAGE_NAME, accountBalance)
+      }
+      const res = await apiFetch(`/api/v1/journal/trades/${trade.id}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       })
       if (!res.ok) {
@@ -476,8 +480,8 @@ export function EditTradeModal({
         throw new Error(d.detail || `HTTP ${res.status}`)
       }
       onSaved(); onClose()
-    } catch (e: any) {
-      setErr(e.message)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
     } finally {
       setSaving(false)
     }

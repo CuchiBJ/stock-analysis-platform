@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import { ExternalLink } from 'lucide-react'
@@ -66,8 +66,8 @@ export default function BuildingBasesQueue({ refreshKey }: Props) {
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    fetch(`${API_URL}/api/v1/queue/building-bases`)
+    queueMicrotask(() => setLoading(true))
+    apiFetch('/api/v1/queue/building-bases')
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(data => {
         if (cancelled) return

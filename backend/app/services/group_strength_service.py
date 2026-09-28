@@ -5,7 +5,7 @@ but operating at the group level. See: openspec/changes/wire-group-strength-to-s
 
 Each stock's market_group is ranked by performance_monthly among the ~24 active
 groups. Top 20% → leader/1.15 boost; bottom 20% → weak/0.85 penalty; rest → neutral.
-Multiplier is applied compositionally in the /actionable endpoint, after ctx_multiplier.
+Group rank is consumed by Setups Forming and queue presentation as explicit context.
 Queue endpoints surface only the badge — no sort modification.
 """
 from __future__ import annotations

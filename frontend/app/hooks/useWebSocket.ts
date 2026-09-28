@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useId, useRef, useState, useCallback } from 'react';
 
 interface PriceUpdate {
   symbol: string;
@@ -20,7 +20,7 @@ interface PriceUpdate {
 interface UseWebSocketOptions {
   url?: string;
   channels?: string[];
-  onMessage?: (message: any) => void;
+  onMessage?: (message: unknown) => void;
   onConnect?: () => void;
   onDisconnect?: () => void;
   onError?: (error: Event) => void;
@@ -29,7 +29,7 @@ interface UseWebSocketOptions {
 
 export function useWebSocket(options: UseWebSocketOptions = {}) {
   const {
-    url = `${process.env.NEXT_PUBLIC_API_URL?.replace('http', 'ws') || 'ws://localhost:8000'}/api/v1/ws`,
+    url,
     channels = ['price_update'],
     onMessage,
     onConnect,
@@ -40,9 +40,10 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
 
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const clientIdRef = useRef<string>(`client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+  const clientId = useId();
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -50,7 +51,10 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     }
 
     try {
-      const wsUrl = `${url}?client_id=${clientIdRef.current}`;
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const endpoint = url ?? `${protocol}//${window.location.host}/api/v1/ws`;
+      const separator = endpoint.includes('?') ? '&' : '?';
+      const wsUrl = `${endpoint}${separator}client_id=${encodeURIComponent(clientId)}`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
@@ -87,7 +91,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
 
         // Attempt reconnection
         reconnectTimeoutRef.current = setTimeout(() => {
-          connect();
+          setReconnectAttempt(attempt => attempt + 1);
         }, reconnectInterval);
       };
 
@@ -99,7 +103,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       setError(err as Error);
       onError?.(err as Event);
     }
-  }, [url, channels, onMessage, onConnect, onDisconnect, onError, reconnectInterval]);
+  }, [url, channels, onMessage, onConnect, onDisconnect, onError, reconnectInterval, clientId]);
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -107,6 +111,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     }
 
     if (wsRef.current) {
+      wsRef.current.onclose = null;
       wsRef.current.close();
       wsRef.current = null;
     }
@@ -133,12 +138,12 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
   }, []);
 
   useEffect(() => {
-    connect();
+    queueMicrotask(() => connect());
 
     return () => {
       disconnect();
     };
-  }, [connect, disconnect]);
+  }, [connect, disconnect, reconnectAttempt]);
 
   return {
     isConnected,
@@ -149,14 +154,16 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
 }
 
 export function useRealtimePrices(symbols: string[] = []) {
+  void symbols;
   const [prices, setPrices] = useState<Map<string, PriceUpdate>>(new Map());
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
 
-  const handlePriceUpdate = useCallback((message: any) => {
-    if (message.channel === 'price_update' && message.data) {
+  const handlePriceUpdate = useCallback((message: unknown) => {
+    const envelope = message as { channel?: unknown; data?: PriceUpdate };
+    if (envelope.channel === 'price_update' && envelope.data) {
       setPrices(prev => {
         const newPrices = new Map(prev);
-        newPrices.set(message.data.symbol, message.data);
+        newPrices.set(envelope.data!.symbol, envelope.data!);
         return newPrices;
       });
       setLastUpdate(new Date().toISOString());

@@ -4,10 +4,21 @@ import { useEffect, useState } from 'react'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import { TrendingUp, TrendingDown, Activity, Flame, ArrowDown } from 'lucide-react'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 import SectorConstituentsDrawer from '@/components/dashboard/SectorConstituentsDrawer'
 
 type ViewMode = 'daily' | 'weekly' | 'monthly' | 'rs_spy' | 'momentum' | 'rvol'
+
+interface SectorPerformance {
+  name: string
+  performance_weekly?: number
+  performance_monthly?: number
+  performance_vs_spy?: number
+  volume_trend?: string
+  trend: string
+  strength: string
+  stock_count: number
+}
 
 // Mirror of MARKET_GROUP_TO_FAMILY in market_group_mapping.py — update both when taxonomy changes.
 const MARKET_GROUP_TO_FAMILY: Record<string, string> = {
@@ -54,7 +65,7 @@ function familyBorder(name: string): string {
 }
 
 export default function SectorHeatmap() {
-  const [data, setData] = useState<any[]>([])
+  const [data, setData] = useState<SectorPerformance[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('weekly')
@@ -65,10 +76,10 @@ export default function SectorHeatmap() {
       try {
         setLoading(true)
         setError(null)
-        const response = await fetch(`${API_URL}/api/v1/sectors/performance?timeframe=daily`)
+        const response = await apiFetch('/api/v1/sectors/performance?timeframe=daily')
         if (!response.ok) throw new Error('Failed to load sector data')
-        const data = await response.json()
-        setData(data)
+        const payload = await response.json() as SectorPerformance[]
+        setData(payload)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load sector data')
         console.error('Error loading sector data:', err)
@@ -82,7 +93,7 @@ export default function SectorHeatmap() {
     return () => clearInterval(interval)
   }, [])
 
-  const getValueByMode = (sector: any) => {
+  const getValueByMode = (sector: SectorPerformance) => {
     switch (viewMode) {
       case 'daily': return sector.performance_weekly || 0
       case 'weekly': return sector.performance_weekly || 0

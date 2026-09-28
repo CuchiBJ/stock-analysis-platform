@@ -6,10 +6,11 @@ import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import {
   TrendingUp, TrendingDown, Activity, Clock,
-  Eye, Volume2, Minimize2, RefreshCw, Shield, ArrowDown, AlertTriangle, Rocket,
+  Volume2, Minimize2, RefreshCw, Shield, ArrowDown, AlertTriangle, Rocket,
 } from 'lucide-react'
 import { useWebSocket } from '@/hooks/useWebSocket'
-import { API_URL, getTimeAgo, getSeverityColor, getSeverityText } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
+import { getTimeAgo, getSeverityColor, getSeverityText } from '@/lib/utils'
 
 interface TransitionEvent {
   symbol: string
@@ -92,7 +93,7 @@ export default function LiveTransitionFeed() {
   const fetchTransitions = useCallback(async () => {
     try {
       setError(null)
-      const response = await fetch(`${API_URL}/api/v1/transitions/live?limit=20`)
+      const response = await apiFetch('/api/v1/transitions/live?limit=20')
       if (!response.ok) throw new Error('Failed to load transitions')
       const data = await response.json()
       setTransitions(data)
@@ -105,20 +106,20 @@ export default function LiveTransitionFeed() {
 
   useEffect(() => {
     if (!wsEvent) return
-    setTransitions(prev => {
+    queueMicrotask(() => setTransitions(prev => {
       const merged = [wsEvent, ...prev.filter(t => t.symbol !== wsEvent.symbol)]
       // Keep quality-first ordering even as live events arrive.
       merged.sort((a, b) => (rankScore(b) ?? 0) - (rankScore(a) ?? 0))
       return merged.slice(0, 50)
-    })
+    }))
   }, [wsEvent])
 
   useEffect(() => {
-    if (metricsEvent?.event === 'updated') fetchTransitions()
+    if (metricsEvent?.event === 'updated') queueMicrotask(() => void fetchTransitions())
   }, [metricsEvent, fetchTransitions])
 
   useEffect(() => {
-    fetchTransitions()
+    queueMicrotask(() => void fetchTransitions())
     if (isConnected) return
     const interval = setInterval(fetchTransitions, 30000)
     return () => clearInterval(interval)

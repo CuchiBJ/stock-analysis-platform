@@ -1,7 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { WS_URL } from '@/lib/utils'
+import { useEffect, useId, useRef, useState, useCallback } from 'react'
 
 interface UseWebSocketOptions {
   channel: string
@@ -23,15 +22,17 @@ export function useWebSocket<T = unknown>({
   const [data, setData] = useState<T | null>(null)
   const [isConnected, setIsConnected] = useState(false)
   const [lastEvent, setLastEvent] = useState<number | null>(null)
+  const [reconnectAttempt, setReconnectAttempt] = useState(0)
   const wsRef = useRef<WebSocket | null>(null)
-  const clientId = useRef(`client_${Date.now()}_${Math.random().toString(36).slice(2)}`)
+  const clientId = useId()
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mountedRef = useRef(true)
 
   const connect = useCallback(() => {
     if (!enabled || !mountedRef.current) return
 
-    const url = `${WS_URL}/api/v1/ws?client_id=${clientId.current}`
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const url = `${protocol}//${window.location.host}/api/v1/ws?client_id=${encodeURIComponent(clientId)}`
     const ws = new WebSocket(url)
     wsRef.current = ws
 
@@ -65,9 +66,11 @@ export function useWebSocket<T = unknown>({
       setIsConnected(false)
       wsRef.current = null
       // Auto-reconnect
-      reconnectTimer.current = setTimeout(connect, reconnectDelay)
+      reconnectTimer.current = setTimeout(() => {
+        if (mountedRef.current) setReconnectAttempt(attempt => attempt + 1)
+      }, reconnectDelay)
     }
-  }, [channel, enabled, reconnectDelay])
+  }, [channel, clientId, enabled, reconnectDelay])
 
   useEffect(() => {
     mountedRef.current = true
@@ -82,7 +85,7 @@ export function useWebSocket<T = unknown>({
         wsRef.current = null
       }
     }
-  }, [connect])
+  }, [connect, reconnectAttempt])
 
   return { data, isConnected, lastEvent }
 }

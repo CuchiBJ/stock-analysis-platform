@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { X } from 'lucide-react'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 
 interface ConstituentStock {
   symbol: string
@@ -39,8 +39,8 @@ export default function SectorConstituentsDrawer({ group, onClose }: { group: st
   useEffect(() => {
     if (!group) return
     let active = true
-    setLoading(true); setError(false); setData(null)
-    fetch(`${API_URL}/api/v1/sectors/group-stocks?group=${encodeURIComponent(group)}`)
+    queueMicrotask(() => { setLoading(true); setError(false); setData(null) })
+    apiFetch(`/api/v1/sectors/group-stocks?group=${encodeURIComponent(group)}`)
       .then(r => { if (!r.ok) throw new Error('failed'); return r.json() })
       .then(d => { if (active) setData(d) })
       .catch(() => { if (active) setError(true) })

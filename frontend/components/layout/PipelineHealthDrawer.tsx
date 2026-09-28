@@ -87,7 +87,7 @@ export default function PipelineHealthDrawer({ open, onClose, snapshot }: Props)
             />
           </div>
           <p className="mt-2 text-[11px] text-muted-foreground">
-            Quality universe symbols refreshed since today's market open.
+            Quality universe symbols refreshed since today&apos;s market open.
           </p>
         </section>
 

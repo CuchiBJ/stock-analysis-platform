@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 import DashboardLayout from '@/components/layout/DashboardLayout'
 import Card from '@/components/base/Card'
 import { Send, Bot, User, Loader2 } from 'lucide-react'
@@ -40,7 +40,7 @@ export default function ChatPage() {
     setError(null)
 
     try {
-      const res = await fetch(`${API_URL}/api/v1/chat/`, {
+      const res = await apiFetch('/api/v1/chat/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

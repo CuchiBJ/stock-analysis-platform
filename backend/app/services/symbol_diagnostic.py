@@ -1,6 +1,6 @@
 """Symbol diagnostic — explain pass/fail per system list for any ticker.
 
-Mirrors the filter logic of /actionable, /live, /queue/u-and-r,
+Mirrors the filter logic of /live, /queue/u-and-r,
 /queue/emerging-leaders, /queue/building-bases as Python expressions
 so each criterion is inspectable with (actual, threshold, passes).
 
@@ -29,7 +29,7 @@ class Criterion:
 
 @dataclass
 class ListCheck:
-    key: str               # machine id: "actionable", "u_and_r", ...
+    key: str               # machine id: "live", "u_and_r", ...
     name: str              # human label
     passes: bool           # True iff all criteria pass — does NOT guarantee inclusion when a cutoff applies
     criteria: list[Criterion] = field(default_factory=list)
@@ -103,64 +103,11 @@ def _bool(name: str, passes: bool, detail: str = "") -> Criterion:
 
 # ─── Per-list diagnostics ────────────────────────────────────────────────────
 
-def diagnose_actionable(m: StockMetrics) -> ListCheck:
-    """Mirrors the actionable-only structural filter, trigger, and extras."""
-    crit: list[Criterion] = []
-
-    # Institutional setup. Distance to the 52-week high is a graded input to
-    # pullback_quality_score, not a Top Actionable eligibility condition.
-    crit.append(_ge("avg_volume_10d ≥ 800k",            m.avg_volume_10d, 800_000))
-    crit.append(_ge("adr_percent ≥ 4%",                  m.adr_percent, 4.0))
-    crit.append(_ge("current_price ≥ $5",                m.current_price, 5.0))
-    crit.append(_gt("perf_1y > 30%",                     m.perf_1y, 30.0))
-    crit.append(_gt_field("price > EMA50",               m.current_price, m.ema50))
-    crit.append(_gt_field("price > SMA150",              m.current_price, m.sma150))
-    crit.append(_gt_field("SMA150 > SMA200",             m.sma150, m.sma200))
-    if m.current_price is not None and m.low_52w is not None:
-        crit.append(Criterion(
-            "price ≥ 52W low × 1.5",
-            m.current_price, m.low_52w * 1.5,
-            m.current_price >= m.low_52w * 1.5,
-            "numeric",
-        ))
-    else:
-        crit.append(Criterion("price ≥ 52W low × 1.5", None, None, False, "numeric"))
-
-    # EMA trigger (either EMA9 or EMA21 within band)
-    d9 = m.distance_to_ema9_atr
-    d21 = m.distance_to_ema21_atr
-    ema9_ok = d9 is not None and -1.0 <= d9 <= 0.5
-    ema21_ok = d21 is not None and -1.0 <= d21 <= 0.5
-    crit.append(Criterion(
-        "EMA9 distance ∈ [-1.0, +0.5] ATR  OR  EMA21 distance ∈ [-1.0, +0.5] ATR",
-        f"d_ema9={d9}, d_ema21={d21}",
-        "either in [-1.0, +0.5]",
-        ema9_ok or ema21_ok,
-        "composite",
-    ))
-
-    # /actionable extras
-    crit.append(_ge("pullback_quality_score ≥ 55",       m.pullback_quality_score, 55.0))
-    crit.append(_ge("avg_volume_10d ≥ 700k (extra)",     m.avg_volume_10d, 700_000))
-    crit.append(_ge("adr_percent ≥ 3% (extra)",          m.adr_percent, 3.0))
-
-    passes = all(c.passes for c in crit)
-    return ListCheck(
-        "actionable", "Top Actionable Setups", passes, crit,
-        cutoff={
-            "kind": "top_n",
-            "n": 12,
-            "ranked_by": "priority_score (compound)",
-            "note": "Passing filter ≠ appearing — endpoint returns top 12 ranked by priority_score; ties broken by pullback_quality.",
-        },
-    )
-
-
 def diagnose_live(m: StockMetrics, has_recent_non_stable_obs: bool) -> ListCheck:
     """Mirrors /transitions/live filter: institutional + EMA trigger + non-stable transition."""
     crit: list[Criterion] = []
 
-    # Institutional (same 9 as actionable)
+    # Institutional Setup Feed universe.
     crit.append(_ge("avg_volume_10d ≥ 800k",            m.avg_volume_10d, 800_000))
     crit.append(_ge("adr_percent ≥ 4%",                  m.adr_percent, 4.0))
     crit.append(_ge("current_price ≥ $5",                m.current_price, 5.0))

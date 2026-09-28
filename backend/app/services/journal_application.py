@@ -1,0 +1,1347 @@
+"""Journal HTTP application handlers and response composition.
+
+The public router lives in ``app.api.v1.endpoints.journal``. Keeping the
+request orchestration here makes that router a small, auditable authentication
+boundary while preserving the existing API contract.
+
+Ingest the user's broker trade journal CSV, list parsed
+trades, and surface aggregate stats (expectancy, win rate, profit factor) cut
+by setup × context. The journal is the source of truth for what actually
+happened with real capital and complements the synthetic transition_observations
+calibration loop with verified outcomes.
+"""
+from __future__ import annotations
+
+import csv
+import io
+import sys
+from dataclasses import asdict
+from datetime import date
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import Response
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.auth import get_current_active_user
+from app.core.deps import get_db
+from app.models.stock import JournalTrade, JournalStopEvent, TransitionObservation
+from app.models.user import User
+from app.repositories.journal_repository import JournalRepository
+from app.schemas.journal import CloseTradeIn, OpenTradeIn, PatchTradeIn
+from app.services.journal_decisions import assign_decision_links
+from app.services.journal_importer import JournalImporter
+from app.services.journal_service import JournalService, group_decisions
+from app.services.journal_snapshot_service import (
+    reconstruct_regime_at_entry,
+    take_entry_snapshot,
+)
+
+router = APIRouter(
+    prefix="",
+)
+
+
+def _repository(db: AsyncSession) -> JournalRepository:
+    """Resolve the repository boundary, retaining endpoint-facade test hooks."""
+    endpoint_module = sys.modules.get("app.api.v1.endpoints.journal")
+    repository_type = getattr(
+        endpoint_module, "JournalRepository", JournalRepository
+    )
+    return repository_type(db)
+
+# Canonical vocabularies surfaced to the form. Keep in sync with importer SETUP_MAP / CONTEXT_MAP.
+SETUP_OPTIONS = [
+    "u_and_r", "building_base", "emerging",
+    "breakout", "episodic_pivot", "reversal",
+    "vwap", "dca", "other",
+]
+CONTEXT_OPTIONS = [
+    "favorable", "neutral", "choppy", "adverse",
+    "rs_against_market", "unknown",
+]
+ENTRY_REASON_OPTIONS = [
+    "queue_signal", "discretionary", "continuation", "news", "other",
+]
+EXIT_REASON_OPTIONS = [
+    "stop_hit", "target", "trail", "thesis_broken",
+    "discretionary", "partial_take", "unknown",
+]
+
+DEFAULT_COMMISSION = 1.0
+_NON_PERFORMANCE_SETUPS = frozenset({'dca'})
+
+
+def _is_performance_trade(trade: JournalTrade) -> bool:
+    """Whether a journal row belongs to the active-trading scorecard."""
+    return trade.setup not in _NON_PERFORMANCE_SETUPS
+
+
+def _performance_trades(trades: list[JournalTrade]) -> list[JournalTrade]:
+    return [trade for trade in trades if _is_performance_trade(trade)]
+
+
+@router.post("/import")
+async def import_journal(
+    file: UploadFile = File(...),
+    replace: bool = Query(True, description="Clear existing trades before import"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    raw = await file.read()
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        text = raw.decode('latin-1')
+
+    importer = JournalImporter(db, current_user.id)
+    try:
+        stats = await importer.import_csv(text, replace=replace)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return asdict(stats)
+
+
+@router.get("/trades")
+async def list_trades(
+    setup: Optional[str] = None,
+    context: Optional[str] = None,
+    closed_only: bool = True,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    listing = await JournalService(db, current_user.id).listing(
+        setup=setup,
+        context=context,
+        closed_only=closed_only,
+    )
+    rows = listing.rows
+    decisions = listing.decisions
+    decision_outcomes = {
+        decision_id: _classify_resolved_decision(legs)
+        for decision_id, legs in decisions.items()
+    }
+    decision_result_details = {
+        decision_id: _decision_result_detail(legs)
+        for decision_id, legs in decisions.items()
+    }
+    decision_runner_be_ids = {
+        decision_id: _decision_runner_breakeven_id(legs)
+        for decision_id, legs in decisions.items()
+    }
+    return {
+        "count": len(rows),
+        "trades": [
+            _trade_to_dict(
+                t,
+                decision_outcome=decision_outcomes.get(_decision_id(t)),
+                decision_result_detail=decision_result_details.get(_decision_id(t)),
+                decision_runner_breakeven_id=decision_runner_be_ids.get(_decision_id(t)),
+            )
+            for t in rows
+        ],
+    }
+
+
+def _derive_pnl(t: JournalTrade) -> Optional[float]:
+    if t.pnl_dollars is not None:
+        return t.pnl_dollars
+    if t.exit_price is not None and t.entry_price is not None and t.qty is not None:
+        return (t.exit_price - t.entry_price) * t.qty - 2 * DEFAULT_COMMISSION
+    return None
+
+
+def _derive_r(t: JournalTrade) -> Optional[float]:
+    """R-multiple uses initial_stop_price (planned risk) when present, falling
+    back to current stop_price for backward compatibility with historical
+    CSV-imported trades. This preserves cross-trade comparability even when
+    the operator has moved the stop to BE or trailed it during the trade.
+    """
+    if t.r_multiple is not None:
+        return t.r_multiple
+    if t.exit_price is None or t.entry_price is None:
+        return None
+    stop = t.initial_stop_price if t.initial_stop_price is not None else t.stop_price
+    if stop is None or t.entry_price <= stop:
+        return None
+    return (t.exit_price - t.entry_price) / (t.entry_price - stop)
+
+
+def _derive_duration(t: JournalTrade) -> Optional[float]:
+    if t.duration_days is not None:
+        return t.duration_days
+    if t.exit_date is not None and t.entry_date is not None:
+        return float((t.exit_date - t.entry_date).days)
+    return None
+
+
+def _derive_effective_risk(t: JournalTrade) -> Optional[float]:
+    """Operator intent (planned_risk_dollars) takes precedence over stop-derived
+    inference. Returns None when neither path produces a positive number.
+    """
+    if t.planned_risk_dollars is not None and t.planned_risk_dollars > 0:
+        return t.planned_risk_dollars
+    if (t.stop_price is not None and t.entry_price is not None
+            and t.qty is not None and t.entry_price > t.stop_price):
+        return (t.entry_price - t.stop_price) * t.qty
+    return None
+
+
+# A trade rarely lands at *exactly* $0 once commissions are netted, so a bare
+# pnl == 0 test almost never fires and near-scratch results leak into wins/losses.
+# We treat any result inside a tolerance band as break-even ("scratch"): a trade
+# that neither meaningfully captured nor lost. The band is expressed in R (the
+# system's decision unit) via effective risk, falling back to a % of position
+# notional when no stop/risk is known.
+_BE_R_BAND = 0.1      # within ±0.1R of entry counts as a scratch
+_BE_PCT_BAND = 0.001  # fallback: within ±0.1% of position notional
+
+
+def _be_band_dollars(t: JournalTrade) -> float:
+    """Dollar half-width of the break-even band for one trade leg.
+
+    Returns 0.0 when neither risk nor notional can be derived, which collapses
+    back to the old exact-zero behavior for that trade rather than silently
+    widening it.
+    """
+    risk = _derive_effective_risk(t)
+    if risk is not None and risk > 0:
+        return _BE_R_BAND * risk
+    if t.entry_price is not None and t.qty:
+        return _BE_PCT_BAND * abs(t.entry_price * t.qty)
+    return 0.0
+
+
+def _is_trade_break_even(t: JournalTrade, pnl: float) -> bool:
+    """Treat an explicit near-zero R as BE before considering dollar P&L.
+
+    Commissions can make an execution with a price-based result of only a few
+    hundredths of R look like a small dollar loss. R is the normalized outcome
+    shown to the operator, so the canonical ±0.1R scratch band takes priority
+    whenever R is available. The existing dollar band remains as fallback and
+    for records whose R cannot be derived.
+    """
+    r_multiple = _derive_r(t)
+    if r_multiple is not None and abs(r_multiple) <= _BE_R_BAND:
+        return True
+    return abs(pnl) <= _be_band_dollars(t)
+
+
+_STOP_BE_TOLERANCE = 1e-6
+
+
+def _classify_stop_change(
+    old: Optional[float], new: Optional[float], entry_price: float
+) -> Optional[str]:
+    """Auto-classify a stop change into one of 5 kinds. Returns None when
+    nothing actually changed (idempotent PATCH).
+    """
+    if old is None and new is None:
+        return None
+    if old is None and new is not None:
+        return 'initial'
+    if old is not None and new is None:
+        return 'removed'
+    # Both non-null at this point.
+    if abs(new - old) < _STOP_BE_TOLERANCE:
+        return None
+    # moved_to_be takes precedence over trailed_up: a stop reaching/passing entry
+    # is the meaningful operational event.
+    if new + _STOP_BE_TOLERANCE >= entry_price:
+        return 'moved_to_be'
+    if new > old:
+        return 'trailed_up'
+    return 'widened'
+
+
+def _record_stop_event(
+    db: AsyncSession,
+    trade_id: int,
+    old: Optional[float],
+    new: Optional[float],
+    kind: str,
+) -> None:
+    db.add(JournalStopEvent(
+        trade_id=trade_id,
+        old_stop_price=old,
+        new_stop_price=new,
+        kind=kind,
+        auto_classified=True,
+    ))
+
+
+def _derive_risk_pct(t: JournalTrade) -> Optional[float]:
+    risk = _derive_effective_risk(t)
+    if risk is None:
+        return None
+    if t.account_balance_at_entry is None or t.account_balance_at_entry <= 0:
+        return None
+    return risk / t.account_balance_at_entry
+
+
+def _aggregate(trades: list[JournalTrade]) -> dict:
+    """Compute the institutional metrics: count, win rate, expectancy,
+    profit factor, avg R, avg duration. Skips trades with missing pnl.
+    Uses the same on-the-fly fallback as _trade_to_dict so trades whose
+    CSV-imported pnl was empty still contribute to aggregates.
+    """
+    pnls = [(t, _derive_pnl(t)) for t in trades]
+    with_pnl = [(t, p) for t, p in pnls if p is not None]
+    n = len(with_pnl)
+    if n == 0:
+        return {
+            "n": 0,
+            "win_rate": None,
+            "expectancy": None,
+            "profit_factor": None,
+            "avg_r": None,
+            "total_r": None,
+            "avg_duration_days": None,
+            "total_pnl": 0.0,
+            "wins": 0,
+            "losses": 0,
+            "breakeven": 0,
+        }
+    # Classify each resolved trade against its break-even band rather than a
+    # bare sign test, so near-scratch results don't inflate wins/losses.
+    wins: list[tuple[JournalTrade, float]] = []
+    losses: list[tuple[JournalTrade, float]] = []
+    breakeven: list[tuple[JournalTrade, float]] = []
+    for t, p in with_pnl:
+        if _is_trade_break_even(t, p):
+            breakeven.append((t, p))
+        elif p > 0:
+            wins.append((t, p))
+        else:
+            losses.append((t, p))
+    gross_win = sum(p for _, p in wins)
+    gross_loss = abs(sum(p for _, p in losses))
+    total = sum(p for _, p in with_pnl)
+    rs = [r for r in (_derive_r(t) for t, _ in with_pnl) if r is not None]
+    durs = [d for d in (_derive_duration(t) for t, _ in with_pnl) if d is not None]
+    # WR excludes breakeven from denominator (institutional convention): a BE
+    # trade neither captures nor loses, so it adds no information about edge.
+    # Expectancy keeps the full N denominator — total return per trade taken,
+    # including the BEs that consumed time/risk.
+    resolved = len(wins) + len(losses)
+    win_rate = (len(wins) / resolved) if resolved > 0 else None
+    return {
+        "n": n,
+        "win_rate": win_rate,
+        "expectancy": total / n,
+        "profit_factor": (gross_win / gross_loss) if gross_loss > 0 else None,
+        "avg_r": (sum(rs) / len(rs)) if rs else None,
+        # Total R is the honest "edge in decision units" — invariant to operator
+        # changing position size over time. When total_pnl is negative but total_r
+        # is positive, the operator's recent decisions have edge that's hidden by
+        # capital-management changes (e.g. shrinking R unit defensively).
+        "total_r": sum(rs) if rs else None,
+        "avg_duration_days": (sum(durs) / len(durs)) if durs else None,
+        "total_pnl": total,
+        "wins": len(wins),
+        "losses": len(losses),
+        "breakeven": len(breakeven),
+    }
+
+
+def _decision_id(t: JournalTrade) -> int:
+    return t.parent_trade_id if t.parent_trade_id is not None else t.id
+
+
+def _group_decisions(trades: list[JournalTrade]) -> dict[int, list[JournalTrade]]:
+    """Backward-compatible alias for the pure service-layer helper."""
+    return group_decisions(trades)
+
+
+def _decision_rep(legs: list[JournalTrade]) -> JournalTrade:
+    """Representative leg of a decision = the original Compra (no parent),
+    falling back to the earliest-id leg when the entry itself isn't in the set."""
+    return next((l for l in legs if l.parent_trade_id is None), None) or min(legs, key=lambda l: l.id)
+
+
+_RUNNER_BREAKEVEN = 'runner_breakeven'
+
+
+def _decision_weighted_r(legs: list[JournalTrade]) -> Optional[float]:
+    """Quantity-weighted decision R across closed executions."""
+    rs_with_qty = [
+        (r, leg.qty)
+        for leg in legs
+        if leg.exit_date is not None
+        and (r := _derive_r(leg)) is not None
+        and leg.qty
+    ]
+    if not rs_with_qty:
+        return None
+    total_qty = sum(qty for _, qty in rs_with_qty)
+    return sum(r * qty for r, qty in rs_with_qty) / total_qty
+
+
+def _decision_runner_breakeven_id(legs: list[JournalTrade]) -> Optional[int]:
+    """Detect a profitable partial followed by an exact entry-price runner exit.
+
+    This intentionally introduces no price tolerance: ``exit_price`` must equal
+    that execution's real ``entry_price``. The runner must be unambiguous from
+    the stored data: either the unique latest dated exit, or the representative
+    remainder with an explicitly linked ``partial_take`` child (which also works
+    when both fills share the same date and the journal has no execution time).
+    """
+    if len(legs) < 2 or any(leg.exit_date is None for leg in legs):
+        return None
+
+    closed_legs = [leg for leg in legs if leg.exit_date is not None]
+    profitable_legs = [
+        leg for leg in closed_legs
+        if (pnl := _derive_pnl(leg)) is not None and pnl > 0
+    ]
+    if not profitable_legs:
+        return None
+
+    net_pnl = sum(
+        pnl for pnl in (_derive_pnl(leg) for leg in closed_legs) if pnl is not None
+    )
+    if net_pnl <= 0:
+        return None
+
+    latest_exit = max(leg.exit_date for leg in closed_legs)
+    latest_legs = [leg for leg in closed_legs if leg.exit_date == latest_exit]
+
+    for runner in closed_legs:
+        if runner.exit_price is None or runner.entry_price is None:
+            continue
+        if runner.exit_price != runner.entry_price:
+            continue
+
+        is_unique_latest = len(latest_legs) == 1 and latest_legs[0].id == runner.id
+        has_earlier_profit = any(
+            leg.id != runner.id and leg.exit_date < runner.exit_date
+            for leg in profitable_legs
+        )
+        if is_unique_latest and has_earlier_profit:
+            return runner.id
+
+        has_explicit_profitable_partial = any(
+            leg.id != runner.id
+            and leg.parent_trade_id == runner.id
+            and leg.exit_reason == 'partial_take'
+            for leg in profitable_legs
+        )
+        if runner.parent_trade_id is None and has_explicit_profitable_partial:
+            return runner.id
+
+    return None
+
+
+def _classify_resolved_decision(legs: list[JournalTrade]) -> Optional[str]:
+    """Win/loss/breakeven for a *fully resolved* decision (every leg closed).
+
+    Returns None when the decision still has open legs or no resolvable P&L,
+    so it contributes nothing to win-rate denominators. Mirrors the exact
+    decision-level WR convention used inline in journal_stats: quantity-weighted
+    R inside ±0.1 takes priority as a scratch; otherwise the dollar BE band and
+    existing partial-gain rules apply.
+    """
+    closed_legs = [l for l in legs if l.exit_date is not None]
+    open_legs = [l for l in legs if l.exit_date is None]
+    if open_legs or not closed_legs:
+        return None
+    closed_pnls = [p for p in (_derive_pnl(l) for l in closed_legs) if p is not None]
+    if not closed_pnls:
+        return None
+    net_pnl = sum(closed_pnls)
+    weighted_r = _decision_weighted_r(closed_legs)
+    if weighted_r is not None and abs(weighted_r) <= _BE_R_BAND:
+        return 'breakeven'
+    be_band = sum(_be_band_dollars(l) for l in closed_legs)
+    booked_partial_gain = any(
+        (p := _derive_pnl(l)) is not None and p > _be_band_dollars(l)
+        for l in closed_legs
+    )
+    if _decision_runner_breakeven_id(legs) is not None:
+        return 'win'
+    if net_pnl > be_band:
+        return 'win'
+    if net_pnl < -be_band:
+        return 'loss'
+    if booked_partial_gain and net_pnl >= 0:
+        return 'win'
+    return 'breakeven'
+
+
+def _decision_result_detail(legs: list[JournalTrade]) -> Optional[str]:
+    """Secondary context; never replaces the canonical economic outcome."""
+    if _classify_resolved_decision(legs) != 'win':
+        return None
+    if _decision_runner_breakeven_id(legs) is not None:
+        return _RUNNER_BREAKEVEN
+    return None
+
+
+def _decision_economic_metrics(
+    decisions: dict[int, list[JournalTrade]],
+) -> dict[str, Optional[float]]:
+    """Split fully resolved decision P&L into signed winner/loser amounts."""
+    wins: list[float] = []
+    losses: list[float] = []
+    for legs in decisions.values():
+        outcome = _classify_resolved_decision(legs)
+        if outcome not in {'win', 'loss'}:
+            continue
+        net_pnl = sum(
+            p for p in (_derive_pnl(leg) for leg in legs) if p is not None
+        )
+        (wins if outcome == 'win' else losses).append(net_pnl)
+
+    return {
+        "decision_average_gain": sum(wins) / len(wins) if wins else None,
+        "decision_average_loss": sum(losses) / len(losses) if losses else None,
+        "decision_total_gains": sum(wins, 0.0),
+        "decision_total_losses": sum(losses, 0.0),
+    }
+
+
+# Trailing window (in resolved decisions) for the rolling win-rate line. Small
+# enough to show recent form, large enough that one trade doesn't swing it wildly.
+_WR_ROLLING_WINDOW = 20
+
+
+@router.get("/stats")
+async def journal_stats(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Returns overall metrics + breakdowns by setup, context, and setup×context."""
+    statistics = await JournalService(db, current_user.id).statistics(
+        exclude_setups=_NON_PERFORMANCE_SETUPS
+    )
+    rows = statistics.closed_rows
+
+    overall = _aggregate(rows)
+
+    # By setup
+    by_setup: dict[str, list[JournalTrade]] = {}
+    for t in rows:
+        by_setup.setdefault(t.setup, []).append(t)
+    setup_breakdown = [
+        {"setup": k, **_aggregate(v)}
+        for k, v in sorted(by_setup.items(), key=lambda kv: -len(kv[1]))
+    ]
+
+    # By context
+    by_ctx: dict[str, list[JournalTrade]] = {}
+    for t in rows:
+        by_ctx.setdefault(t.context, []).append(t)
+    context_breakdown = [
+        {"context": k, **_aggregate(v)}
+        for k, v in sorted(by_ctx.items(), key=lambda kv: -len(kv[1]))
+    ]
+
+    # Setup × context matrix
+    matrix: dict[tuple[str, str], list[JournalTrade]] = {}
+    for t in rows:
+        matrix.setdefault((t.setup, t.context), []).append(t)
+    matrix_rows = [
+        {"setup": s, "context": c, **_aggregate(v)}
+        for (s, c), v in sorted(matrix.items(), key=lambda kv: -len(kv[1]))
+    ]
+
+    # By entry_reason — separates queue_signal from discretional decisions
+    by_entry_reason_dict: dict[str, list[JournalTrade]] = {}
+    for t in rows:
+        by_entry_reason_dict.setdefault(t.entry_reason, []).append(t)
+    entry_reason_breakdown = [
+        {"entry_reason": k, **_aggregate(v)}
+        for k, v in sorted(by_entry_reason_dict.items(), key=lambda kv: -len(kv[1]))
+    ]
+
+    # By regime_at_entry — objective (engine-driven) replacement for manual context
+    by_regime_dict: dict[str, list[JournalTrade]] = {}
+    for t in rows:
+        key = t.regime_at_entry if t.regime_at_entry else "sin data"
+        by_regime_dict.setdefault(key, []).append(t)
+    by_regime_at_entry = [
+        {"regime_at_entry": k, **_aggregate(v)}
+        for k, v in sorted(by_regime_dict.items(), key=lambda kv: -len(kv[1]))
+    ]
+
+    # Setup × regime_at_entry — the honest performance matrix
+    setup_regime_matrix: dict[tuple[str, str], list[JournalTrade]] = {}
+    for t in rows:
+        key = t.regime_at_entry if t.regime_at_entry else "sin data"
+        setup_regime_matrix.setdefault((t.setup, key), []).append(t)
+    by_setup_regime_matrix = [
+        {"setup": s, "regime_at_entry": r, **_aggregate(v)}
+        for (s, r), v in sorted(setup_regime_matrix.items(), key=lambda kv: -len(kv[1]))
+    ]
+
+    # Decision-level aggregates — institutional truth. Each "decision" is one
+    # original Compra and all its partial-fill children (linked via
+    # parent_trade_id). WR / Total R must be measured here, not at row level,
+    # because a single decision producing 2 winning partial sells should count
+    # as 1 winner, not 2.
+    decisions = statistics.decisions
+
+    n_fully_resolved = 0
+    n_partially_resolved = 0
+    n_fully_open = 0
+    decision_wins = 0
+    decision_losses = 0
+    decision_breakeven = 0
+    decision_total_realized_pnl = 0.0
+    decision_total_r = 0.0
+
+    for legs in decisions.values():
+        closed_legs = [l for l in legs if l.exit_date is not None]
+        open_legs = [l for l in legs if l.exit_date is None]
+        # State classification
+        if len(closed_legs) == 0:
+            n_fully_open += 1
+        elif len(open_legs) == 0:
+            n_fully_resolved += 1
+        else:
+            n_partially_resolved += 1
+        # Realized PnL across all closed legs of the decision
+        closed_pnls = [p for p in (_derive_pnl(l) for l in closed_legs) if p is not None]
+        net_pnl = sum(closed_pnls) if closed_pnls else 0.0
+        decision_total_realized_pnl += net_pnl
+        # Qty-weighted R for the decision
+        weighted_r = _decision_weighted_r(closed_legs)
+        if weighted_r is not None:
+            decision_total_r += weighted_r
+        # WR classification only for fully_resolved decisions — same convention
+        # (BE band summed across legs, booked-partial-gain rescue) extracted into
+        # _classify_resolved_decision so the win-rate-evolution series below and
+        # the R-unit-Trend monthly WR all agree on what counts as a win.
+        outcome = _classify_resolved_decision(legs)
+        if outcome == 'win':
+            decision_wins += 1
+        elif outcome == 'loss':
+            decision_losses += 1
+        elif outcome == 'breakeven':
+            decision_breakeven += 1
+
+    decision_resolved = decision_wins + decision_losses
+    decision_overall = {
+        "n_decisions_total": len(decisions),
+        "n_fully_resolved": n_fully_resolved,
+        "n_partially_resolved": n_partially_resolved,
+        "n_fully_open": n_fully_open,
+        "decision_wins": decision_wins,
+        "decision_losses": decision_losses,
+        "decision_breakeven": decision_breakeven,
+        "decision_win_rate": (decision_wins / decision_resolved) if decision_resolved > 0 else None,
+        "decision_total_realized_pnl": decision_total_realized_pnl,
+        "decision_total_r": decision_total_r if any(
+            _derive_r(l) is not None for legs in decisions.values() for l in legs
+        ) else None,
+        **_decision_economic_metrics(decisions),
+    }
+
+    # Risk evolution by month — surfaces R unit shrinkage / scaling over time.
+    # Each bucket contrasts dollar P&L (affected by sizing) with total R
+    # (invariant to sizing) so the operator can see when their decisions had
+    # edge even if absolute P&L was masked by capital-management choices.
+    by_month_dict: dict[str, list[JournalTrade]] = {}
+    for t in rows:
+        if t.entry_date is None:
+            continue
+        by_month_dict.setdefault(t.entry_date.isoformat()[:7], []).append(t)
+    risk_evolution = []
+    for month in sorted(by_month_dict.keys()):
+        bucket = by_month_dict[month]
+        eff_risks = [r for r in (_derive_effective_risk(t) for t in bucket) if r is not None]
+        risk_pcts = [r for r in (_derive_risk_pct(t) for t in bucket) if r is not None]
+        rs = [r for r in (_derive_r(t) for t in bucket) if r is not None]
+        pnls = [p for p in (_derive_pnl(t) for t in bucket) if p is not None]
+        # Win rate per month — same break-even-band classification as _aggregate
+        # (WR excludes scratches from the denominator). This surfaces the learning
+        # curve alongside the falling risk size.
+        wins = losses = 0
+        for t in bucket:
+            p = _derive_pnl(t)
+            if p is None or _is_trade_break_even(t, p):
+                continue
+            if p > 0:
+                wins += 1
+            else:
+                losses += 1
+        resolved = wins + losses
+        risk_evolution.append({
+            "month": month,
+            "n": len(bucket),
+            "avg_planned_risk_dollars": (sum(eff_risks) / len(eff_risks)) if eff_risks else None,
+            "avg_risk_pct_of_account": (sum(risk_pcts) / len(risk_pcts)) if risk_pcts else None,
+            "win_rate": (wins / resolved) if resolved > 0 else None,
+            "wins": wins,
+            "losses": losses,
+            "total_r": sum(rs) if rs else None,
+            "total_pnl": sum(pnls) if pnls else 0.0,
+        })
+
+    # Win-rate evolution — the operator's learning curve. One point per fully
+    # resolved decision, ordered by entry date (when the decision was actually
+    # taken). Two series share the single 0–100% axis:
+    #   · cumulative_win_rate — career trajectory, converges to decision WR overall.
+    #   · rolling_win_rate     — recent form over the trailing window of decisions.
+    # BE (scratch) decisions stay in the sequence but are excluded from both
+    # numerator and denominator, matching decision_win_rate's convention.
+    resolved_decisions = []
+    for did, legs in decisions.items():
+        outcome = _classify_resolved_decision(legs)
+        if outcome is None:
+            continue
+        rep = _decision_rep(legs)
+        resolved_decisions.append((rep.entry_date, did, outcome, legs))
+    # Chronological by entry date; id tiebreak keeps same-day ordering stable.
+    resolved_decisions.sort(key=lambda x: (x[0] or date.min, x[1]))
+    outcomes_seq = [o for _, _, o, _ in resolved_decisions]
+
+    win_rate_evolution = []
+    cum_wins = cum_losses = 0
+    for i, (entry_dt, did, outcome, legs) in enumerate(resolved_decisions):
+        if outcome == 'win':
+            cum_wins += 1
+        elif outcome == 'loss':
+            cum_losses += 1
+        cum_resolved = cum_wins + cum_losses
+        window = outcomes_seq[max(0, i - _WR_ROLLING_WINDOW + 1): i + 1]
+        w_win = window.count('win')
+        w_loss = window.count('loss')
+        win_rate_evolution.append({
+            "i": i + 1,
+            "decision_id": did,
+            "entry_date": entry_dt.isoformat() if entry_dt else None,
+            "outcome": outcome,
+            "cumulative_win_rate": (cum_wins / cum_resolved) if cum_resolved > 0 else None,
+            "rolling_win_rate": (w_win / (w_win + w_loss)) if (w_win + w_loss) > 0 else None,
+            "cumulative_wins": cum_wins,
+            "cumulative_losses": cum_losses,
+            "trade": {
+                "id": did,
+                "symbol": _decision_rep(legs).symbol,
+                "direction": "long",
+                "entry_date": entry_dt.isoformat() if entry_dt else None,
+                "exit_date": max(
+                    (leg.exit_date for leg in legs if leg.exit_date is not None),
+                    default=None,
+                ).isoformat() if legs else None,
+                "pnl_dollars": sum(
+                    p for p in (_derive_pnl(leg) for leg in legs) if p is not None
+                ),
+                "execution_ids": sorted(leg.id for leg in legs),
+                "result_detail": _decision_result_detail(legs),
+            },
+        })
+
+    # Data starvation honesty: count of (setup, context) buckets with < 5 trades
+    underpowered = sum(1 for r in matrix_rows if r["n"] < 5)
+
+    # Open positions
+    open_count = statistics.open_count
+    linked_count = statistics.linked_count
+
+    # Provenance capture rate: trades where from_queue has been marked (true OR false)
+    # over total. Null means "operator never marked it" — denominator only. This
+    # tells the operator whether the take-from-queue workflow is being used.
+    total_count_for_provenance = statistics.provenance_total_count
+    marked_count = statistics.provenance_marked_count
+    provenance_capture_rate = (
+        marked_count / total_count_for_provenance if total_count_for_provenance > 0 else 0.0
+    )
+
+    return {
+        "overall": overall,
+        "by_setup": setup_breakdown,
+        "by_context": context_breakdown,
+        "by_setup_context": matrix_rows,
+        "by_entry_reason": entry_reason_breakdown,
+        "by_regime_at_entry": by_regime_at_entry,
+        "by_setup_regime_matrix": by_setup_regime_matrix,
+        "decision_overall": decision_overall,
+        "risk_evolution": risk_evolution,
+        "win_rate_evolution": win_rate_evolution,
+        "rolling_window": _WR_ROLLING_WINDOW,
+        "open_positions": open_count,
+        "linked_to_observations": linked_count,
+        "underpowered_buckets": underpowered,
+        "provenance_capture_rate": provenance_capture_rate,
+    }
+
+
+def _fmt_csv_num(v: Optional[float]) -> str:
+    """Render a number for CSV export: None → '', integers without a trailing
+    '.0', floats trimmed to 4 decimals without trailing zeros. Dot-decimal —
+    Google Sheets and the importer's _parse_number both accept it.
+    """
+    if v is None:
+        return ""
+    s = f"{v:.4f}".rstrip("0").rstrip(".")
+    return s if s not in ("", "-") else "0"
+
+
+# Column order mirrors the broker/Google-Sheets "Operaciones" tab the importer
+# reads, so an export is round-trip compatible with POST /journal/import.
+_EXPORT_HEADERS = [
+    "Fecha", "Ticker", "Tipo", "Cantidad", "Precio Unitario", "Costo Total",
+    "Stop", "Retorno", "R", "Duracion (d)", "Retorno %", "Setup", "Contexto",
+    "Error/Nota", "Post Venta",
+]
+
+
+@router.get("/export.csv")
+async def export_csv(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Export the journal as a broker-leg CSV (Compra/Venta rows).
+
+    The app is the source of truth; this keeps the operator's spreadsheet an
+    up-to-date, restorable backup without re-typing trades. The format is
+    round-trip compatible with POST /journal/import.
+
+    One Compra row per decision (original entry, total qty across all legs)
+    followed by one Venta row per closed leg. An open remainder is left unsold,
+    so a re-import reopens it. Rows are ordered chronologically with the Compra
+    ahead of its Ventas, matching the importer's FIFO pairing.
+
+    Caveat: overlapping positions in the same symbol re-pair by FIFO on import
+    (the broker format is inherently FIFO), so entry→exit linkage can shuffle in
+    that uncommon case. Per-leg P&L / R are preserved either way.
+    """
+    decisions = await JournalService(
+        db, current_user.id
+    ).export_decisions()
+
+    # (sort_key, record) — sort_key orders by date, then Compra(0)<Venta(1), then id.
+    out: list[tuple[tuple, dict]] = []
+    for legs in decisions.values():
+        rep = next((l for l in legs if l.parent_trade_id is None), None) \
+            or min(legs, key=lambda l: l.id)
+        total_qty = sum((l.qty or 0) for l in legs)
+        entry_stop = rep.initial_stop_price if rep.initial_stop_price is not None else rep.stop_price
+        out.append((
+            (rep.entry_date or date.min, 0, rep.id),
+            {
+                "Fecha": rep.entry_date.isoformat() if rep.entry_date else "",
+                "Ticker": rep.symbol,
+                "Tipo": "Compra",
+                "Cantidad": _fmt_csv_num(total_qty),
+                "Precio Unitario": _fmt_csv_num(rep.entry_price),
+                "Costo Total": _fmt_csv_num(rep.entry_price * total_qty) if rep.entry_price is not None else "",
+                "Stop": _fmt_csv_num(entry_stop),
+                "Setup": rep.setup or "",
+                "Contexto": rep.context or "",
+            },
+        ))
+        for l in legs:
+            if l.exit_date is None:
+                continue
+            out.append((
+                (l.exit_date, 1, l.id),
+                {
+                    "Fecha": l.exit_date.isoformat(),
+                    "Ticker": l.symbol,
+                    "Tipo": "Venta",
+                    "Cantidad": _fmt_csv_num(l.qty),
+                    "Precio Unitario": _fmt_csv_num(l.exit_price),
+                    "Retorno": _fmt_csv_num(_derive_pnl(l)),
+                    "R": _fmt_csv_num(_derive_r(l)),
+                    "Duracion (d)": _fmt_csv_num(_derive_duration(l)),
+                    "Retorno %": _fmt_csv_num(l.pnl_pct),
+                    "Setup": l.setup or "",
+                    "Contexto": l.context or "",
+                    "Error/Nota": l.error_note or "",
+                    "Post Venta": l.post_venta or "",
+                },
+            ))
+
+    out.sort(key=lambda x: x[0])
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=_EXPORT_HEADERS, extrasaction="ignore")
+    writer.writeheader()
+    for _, record in out:
+        writer.writerow(record)
+
+    filename = f"journal_{date.today().isoformat()}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/backfill-regime")
+async def backfill_regime(
+    force: bool = Query(
+        False,
+        description="Recompute even trades that already have a regime_at_entry.",
+    ),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Reconstruct the objective market regime at entry for journal trades.
+
+    Targets trades that never captured one (CSV-imported historicals and
+    partial-sell children show "sin data" in the Setup × Regime matrix). The
+    regime is rebuilt from StockMetrics as it stood on each trade's entry_date,
+    so the matrix reflects the real market context instead of a gap.
+
+    Results are cached per entry_date within the run — many trades share dates,
+    and the engine is the expensive part. `out_of_range` counts trades whose
+    entry predates the StockMetrics history (left untouched).
+    """
+    trades = await _repository(db).list_trades(
+        owner_user_id=current_user.id,
+        missing_regime_only=not force,
+    )
+
+    regime_by_date: dict[date, Optional[str]] = {}
+    updated = 0
+    out_of_range = 0
+    for t in trades:
+        if t.entry_date not in regime_by_date:
+            regime_by_date[t.entry_date] = await reconstruct_regime_at_entry(db, t.entry_date)
+        regime = regime_by_date[t.entry_date]
+        if regime is None:
+            out_of_range += 1
+            continue
+        t.regime_at_entry = regime
+        updated += 1
+
+    await db.commit()
+    return {
+        "considered": len(trades),
+        "updated": updated,
+        "out_of_range": out_of_range,
+        "distinct_dates": len(regime_by_date),
+    }
+
+
+# --- CRUD: replace the spreadsheet ----------------------------------------------
+
+
+def _trade_to_dict(
+    t: JournalTrade,
+    decision_outcome: Optional[str] = None,
+    decision_result_detail: Optional[str] = None,
+    decision_runner_breakeven_id: Optional[int] = None,
+) -> dict:
+    # All derived fields (cost_total, pnl_dollars, pnl_pct, r_multiple,
+    # duration_days) fall back to on-the-fly computation when the persisted
+    # cache is NULL. This handles both new trades that skip eager persistence
+    # AND historical CSV-imported rows where the Retorno/R columns were empty.
+    cost_total = t.cost_total
+    if cost_total is None and t.entry_price is not None and t.qty is not None:
+        cost_total = t.entry_price * t.qty
+    pnl_pct = t.pnl_pct
+    if pnl_pct is None and t.exit_price is not None and t.entry_price not in (None, 0):
+        pnl_pct = t.exit_price / t.entry_price - 1.0
+    pnl_dollars = _derive_pnl(t)
+    r_multiple = _derive_r(t)
+    duration_days = _derive_duration(t)
+    return {
+        "id": t.id,
+        "symbol": t.symbol,
+        "direction": "long",
+        "setup": t.setup,
+        "context": t.context,
+        "entry_date": t.entry_date.isoformat() if t.entry_date else None,
+        "entry_price": t.entry_price,
+        "qty": t.qty,
+        "stop_price": t.stop_price,
+        "cost_total": cost_total,
+        "exit_date": t.exit_date.isoformat() if t.exit_date else None,
+        "exit_price": t.exit_price,
+        "duration_days": duration_days,
+        "pnl_dollars": pnl_dollars,
+        "pnl_pct": pnl_pct,
+        "r_multiple": r_multiple,
+        "error_note": t.error_note,
+        "post_venta": t.post_venta,
+        "linked_observation_id": t.linked_observation_id,
+        "is_open": t.exit_date is None,
+        "from_queue": t.from_queue,
+        "entry_reason": t.entry_reason,
+        "exit_reason": t.exit_reason,
+        "planned_risk_dollars": t.planned_risk_dollars,
+        "account_balance_at_entry": t.account_balance_at_entry,
+        "effective_risk_dollars": _derive_effective_risk(t),
+        "risk_pct_of_account": _derive_risk_pct(t),
+        "regime_at_entry": t.regime_at_entry,
+        "system_score_at_entry": t.system_score_at_entry,
+        "group_strength_at_entry": t.group_strength_at_entry,
+        "leader_health_at_entry": t.leader_health_at_entry,
+        "initial_stop_price": t.initial_stop_price,
+        "is_risk_free": (
+            t.stop_price is not None and t.entry_price is not None
+            and t.stop_price + _STOP_BE_TOLERANCE >= t.entry_price
+        ),
+        "parent_trade_id": t.parent_trade_id,
+        "decision_id": _decision_id(t),
+        "decision_outcome": decision_outcome,
+        "decision_result_detail": decision_result_detail,
+        "is_runner_breakeven_exit": decision_runner_breakeven_id == t.id,
+    }
+
+
+async def _find_linked_observation(db: AsyncSession, symbol: str, entry_date: date) -> Optional[int]:
+    from datetime import timedelta
+    window_start = entry_date - timedelta(days=3)
+    window_end = entry_date + timedelta(days=3)
+    candidates = (await db.execute(
+        select(TransitionObservation.id, TransitionObservation.date_detected)
+        .where(TransitionObservation.symbol == symbol)
+        .where(TransitionObservation.date_detected >= window_start)
+        .where(TransitionObservation.date_detected <= window_end)
+    )).all()
+    if not candidates:
+        return None
+    return min(candidates, key=lambda r: abs((r.date_detected - entry_date).days)).id
+
+
+def _validate_enum(value: Optional[str], allowed: list[str], field_name: str) -> Optional[str]:
+    if value is None:
+        return None
+    if value not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be one of {allowed}, got '{value}'",
+        )
+    return value
+
+
+@router.get("/vocab")
+async def get_vocabularies():
+    """Drives the form dropdowns. Single source of truth — the frontend reads this."""
+    return {
+        "setup_options": SETUP_OPTIONS,
+        "context_options": CONTEXT_OPTIONS,
+        "entry_reason_options": ENTRY_REASON_OPTIONS,
+        "exit_reason_options": EXIT_REASON_OPTIONS,
+        "default_commission": DEFAULT_COMMISSION,
+    }
+
+
+@router.get("/trade-draft")
+async def get_trade_draft(
+    symbol: str,
+    setup: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns prefill payload for a take-from-queue flow.
+
+    Read-only — does NOT persist a trade. The frontend opens NewTradeModal
+    with these values and the operator confirms (possibly editing qty / stop)
+    before the actual POST. Persisted snapshots will be re-taken at save time
+    so they reflect the system state at the moment of confirmation, not at
+    the moment of click.
+    """
+    symbol = symbol.strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol required")
+    if setup not in SETUP_OPTIONS:
+        raise HTTPException(status_code=422, detail=f"setup must be one of {SETUP_OPTIONS}")
+
+    # Pull most recent stock_metrics row for the symbol
+    from app.models.stock import StockMetrics
+    metrics = (await db.execute(
+        select(StockMetrics)
+        .where(StockMetrics.symbol == symbol)
+        .order_by(StockMetrics.date.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="no metrics for symbol")
+
+    # Preview snapshots so operator sees what'll get saved (real snapshots taken at POST time)
+    from datetime import date as _date
+    snapshot = await take_entry_snapshot(db, symbol, _date.today())
+
+    return {
+        "symbol": symbol,
+        "setup": setup,
+        "entry_price": metrics.current_price,
+        "stop_price_suggested": metrics.ema21,
+        "from_queue": True,
+        "entry_reason": "queue_signal",
+        "regime_at_entry": snapshot["regime_at_entry"],
+        "system_score_at_entry": snapshot["system_score_at_entry"],
+        "group_strength_at_entry": snapshot["group_strength_at_entry"],
+        "leader_health_at_entry": snapshot["leader_health_at_entry"],
+    }
+
+
+@router.post("/trades", status_code=201)
+async def create_open_trade(
+    payload: OpenTradeIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Create an open position. Server computes cost_total (entry_price·qty + commission)
+    and links to the nearest transition_observation if one exists for the symbol around
+    entry_date. Exit fields stay null until /close is called.
+    """
+    symbol = payload.symbol.strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol required")
+    _validate_enum(payload.entry_reason, ENTRY_REASON_OPTIONS, "entry_reason")
+    obs_id = await _find_linked_observation(db, symbol, payload.entry_date)
+    # Snapshot the system state at entry — non-blocking (failures yield null fields, log only).
+    snapshot = await take_entry_snapshot(db, symbol, payload.entry_date)
+    # cost_total left NULL; computed on response from entry_price * qty.
+    trade = JournalTrade(
+        owner_user_id=current_user.id,
+        symbol=symbol,
+        setup=payload.setup,
+        context=payload.context,
+        entry_date=payload.entry_date,
+        entry_price=payload.entry_price,
+        qty=payload.qty,
+        stop_price=payload.stop_price,
+        linked_observation_id=obs_id,
+        source_row=0,  # 0 = manually entered (not from CSV)
+        from_queue=payload.from_queue,
+        entry_reason=payload.entry_reason,
+        planned_risk_dollars=payload.planned_risk_dollars,
+        account_balance_at_entry=payload.account_balance_at_entry,
+        regime_at_entry=snapshot["regime_at_entry"],
+        system_score_at_entry=snapshot["system_score_at_entry"],
+        group_strength_at_entry=snapshot["group_strength_at_entry"],
+        leader_health_at_entry=snapshot["leader_health_at_entry"],
+        initial_stop_price=payload.stop_price,  # immutable snapshot of planned risk
+    )
+    repository = _repository(db)
+    await repository.add_trade(owner_user_id=current_user.id, trade=trade)
+    await db.flush()
+    # Manual entries must use the same position-episode grouping as imports:
+    # another open buy in the same symbol belongs to the existing decision.
+    symbol_trades = await repository.list_trades(
+        owner_user_id=current_user.id, symbol=symbol
+    )
+    assign_decision_links(symbol_trades)
+    await db.commit()
+    await db.refresh(trade)
+    # Log the initial stop event after the trade has an id assigned.
+    if payload.stop_price is not None:
+        _record_stop_event(db, trade.id, None, payload.stop_price, 'initial')
+        await db.commit()
+    return _trade_to_dict(trade)
+
+
+def _compute_outcomes(trade: JournalTrade, commission: float = DEFAULT_COMMISSION) -> None:
+    """Fill operational outcome fields on a trade with both legs set.
+
+    Persists only the metrics that aren't trivial UI-side derivations:
+      - pnl_dollars: requires commission knowledge — non-trivial.
+      - r_multiple : requires stop_price, also non-trivial.
+    pnl_pct and duration_days are intentionally left to _trade_to_dict to
+    compute on-demand. Assumes long-only.
+    """
+    if trade.exit_price is None or trade.exit_date is None or trade.entry_price is None:
+        return
+    qty = trade.qty
+    trade.pnl_dollars = (trade.exit_price - trade.entry_price) * qty - 2 * commission
+    # Honest R uses initial_stop_price (planned risk) when available, with
+    # fallback to stop_price for back-compat with trades created before this
+    # column existed (i.e. CSV-imported historicals).
+    stop_for_r = trade.initial_stop_price if trade.initial_stop_price is not None else trade.stop_price
+    if stop_for_r is not None and trade.entry_price > stop_for_r:
+        risk_per_share = trade.entry_price - stop_for_r
+        trade.r_multiple = (trade.exit_price - trade.entry_price) / risk_per_share
+
+
+@router.post("/trades/{trade_id}/close")
+async def close_trade(
+    trade_id: int,
+    payload: CloseTradeIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Close a position fully or partially.
+
+    Partial close (when payload.qty is set and < trade.qty): the original record
+    stays open with qty reduced; a new closed record is created for the chunk
+    that exited. This preserves entry_price / stop_price / setup / context on
+    both halves so future partials use the same basis.
+    """
+    repository = _repository(db)
+    trade = await repository.get_trade(
+        owner_user_id=current_user.id,
+        trade_id=trade_id,
+        for_update=True,
+    )
+    if trade is None:
+        raise HTTPException(status_code=404, detail="trade not found")
+    if trade.exit_date is not None:
+        raise HTTPException(status_code=400, detail="trade already closed")
+    _validate_enum(payload.exit_reason, EXIT_REASON_OPTIONS, "exit_reason")
+
+    full_qty = trade.qty
+    chunk = payload.qty if payload.qty is not None else full_qty
+    if chunk > full_qty + 1e-9:
+        raise HTTPException(status_code=400, detail=f"qty {chunk} exceeds open qty {full_qty}")
+
+    is_partial = chunk < full_qty - 1e-9
+
+    if is_partial:
+        # Carve out a closed child trade for the chunk; original keeps the remainder open.
+        # Auto-infer exit_reason='partial_take' if operator didn't specify — partials
+        # are nearly always profit-taking or risk reduction; saves a forced click.
+        child_exit_reason = payload.exit_reason if payload.exit_reason else 'partial_take'
+        # Decision linkage: child belongs to the same decision as its source trade.
+        # If trade has a parent (it's already a child), inherit that. Otherwise
+        # trade IS the representative of the decision and child links to it.
+        parent_id = trade.parent_trade_id if trade.parent_trade_id is not None else trade.id
+        closed = JournalTrade(
+            owner_user_id=current_user.id,
+            symbol=trade.symbol,
+            setup=trade.setup,
+            context=trade.context,
+            entry_date=trade.entry_date,
+            entry_price=trade.entry_price,
+            qty=chunk,
+            stop_price=trade.stop_price,
+            cost_total=trade.entry_price * chunk,
+            exit_date=payload.exit_date,
+            exit_price=payload.exit_price,
+            error_note=payload.error_note,
+            post_venta=payload.post_venta,
+            linked_observation_id=trade.linked_observation_id,
+            source_row=trade.source_row,
+            from_queue=trade.from_queue,
+            entry_reason=trade.entry_reason,
+            exit_reason=child_exit_reason,
+            parent_trade_id=parent_id,
+        )
+        _compute_outcomes(closed, commission=payload.commission)
+        await repository.add_trade(
+            owner_user_id=current_user.id, trade=closed
+        )
+
+        trade.qty = full_qty - chunk
+        if trade.cost_total is not None:
+            trade.cost_total = trade.entry_price * trade.qty
+
+        await db.commit()
+        await db.refresh(closed)
+        await db.refresh(trade)
+        return {"closed": _trade_to_dict(closed), "remaining_open": _trade_to_dict(trade)}
+
+    # Full close: mutate in place. exit_reason keeps its current value
+    # ('unknown' by default) unless operator provides one in the payload.
+    trade.exit_date = payload.exit_date
+    trade.exit_price = payload.exit_price
+    trade.error_note = payload.error_note
+    trade.post_venta = payload.post_venta
+    if payload.exit_reason is not None:
+        trade.exit_reason = payload.exit_reason
+    _compute_outcomes(trade, commission=payload.commission)
+    await db.commit()
+    await db.refresh(trade)
+    return _trade_to_dict(trade)
+
+
+@router.patch("/trades/{trade_id}")
+async def patch_trade(
+    trade_id: int,
+    payload: PatchTradeIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Edit any field on an existing trade. Recomputes derived metrics if any of
+    (entry_price, exit_price, stop_price, qty, entry_date, exit_date) changed.
+    """
+    trade = await _repository(db).get_trade(
+        owner_user_id=current_user.id,
+        trade_id=trade_id,
+        for_update=True,
+    )
+    if trade is None:
+        raise HTTPException(status_code=404, detail="trade not found")
+
+    _validate_enum(payload.entry_reason, ENTRY_REASON_OPTIONS, "entry_reason")
+    _validate_enum(payload.exit_reason, EXIT_REASON_OPTIONS, "exit_reason")
+
+    updates = payload.model_dump(exclude_unset=True)
+    recompute_keys = {"entry_price", "exit_price", "stop_price", "qty", "entry_date", "exit_date"}
+    needs_recompute = bool(set(updates) & recompute_keys)
+    # Snapshot pre-update stop so we can detect any change after setattr loop.
+    old_stop = trade.stop_price
+
+    for k, v in updates.items():
+        if k == "symbol" and v is not None:
+            v = v.strip().upper()
+        # initial_stop_price is immutable — silently ignore attempts to PATCH it.
+        if k == "initial_stop_price":
+            continue
+        setattr(trade, k, v)
+
+    # If stop_price was in the payload, classify and record any actual change.
+    if "stop_price" in updates:
+        # Lazily set initial_stop_price the first time the trade gets a stop.
+        if trade.initial_stop_price is None and trade.stop_price is not None:
+            trade.initial_stop_price = trade.stop_price
+        kind = _classify_stop_change(old_stop, trade.stop_price, trade.entry_price)
+        if kind is not None:
+            _record_stop_event(db, trade.id, old_stop, trade.stop_price, kind)
+
+    if needs_recompute:
+        _compute_outcomes(trade)
+        # cost_total / pnl_pct / duration_days are derived on response — not persisted on patch.
+        if "symbol" in updates or "entry_date" in updates:
+            trade.linked_observation_id = await _find_linked_observation(db, trade.symbol, trade.entry_date)
+
+    await db.commit()
+    await db.refresh(trade)
+    return _trade_to_dict(trade)
+
+
+@router.get("/trades/{trade_id}/stop-history")
+async def get_stop_history(
+    trade_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Chronological audit log of all stop_price changes for the trade.
+
+    Used by the EditTradeModal to show how the operator managed risk through
+    the position's lifetime. Auto-classification (initial / moved_to_be /
+    trailed_up / widened / removed) lets the UI render the story without
+    requiring the operator to label each event.
+    """
+    rows = await _repository(db).list_stop_events(
+        owner_user_id=current_user.id, trade_id=trade_id
+    )
+    if rows is None:
+        raise HTTPException(status_code=404, detail="trade not found")
+    return {
+        "events": [
+            {
+                "id": e.id,
+                "old_stop_price": e.old_stop_price,
+                "new_stop_price": e.new_stop_price,
+                "kind": e.kind,
+                "occurred_at": e.occurred_at.isoformat() if e.occurred_at else None,
+                "auto_classified": e.auto_classified,
+            }
+            for e in rows
+        ]
+    }
+
+
+@router.delete("/trades/{trade_id}", status_code=204)
+async def delete_trade(
+    trade_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    deleted = await _repository(db).delete_trade(
+        owner_user_id=current_user.id, trade_id=trade_id
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="trade not found")
+    await db.commit()
+    return None

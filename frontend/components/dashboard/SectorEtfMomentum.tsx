@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { ChevronDown, ChevronUp, Flame, TrendingDown, TrendingUp } from 'lucide-react'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import type { MarketGroupMomentum as MomentumData, MarketGroupMomentumSignal, SectorMomentumStatus } from '@/types/sector'
 
@@ -43,7 +43,7 @@ export default function SectorLeadershipMomentum() {
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch(`${API_URL}/api/v1/sectors/leadership-momentum`)
+      const response = await apiFetch('/api/v1/sectors/leadership-momentum')
       if (!response.ok) throw new Error('failed')
       const next: MomentumData = await response.json()
       setData(next)
@@ -57,13 +57,13 @@ export default function SectorLeadershipMomentum() {
   }, [])
 
   useEffect(() => {
-    load()
+    queueMicrotask(() => void load())
     const id = setInterval(load, 60000)
     return () => clearInterval(id)
   }, [load])
 
   useEffect(() => {
-    if (metricsEvent?.event === 'updated') load()
+    if (metricsEvent?.event === 'updated') queueMicrotask(() => void load())
   }, [metricsEvent, load])
 
   if (loading) {

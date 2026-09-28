@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import { ExternalLink, ChevronDown, ChevronRight, EyeOff, Eye } from 'lucide-react'
@@ -70,9 +70,8 @@ export default function EmergingLeadersQueue({ refreshKey }: Props) {
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    setViewAnyway(false)
-    fetch(`${API_URL}/api/v1/queue/emerging-leaders`)
+    queueMicrotask(() => { setLoading(true); setViewAnyway(false) })
+    apiFetch('/api/v1/queue/emerging-leaders')
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(data => {
         if (cancelled) return

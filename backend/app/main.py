@@ -13,6 +13,8 @@ from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.core.deps import AsyncSessionLocal
 from app.api.v1.api import api_router
+from app.core.auth import configured_trusted_origins
+from app.services.mailer import validate_production_mail_settings
 from app.services.realtime_price_service import get_realtime_price_service
 import logging
 import os
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    validate_production_mail_settings(settings)
     logger.info("Application started")
 
     # Cleanup scheduler_errors older than 7 days — operational table, not historical
@@ -52,7 +55,7 @@ app = FastAPI(
 )
 
 # CORS configuration — restrict to configured origins
-_cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+_cors_origins = sorted(configured_trusted_origins())
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,

@@ -6,6 +6,8 @@ import { cn } from '@/lib/utils'
 import DataHealthBanner from './DataHealthBanner'
 import PipelineHealthChip from './PipelineHealthChip'
 import SymbolSearch from './SymbolSearch'
+import AccountMenu from '@/components/auth/AccountMenu'
+import { ProtectedContent } from '@/components/auth/AuthProvider'
 
 interface DashboardLayoutProps {
   children: React.ReactNode
@@ -24,7 +26,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const pathname = usePathname()
 
   return (
-    <div className="min-h-screen bg-background">
+    <ProtectedContent><div className="min-h-screen bg-background">
       <DataHealthBanner />
       {/* Header */}
       <nav className="border-b border-border bg-card">
@@ -52,6 +54,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
                 </Link>
               ))}
               <SymbolSearch />
+              <AccountMenu />
             </div>
           </div>
         </div>
@@ -61,6 +64,6 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
       <main className="container mx-auto px-4 py-6">
         {children}
       </main>
-    </div>
+    </div></ProtectedContent>
   )
 }

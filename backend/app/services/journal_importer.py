@@ -15,11 +15,13 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Optional
+from uuid import UUID
 
-from sqlalchemy import select, delete, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.stock import JournalTrade, TransitionObservation
+from app.repositories.journal_repository import JournalRepository
 from app.services.journal_decisions import assign_decision_links
 
 
@@ -156,6 +158,7 @@ class ParsedTrade:
 
 @dataclass
 class ImportStats:
+    cleared_prior_trades: int = 0
     rows_seen: int = 0
     trades_closed: int = 0
     positions_open: int = 0
@@ -169,10 +172,30 @@ class JournalImporter:
     site: callers may want to clear the table before re-importing (see endpoint).
     """
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, owner_user_id: UUID):
         self.db = db
+        self.owner_user_id = owner_user_id
+        self.repository = JournalRepository(db)
 
-    async def import_csv(self, csv_text: str) -> ImportStats:
+    async def import_csv(
+        self, csv_text: str, *, replace: bool = False
+    ) -> ImportStats:
+        """Replace/import one owner's journal in a single transaction."""
+        try:
+            cleared = (
+                await self.clear_all()
+                if replace
+                else 0
+            )
+            stats = await self._import_csv_uncommitted(csv_text)
+            stats.cleared_prior_trades = cleared
+            await self.db.commit()
+            return stats
+        except Exception:
+            await self.db.rollback()
+            raise
+
+    async def _import_csv_uncommitted(self, csv_text: str) -> ImportStats:
         reader = csv.reader(io.StringIO(csv_text))
         rows = [r for r in reader]
         header_idx = _find_header_row(rows)
@@ -303,6 +326,7 @@ class JournalImporter:
                 if obs_id is not None:
                     stats.linked_observations += 1
                 row = JournalTrade(
+                    owner_user_id=self.owner_user_id,
                     symbol=sym,
                     setup=leg.setup_at_entry,
                     context=leg.context_at_entry,
@@ -314,7 +338,9 @@ class JournalImporter:
                     linked_observation_id=obs_id,
                     source_row=leg.source_row,
                 )
-                self.db.add(row)
+                await self.repository.add_trade(
+                    owner_user_id=self.owner_user_id, trade=row
+                )
                 created.append(row)
 
         # Persist + link closed trades
@@ -323,6 +349,7 @@ class JournalImporter:
             if obs_id is not None:
                 stats.linked_observations += 1
             row = JournalTrade(
+                owner_user_id=self.owner_user_id,
                 symbol=t.symbol,
                 setup=t.setup,
                 context=t.context,
@@ -342,7 +369,9 @@ class JournalImporter:
                 linked_observation_id=obs_id,
                 source_row=t.source_row,
             )
-            self.db.add(row)
+            await self.repository.add_trade(
+                owner_user_id=self.owner_user_id, trade=row
+            )
             created.append(row)
 
         # Flush to assign ids, then group legs into position-episode decisions
@@ -352,7 +381,6 @@ class JournalImporter:
         await self.db.flush()
         assign_decision_links(created)
 
-        await self.db.commit()
         return stats
 
     async def _find_linked_observation(self, symbol: str, entry_date: date) -> Optional[int]:
@@ -373,7 +401,7 @@ class JournalImporter:
         return best.id
 
     async def clear_all(self) -> int:
-        """Wipe journal_trades. Used before re-import. Returns rows deleted."""
-        result = await self.db.execute(delete(JournalTrade))
-        await self.db.commit()
-        return result.rowcount or 0
+        """Delete only this owner's rows without committing the transaction."""
+        return await self.repository.delete_all_trades(
+            owner_user_id=self.owner_user_id
+        )

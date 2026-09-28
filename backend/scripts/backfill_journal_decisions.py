@@ -9,7 +9,7 @@ Re-entering the symbol after fully liquidating starts a new decision. This is
 the same rule the importer applies on ingest, so a re-run is idempotent.
 
 Usage:
-    python scripts/backfill_journal_decisions.py [--dry-run]
+    python scripts/backfill_journal_decisions.py --owner-email user@example.com [--dry-run]
 
 Exit code: 0 on success.
 """
@@ -23,12 +23,21 @@ from sqlalchemy import select
 
 from app.core.deps import AsyncSessionLocal
 from app.models.stock import JournalTrade
+from app.models.user import User, normalize_email
+from app.repositories.journal_repository import JournalRepository
 from app.services.journal_decisions import assign_decision_links
 
 
-async def main(dry_run: bool) -> int:
+async def main(dry_run: bool, owner_email: str) -> int:
     async with AsyncSessionLocal() as db:
-        rows = (await db.execute(select(JournalTrade))).scalars().all()
+        owner = await db.scalar(
+            select(User).where(User.email == normalize_email(owner_email))
+        )
+        if owner is None:
+            raise ValueError("owner account not found")
+        rows = await JournalRepository(db).list_trades(
+            owner_user_id=owner.id
+        )
         rows_updated = assign_decision_links(rows)
 
         # Report the multi-leg decisions we formed for at-a-glance verification.
@@ -55,6 +64,7 @@ async def main(dry_run: bool) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--owner-email", required=True)
     parser.add_argument("--dry-run", action="store_true", help="Compute but do not commit")
     args = parser.parse_args()
-    sys.exit(asyncio.run(main(dry_run=args.dry_run)))
+    sys.exit(asyncio.run(main(dry_run=args.dry_run, owner_email=args.owner_email)))

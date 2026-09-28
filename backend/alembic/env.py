@@ -15,6 +15,13 @@ from app.models.stock import Stock, StockPrice, StockMetrics
 from app.models.sector import Sector
 from app.models.scan_result import ScanResult
 from app.models.universe import InstrumentIdentity, UniverseEnrichment
+from app.models.user import (
+    AuthSession,
+    EmailVerificationToken,
+    PasswordResetToken,
+    User,
+    UserProfile,
+)
 
 config = context.config
 
@@ -23,8 +30,10 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-# Convert async URL to sync for migrations
-sync_url = settings.database_url.replace("+asyncpg", "")
+# Alembic uses the synchronous driver.  Keep it explicit: SQLAlchemy 2.1 changed
+# the bare ``postgresql://`` default from psycopg2 to psycopg, while the
+# production image intentionally installs psycopg2-binary.
+sync_url = settings.database_url.replace("+asyncpg", "+psycopg2")
 config.set_main_option("sqlalchemy.url", sync_url)
 
 

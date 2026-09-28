@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from sqlalchemy import String, Float, Integer, Boolean, Index, DateTime, Date
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Date, DateTime, Boolean, Float, ForeignKey, Index, Integer, String, Uuid
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from datetime import datetime, date
 from typing import Optional
+from uuid import UUID
 from app.models.base import Base
 
 
@@ -199,6 +200,20 @@ class JournalTrade(Base):
     __tablename__ = "journal_trades"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # The expand migration introduces this as nullable so legacy rows can be
+    # claimed safely. The contract migration makes it non-null before the
+    # auth-aware application is deployed.
+    owner_user_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner: Mapped["User"] = relationship(back_populates="journal_trades")
+    stop_events: Mapped[list["JournalStopEvent"]] = relationship(
+        back_populates="trade",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     symbol: Mapped[str] = mapped_column(String(10), nullable=False)
     setup: Mapped[str] = mapped_column(String(32), nullable=False, default='unknown')
@@ -290,7 +305,21 @@ class JournalTrade(Base):
         Index('ix_journal_symbol_entry', 'symbol', 'entry_date'),
         Index('ix_journal_setup_context', 'setup', 'context'),
         Index('ix_journal_parent_trade_id', 'parent_trade_id'),
-        Index('ix_journal_broker_exec_id', 'broker_exec_id', unique=True),
+        Index('ix_journal_owner_entry', 'owner_user_id', 'entry_date'),
+        Index(
+            'ix_journal_owner_symbol_entry',
+            'owner_user_id',
+            'symbol',
+            'entry_date',
+        ),
+        Index('ix_journal_owner_exit_date', 'owner_user_id', 'exit_date'),
+        Index('ix_journal_owner_parent_trade', 'owner_user_id', 'parent_trade_id'),
+        Index(
+            'uq_journal_owner_broker_exec',
+            'owner_user_id',
+            'broker_exec_id',
+            unique=True,
+        ),
     )
 
 
@@ -304,7 +333,12 @@ class JournalStopEvent(Base):
     __tablename__ = "journal_stop_events"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    trade_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    trade_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("journal_trades.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    trade: Mapped[JournalTrade] = relationship(back_populates="stop_events")
     old_stop_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     new_stop_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     # One of: 'initial', 'moved_to_be', 'trailed_up', 'widened', 'removed'.
@@ -333,4 +367,3 @@ class PipelineHeartbeat(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
     )
-

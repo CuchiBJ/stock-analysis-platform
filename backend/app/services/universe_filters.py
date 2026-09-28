@@ -1,7 +1,7 @@
 """Shared quality filters for institutional universe calculations.
 
 These are the prerequisites for any setup in the platform — applied to
-/actionable, /live, all queue lenses, batch_transition_scanner,
+/forming, /live, all queue lenses, batch_transition_scanner,
 breadth/leadership engines, sector aggregations.
 
 Universe definition (institutional swing momentum):

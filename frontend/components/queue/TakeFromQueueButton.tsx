@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { Crosshair } from 'lucide-react'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 import { NewTradeModal, type Vocab, type TradeDraftPrefill } from '@/app/journal/TradeForms'
 
 export default function TakeFromQueueButton({
@@ -23,8 +23,8 @@ export default function TakeFromQueueButton({
     try {
       // Fetch vocab + draft in parallel — both needed to open the modal
       const [draftRes, vocabRes] = await Promise.all([
-        fetch(`${API_URL}/api/v1/journal/trade-draft?symbol=${encodeURIComponent(symbol)}&setup=${encodeURIComponent(setup)}`),
-        vocab ? Promise.resolve(null) : fetch(`${API_URL}/api/v1/journal/vocab`),
+        apiFetch(`/api/v1/journal/trade-draft?symbol=${encodeURIComponent(symbol)}&setup=${encodeURIComponent(setup)}`),
+        vocab ? Promise.resolve(null) : apiFetch('/api/v1/journal/vocab'),
       ])
       if (!draftRes.ok) {
         const d = await draftRes.json().catch(() => ({}))
@@ -36,8 +36,8 @@ export default function TakeFromQueueButton({
         setVocab(await vocabRes.json())
       }
       setDraft(draftData)
-    } catch (e: any) {
-      alert(`No se pudo cargar el draft: ${e.message}`)
+    } catch (e: unknown) {
+      alert(`No se pudo cargar el draft: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setLoading(false)
     }

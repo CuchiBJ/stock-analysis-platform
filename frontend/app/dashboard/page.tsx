@@ -8,7 +8,7 @@ import dynamic from 'next/dynamic'
 const MarketContextBar       = dynamic(() => import('@/components/dashboard/MarketContextBar'),       { ssr: false })
 const SectorRotationCallout  = dynamic(() => import('@/components/dashboard/SectorRotationCallout'),  { ssr: false })
 const SectorLeadershipMomentum = dynamic(() => import('@/components/dashboard/SectorEtfMomentum'),   { ssr: false })
-const TopActionableSetups = dynamic(() => import('@/components/dashboard/TopActionableSetups'),  { ssr: false })
+const SetupsForming = dynamic(() => import('@/components/dashboard/SetupsForming'),  { ssr: false })
 const LiveTransitionFeed  = dynamic(() => import('@/components/dashboard/LiveTransitionFeed'),   { ssr: false })
 const SectorHeatmap       = dynamic(() => import('@/components/charts/SectorHeatmap'),           { ssr: false })
 
@@ -41,12 +41,12 @@ export default function DashboardPage() {
         <SectorLeadershipMomentum />
       </div>
 
-      {/* PRIMARY PANEL — top actionable setups, full width */}
+      {/* PREPARATION — first in reading order by operator preference */}
       <div className="mb-4" id="setups">
-        <TopActionableSetups />
+        <SetupsForming />
       </div>
 
-      {/* SECONDARY ROW — live transitions (signal) + sector context */}
+      {/* EXECUTION — qualifying current transitions + sector context */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4" id="transitions">
         {/* Transitions gets more horizontal space */}
         <div className="lg:col-span-3">

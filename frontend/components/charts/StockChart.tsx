@@ -5,7 +5,15 @@ import { createChart, IChartApi, ISeriesApi, ColorType, CrosshairMode } from 'li
 
 interface StockChartProps {
   symbol: string
-  data?: any[]
+  data?: StockChartPoint[]
+}
+
+interface StockChartPoint {
+  date: string
+  open: number
+  high: number
+  low: number
+  close: number
 }
 
 export default function StockChart({ symbol, data: propData }: StockChartProps) {
@@ -72,7 +80,7 @@ export default function StockChart({ symbol, data: propData }: StockChartProps) 
   useEffect(() => {
     if (!seriesRef.current || !propData) return
 
-    const formattedData = propData.map((item: any) => ({
+    const formattedData = propData.map((item) => ({
       time: item.date,
       open: item.open,
       high: item.high,

@@ -1,6 +1,11 @@
 """WebSocket endpoint for real-time updates"""
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+
+from app.core.auth import get_current_websocket_user
+from app.models.user import User
 from app.services.websocket_manager import websocket_manager
 
 router = APIRouter()
@@ -9,10 +14,15 @@ router = APIRouter()
 @router.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
-    client_id: str = Query(..., description="Unique client identifier")
+    user: Annotated[User, Depends(get_current_websocket_user)],
+    client_id: str = Query(..., description="Unique client identifier"),
 ):
     """WebSocket endpoint for real-time setup state updates"""
-    await websocket_manager.connect(websocket, client_id)
+    # A browser-supplied identifier is only unique inside the authenticated
+    # account. Prefixing it prevents one account from replacing or controlling
+    # another account's manager entry by guessing the same value.
+    connection_id = f"{user.id}:{client_id}"
+    await websocket_manager.connect(websocket, connection_id)
     
     try:
         while True:
@@ -23,14 +33,14 @@ async def websocket_endpoint(
             if data.get('action') == 'subscribe':
                 channel = data.get('channel')
                 if channel:
-                    await websocket_manager.subscribe(client_id, channel)
+                    await websocket_manager.subscribe(connection_id, channel)
             elif data.get('action') == 'unsubscribe':
                 channel = data.get('channel')
                 if channel:
-                    await websocket_manager.unsubscribe(client_id, channel)
+                    await websocket_manager.unsubscribe(connection_id, channel)
                     
     except WebSocketDisconnect:
-        websocket_manager.disconnect(client_id)
+        websocket_manager.disconnect(connection_id)
     except Exception as e:
         print(f"WebSocket error: {e}")
-        websocket_manager.disconnect(client_id)
+        websocket_manager.disconnect(connection_id)

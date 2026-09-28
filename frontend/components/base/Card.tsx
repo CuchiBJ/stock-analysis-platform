@@ -5,7 +5,7 @@ interface CardProps {
   children: ReactNode
   className?: string
   variant?: 'default' | 'compact' | 'borderless'
-  blockType?: 'market-context' | 'live-transitions' | 'actionable' | 'sector' | 'structure'
+  blockType?: 'market-context' | 'live-transitions' | 'forming' | 'sector' | 'structure'
   hoverable?: boolean
 }
 
@@ -21,7 +21,7 @@ export default function Card({
   const blockTypeStyles = blockType ? {
     'market-context': 'bg-[hsl(var(--block-market-context))] border border-border/50',
     'live-transitions': 'bg-[hsl(var(--block-live-transitions))] border border-border/50',
-    'actionable': 'bg-[hsl(var(--block-actionable))] border border-border/50',
+    'forming': 'bg-[hsl(var(--block-actionable))] border border-border/50',
     'sector': 'bg-[hsl(var(--block-sector))] border border-border/50',
     'structure': 'bg-[hsl(var(--block-structure))] border border-border/50',
   }[blockType] : 'bg-card'

@@ -1,5 +1,3 @@
-import { Stock } from './stock'
-
 export type BadgeType = 
   | 'breakout'
   | 'near_ath'

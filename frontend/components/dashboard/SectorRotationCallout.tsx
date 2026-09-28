@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { TrendingUp, TrendingDown, RotateCw } from 'lucide-react'
 import { useWebSocket } from '@/hooks/useWebSocket'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 import type { SectorRotation, SectorRotationEntry, SectorRotationGroup } from '@/types/sector'
 import SectorConstituentsDrawer from '@/components/dashboard/SectorConstituentsDrawer'
 
@@ -22,7 +22,7 @@ export default function SectorRotationCallout() {
 
   const fetchRotation = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/api/v1/sectors/rotation`)
+      const res = await apiFetch('/api/v1/sectors/rotation')
       if (!res.ok) throw new Error('failed')
       setRot(await res.json())
       setError(false)
@@ -32,13 +32,13 @@ export default function SectorRotationCallout() {
   }, [])
 
   useEffect(() => {
-    fetchRotation()
+    queueMicrotask(() => void fetchRotation())
     const id = setInterval(fetchRotation, 60000)
     return () => clearInterval(id)
   }, [fetchRotation])
 
   useEffect(() => {
-    if (metricsEvent?.event === 'updated') fetchRotation()
+    if (metricsEvent?.event === 'updated') queueMicrotask(() => void fetchRotation())
   }, [metricsEvent, fetchRotation])
 
   if (error || !rot) return null

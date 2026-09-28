@@ -32,8 +32,8 @@ _QUEUE_TYPES = "u_and_r, rs_leaders, emerging_leaders, building_bases"
 # when FastAPI invokes them, so calling directly with an explicit db is correct.
 
 
-async def get_actionable_setups(db: AsyncSession, limit: int = 6) -> dict:
-    return await tx.get_actionable_setups(limit=limit, db=db)
+async def get_forming_setups(db: AsyncSession, limit: int = 6) -> dict:
+    return await tx.get_forming_setups(limit=limit, db=db)
 
 
 async def get_live_transitions(db: AsyncSession, limit: int = 10) -> list:
@@ -81,7 +81,7 @@ async def get_setup_queue(db: AsyncSession, queue_type: str) -> list:
 
 
 HANDLERS = {
-    "get_actionable_setups": get_actionable_setups,
+    "get_forming_setups": get_forming_setups,
     "get_live_transitions": get_live_transitions,
     "get_symbol_transition": get_symbol_transition,
     "get_symbol_observations": get_symbol_observations,
@@ -96,21 +96,21 @@ HANDLERS = {
 
 TOOLS = [
     {
-        "name": "get_actionable_setups",
+        "name": "get_forming_setups",
         "description": (
-            "Top setups accionables de hoy, rankeados por priority_score (calidad "
-            "del setup, 0-1). Úsala cuando el usuario pregunte qué comprar/observar "
-            "hoy, los mejores setups, o el ranking actual. Incluye continuation_prob, "
-            "tipo de setup, distancia a EMAs, RS y group_strength por símbolo."
+            "Estructuras institucionales que se están preparando para una transición "
+            "del Setup Feed. Úsala para anticipar qué conviene estudiar, sin presentarlo "
+            "como señal de entrada. Incluye distancia al próximo trigger, estructura, "
+            "contracción, trayectoria de RS y riesgo principal."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "limit": {
                     "type": "integer",
-                    "description": "Cuántos setups devolver (1-12).",
+                    "description": "Cuántos setups en formación devolver (1-6).",
                     "minimum": 1,
-                    "maximum": 12,
+                    "maximum": 6,
                 }
             },
         },

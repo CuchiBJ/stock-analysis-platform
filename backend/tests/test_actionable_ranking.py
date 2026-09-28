@@ -1,14 +1,14 @@
-"""Focused contracts for Top Actionable Setups eligibility and RS ranking."""
+"""Regression contracts retained from the retired actionable ranking."""
 
 from types import SimpleNamespace
 
 from sqlalchemy.dialects import postgresql
 
-from app.api.v1.endpoints.transitions import (
-    _ACTIONABLE_FILTER,
-    _INSTITUTIONAL_SETUP,
-    _passes_breakout_trigger,
-)
+# Register destination auth models before SQLAlchemy configures the shared
+# mapper registry while compiling expressions containing the Stock ORM class.
+import app.models.user  # noqa: F401
+
+from app.services.live_transition_service import LIVE_INSTITUTIONAL_FILTERS, passes_breakout_trigger
 from app.services.actionable_ranking import calculate_relative_strength_pullback_score
 
 
@@ -17,19 +17,16 @@ def _compiled(expression) -> str:
 
 
 class TestEligibilityScope:
-    def test_actionable_filter_does_not_hard_gate_52w_high_distance(self):
-        assert "distance_to_high_52w_atr" not in _compiled(_ACTIONABLE_FILTER)
-
     def test_live_institutional_filter_retains_52w_high_distance_gate(self):
-        compiled = _compiled(_INSTITUTIONAL_SETUP)
+        compiled = " ".join(_compiled(expression) for expression in LIVE_INSTITUTIONAL_FILTERS)
         assert "distance_to_high_52w_atr >= -3.0" in compiled
 
     def test_breakout_trigger_remains_strictly_near_high(self):
         near = SimpleNamespace(distance_to_ema21_atr=1.0, distance_to_high_52w_atr=-1.0)
         far = SimpleNamespace(distance_to_ema21_atr=1.0, distance_to_high_52w_atr=-1.01)
 
-        assert _passes_breakout_trigger(near)
-        assert not _passes_breakout_trigger(far)
+        assert passes_breakout_trigger(near)
+        assert not passes_breakout_trigger(far)
 
 
 class TestRelativeStrengthDuringPullback:

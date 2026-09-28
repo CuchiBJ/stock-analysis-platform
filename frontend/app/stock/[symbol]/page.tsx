@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 import DashboardLayout from '@/components/layout/DashboardLayout'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
@@ -13,8 +13,8 @@ import { CheckCircle2, XCircle, ChevronDown, ChevronRight, AlertTriangle, Minus 
 interface Criterion {
   key?: string
   name: string
-  actual: any
-  threshold: any
+  actual: unknown
+  threshold: unknown
   passes: boolean
   kind: string
 }
@@ -91,7 +91,13 @@ interface ScoreBreakdown {
 
 interface RankRow {
   symbol: string | null
-  values: Record<string, any>
+  values: Record<string, unknown>
+}
+
+interface MinerviniCriterion {
+  passes: boolean
+  value?: string | number | null
+  threshold?: string | number | null
 }
 
 interface RankExplanation {
@@ -119,6 +125,11 @@ interface ListCheck {
   rank_explanation?: RankExplanation | null
   not_applicable?: boolean
   na_reason?: string
+  status?: 'eligible_ranked' | 'eligible_below_cutoff' | 'promoted_to_feed' | 'ineligible'
+  rank?: number | null
+  eligible_count?: number
+  cutoff_gap?: number | null
+  structural_age_days?: number | null
 }
 
 interface TransitionEntry {
@@ -155,7 +166,7 @@ interface DiagnosticResponse {
     badge: 'leader' | 'neutral' | 'weak'
     multiplier: number
   } | null
-  minervini_status: Record<string, any> | null
+  minervini_status: Record<string, MinerviniCriterion> | null
   assessment?: Assessment | null
   benchmark_context?: BenchmarkContext | null
 }
@@ -174,9 +185,13 @@ const MINERVINI_LABELS: Record<string, string> = {
 
 const SCORE_COMPONENT_LABELS: Record<string, string> = {
   pullback_quality:  'Calidad del pullback',
-  freshness:         'Freshness — días en estado',
   regime_alignment:  'Alineación con régimen',
   relative_strength_pullback: 'RS durante el pullback',
+  trigger_readiness: 'Cercanía y dirección al trigger',
+  structural_integrity: 'Integridad estructural',
+  orderliness_contraction: 'Orden y contracción',
+  relative_strength_trajectory: 'Trayectoria de RS',
+  regime_group_alignment: 'Régimen y grupo',
 }
 
 // Human-readable labels for list criteria — keyed on the backend's stable
@@ -199,6 +214,9 @@ const CRITERION_LABELS: Record<string, string> = {
   ema_trigger:          'Gatillo EMA9/21 (en banda)',
   ema21_band:           'Distancia a EMA21 (en banda)',
   min_pullback_quality: 'Calidad de pullback',
+  market_cap:           'Capitalización de mercado',
+  lifecycle_intact:     'Ciclo de vida intacto',
+  invalidation_clear:   'Sin invalidación estructural',
   recent_transition:    'Transición reciente (no estable)',
   recent_transition_2d: 'Transición no estable (últimos 2d)',
   minervini_leader:     'Líder Minervini (SEPA)',
@@ -222,7 +240,7 @@ function minerviniLabel(key: string): string {
   return MINERVINI_LABELS[key] ?? key
 }
 
-function formatValue(v: any): string {
+function formatValue(v: unknown): string {
   if (v === null || v === undefined) return 'null'
   if (typeof v === 'number') {
     if (Math.abs(v) >= 1_000_000) {
@@ -238,6 +256,20 @@ function formatValue(v: any): string {
 }
 
 function ListRow({ lst }: { lst: ListCheck }) {
+  const hasCutoff = !!lst.cutoff
+  const state = lst.status === 'ineligible'
+    ? 'fails'
+    : lst.status === 'eligible_below_cutoff'
+    ? 'below_cutoff'
+    : lst.status === 'promoted_to_feed'
+      ? 'promoted'
+      : !lst.passes
+    ? 'fails'
+    : hasCutoff && lst.appears_in_endpoint === false
+      ? 'below_cutoff'
+      : 'in_list'
+  const [open, setOpen] = useState(state !== 'in_list')
+
   // Benchmarks aren't momentum setups — show a neutral "no aplica" row
   // instead of pass/fail coloring and criteria expansion.
   if (lst.not_applicable) {
@@ -258,18 +290,9 @@ function ListRow({ lst }: { lst: ListCheck }) {
   //   "in_list":     passes criteria AND appears in endpoint (or no cutoff)   → green
   //   "below_cutoff": passes criteria but ranks below cutoff                  → amber
   //   "fails":       at least one criterion fails                              → red
-  const hasCutoff = !!lst.cutoff
-  const state = !lst.passes
-    ? 'fails'
-    : hasCutoff && lst.appears_in_endpoint === false
-      ? 'below_cutoff'
-      : 'in_list'
-
-  const [open, setOpen] = useState(state !== 'in_list')
-
-  const Icon = state === 'in_list' ? CheckCircle2 : state === 'below_cutoff' ? AlertTriangle : XCircle
+  const Icon = state === 'in_list' || state === 'promoted' ? CheckCircle2 : state === 'below_cutoff' ? AlertTriangle : XCircle
   const palette =
-    state === 'in_list' ? 'text-green-400' :
+    state === 'in_list' || state === 'promoted' ? 'text-green-400' :
     state === 'below_cutoff' ? 'text-amber-400' :
     'text-red-400'
   const failedCount = lst.criteria.filter(c => !c.passes).length
@@ -289,14 +312,24 @@ function ListRow({ lst }: { lst: ListCheck }) {
             rank {lst.rank_in_endpoint}/{totalInEndpoint}
           </span>
         )}
+        {state === 'in_list' && lst.rank != null && (
+          <span className="text-[10px] uppercase tracking-wider text-green-400">
+            rank {lst.rank}/{lst.eligible_count ?? '—'}
+          </span>
+        )}
+        {state === 'promoted' && (
+          <span className="text-[10px] uppercase tracking-wider text-cyan-400">promovido al Setup Feed</span>
+        )}
         {state === 'below_cutoff' && (
           <span className="text-[10px] uppercase tracking-wider text-amber-400">
-            below top {lst.cutoff?.n}
+            debajo del top 6{lst.cutoff_gap != null ? ` · ${lst.cutoff_gap.toFixed(1)} pts` : ''}
           </span>
         )}
         {state === 'fails' && (
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-            {failedCount} criteri{failedCount === 1 ? 'on' : 'a'} fail
+            {failedCount > 0
+              ? `${failedCount} criteri${failedCount === 1 ? 'on' : 'a'} fail`
+              : 'debajo del score mínimo'}
           </span>
         )}
       </button>
@@ -334,13 +367,16 @@ function ListRow({ lst }: { lst: ListCheck }) {
             </tbody>
           </table>
           {lst.score_breakdown && <ScoreBreakdownTable bd={lst.score_breakdown} listPassed={lst.passes} />}
+          {lst.key === 'forming' && lst.structural_age_days != null && (
+            <p className="mt-2 text-[10px] text-white/40">Madurez estructural: {lst.structural_age_days} días. No representa frescura de una señal.</p>
+          )}
         </div>
       )}
     </div>
   )
 }
 
-function formatRankValue(v: any): string {
+function formatRankValue(v: unknown): string {
   if (v === null || v === undefined) return '—'
   if (typeof v === 'boolean') return v ? 'true' : 'false'
   if (typeof v === 'number') {
@@ -528,7 +564,7 @@ function AssessmentCard({ a }: { a: Assessment }) {
 
 function kindLabel(kind: ScoreComponent['kind']): { tag: string; cls: string } {
   switch (kind) {
-    case 'symbol_controllable': return { tag: 'actionable',  cls: 'text-green-400'  }
+    case 'symbol_controllable': return { tag: 'setup',  cls: 'text-green-400'  }
     case 'time_dependent':      return { tag: 'time-decay',  cls: 'text-amber-400'  }
     case 'market_wide':         return { tag: 'market-wide', cls: 'text-white/40'   }
     case 'group_rotation':      return { tag: 'group',       cls: 'text-cyan-400'   }
@@ -791,8 +827,8 @@ export default function SymbolPage() {
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    fetch(`${API_URL}/api/v1/stocks/${symbol}/diagnostic`)
+    queueMicrotask(() => setLoading(true))
+    apiFetch(`/api/v1/stocks/${encodeURIComponent(symbol)}/diagnostic`)
       .then(async r => {
         if (r.status === 404) throw new Error(`Symbol ${symbol} not found`)
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
@@ -806,8 +842,8 @@ export default function SymbolPage() {
 
   useEffect(() => {
     let cancelled = false
-    setSector(null)
-    fetch(`${API_URL}/api/v1/stocks/${symbol}/sector-strength`)
+    queueMicrotask(() => setSector(null))
+    apiFetch(`/api/v1/stocks/${encodeURIComponent(symbol)}/sector-strength`)
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(d => { if (!cancelled) setSector(d) })
       .catch(() => { /* non-blocking — card just hides */ })
@@ -945,7 +981,7 @@ export default function SymbolPage() {
               <Card className="p-4">
                 <h2 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">Minervini SEPA breakdown</h2>
                 <div className="grid grid-cols-2 gap-2 text-xs">
-                  {Object.entries(data.minervini_status).map(([key, val]: [string, any]) => (
+                  {Object.entries(data.minervini_status).map(([key, val]) => (
                     <div key={key} className={`px-2 py-1.5 rounded border ${val.passes ? 'border-green-500/30 bg-green-500/5 text-green-400' : 'border-red-500/30 bg-red-500/5 text-red-400'}`}>
                       <div className="flex items-center gap-1.5">
                         {val.passes ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}

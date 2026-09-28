@@ -57,10 +57,17 @@ Necesitás:
    compatibles con el provider).
 4. Terraform >= 1.6.
 5. Una clave SSH pública.
-6. Un hostname para la aplicación, por ejemplo `app.example.com`.
+6. Un hostname público y estable para la aplicación, por ejemplo `app.example.com`.
+7. Un proveedor SMTP con TLS y un dominio remitente verificado.
 
 Se puede usar dominio propio o un hostname compatible con Let's Encrypt como `sslip.io`
 durante la transición.
+
+Antes de abrir el registro público, configurá en el DNS del dominio remitente los registros
+SPF y DKIM indicados por el proveedor, una política DMARC y la alineación del dominio usado en
+`SMTP_FROM_EMAIL`. Verificá además que un correo de prueba llegue fuera de tu organización.
+Un hostname transitorio como `sslip.io` sirve para TLS de la aplicación, pero no reemplaza un
+dominio remitente controlado para correo.
 
 ## 2. Provisionar OCI con Terraform
 
@@ -127,6 +134,16 @@ Usá el valor hexadecimal como `POSTGRES_PASSWORD` y dentro de `DATABASE_URL`. C
 - `IBKR_FLEX_TOKEN` y `IBKR_FLEX_QUERY_ID`, sólo si se usa el sync.
 - `CORS_ORIGINS`, con los orígenes HTTPS adicionales que necesiten llamar a la API.
 - `API_DOMAIN`, el hostname cuyo A record apunta a la IP reservada.
+- `PUBLIC_BASE_URL=https://API_DOMAIN`, sin path, query ni credenciales. Se usa para los links
+  de verificación y recuperación.
+- `MAILER_BACKEND=smtp`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
+  `SMTP_FROM_EMAIL` y el modo TLS (`SMTP_USE_STARTTLS=true` o `SMTP_USE_SSL=true`, nunca ambos).
+
+En producción la API rechaza al iniciar una URL pública que no sea HTTPS, el backend de correo
+de captura y una configuración SMTP incompleta o sin transporte cifrado. La sesión usa el
+cookie host-only `__Host-session` (`Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`), con vencimiento
+absoluto a 30 días; las mutaciones autenticadas requieren el header `X-CSRF-Token`. Estos son
+contratos fijos del código y no secretos configurables.
 
 `.env.production` está ignorado por Git. No pongas secretos en `terraform.tfvars`, `cloud-init` ni
 el historial del shell.
@@ -149,6 +166,14 @@ infra/oci/scripts/restore-postgres.sh /opt/stock-analysis/backups/stock_analysis
 ```
 
 El restore exige escribir `RESTORE`, detiene API/scheduler, aplica `pg_restore` y luego Alembic.
+Para una restauración normal aplica `head` y vuelve a iniciar los servicios. Para un ensayo o
+la migración inicial de ownership, mantené la aplicación detenida y elegí explícitamente el
+target de expansión:
+
+```bash
+RESTORE_ALEMBIC_TARGET=c8d9e0f1a2b3 RESTORE_START_SERVICES=false \
+  infra/oci/scripts/restore-postgres.sh /opt/stock-analysis/backups/stock_analysis.dump
+```
 
 Si se trata de una instalación vacía, omití el dump: el servicio `migrate` crea/aplica el esquema
 antes de iniciar la API y el scheduler.
@@ -212,16 +237,116 @@ infra/oci/scripts/backup-postgres.sh
 Para volver código atrás, seleccioná un commit conocido y ejecutá el deploy. No reviertas una
 migración de base a ciegas; restaurá un backup validado si el cambio de esquema no es compatible.
 
+### Primera migración a cuentas y ownership del journal
+
+Esta actualización es excepcional: no uses el deploy normal hasta terminar expansión, claim y
+contrato. Reservá una ventana de mantenimiento sin escrituras y conservá una copia del dump fuera
+de la VM.
+
+1. Creá el backup, comprobá que sea no vacío y registrá su SHA-256 sin publicar su contenido:
+
+   ```bash
+   infra/oci/scripts/backup-postgres.sh
+   sha256sum /srv/stock-platform/backups/stock_analysis_*.dump
+   ```
+
+2. Antes de la expansión, comprobá y repará únicamente stop events huérfanos. El comando es
+   dry-run por defecto y sólo informa conteos; `--execute` elimina filas que no pueden pertenecer
+   a ninguna operación existente:
+
+   ```bash
+   docker compose --env-file .env.production -f compose.production.yml run --rm --no-deps api \
+     python scripts/cleanup_orphan_journal_stop_events.py
+   docker compose --env-file .env.production -f compose.production.yml run --rm --no-deps api \
+     python scripts/cleanup_orphan_journal_stop_events.py --execute
+   ```
+
+   Guardá ambos reportes agregados. El segundo debe terminar con `orphan_count_after: 0`.
+
+3. Detené todos los procesos que escriben y aplicá únicamente la migración expansiva:
+
+   ```bash
+   docker compose --env-file .env.production -f compose.production.yml stop api scheduler
+   docker compose --env-file .env.production -f compose.production.yml run --rm migrate \
+     alembic upgrade c8d9e0f1a2b3
+   ```
+
+4. Creá la cuenta administrativa. La contraseña se solicita dos veces sin eco y nunca se pasa
+   como argumento ni variable de entorno:
+
+   ```bash
+   docker compose --env-file .env.production -f compose.production.yml run --rm --no-deps api \
+     python scripts/bootstrap_admin.py --email ADMIN_EMAIL --display-name "Administrador"
+   ```
+
+5. Ejecutá primero el claim en modo simulación. Guardá el JSON agregado en el registro privado
+   de la ventana; contiene conteos y checksums, no filas ni símbolos. Sólo si termina sin errores,
+   repetilo con `--execute`:
+
+   ```bash
+   docker compose --env-file .env.production -f compose.production.yml run --rm --no-deps api \
+     python scripts/claim_legacy_journal.py --admin-email ADMIN_EMAIL
+   docker compose --env-file .env.production -f compose.production.yml run --rm --no-deps api \
+     python scripts/claim_legacy_journal.py --admin-email ADMIN_EMAIL --execute
+   ```
+
+   Compará en ambos reportes los conteos, IDs y checksums, posiciones abiertas/cerradas,
+   relaciones, stops y agregados. El único cambio permitido es que `unowned_trade_count` pase a
+   cero. Si aparece otro propietario o una relación inválida, el comando aborta y revierte.
+
+6. Aplicá el contrato no-null y luego el release completo:
+
+   ```bash
+   docker compose --env-file .env.production -f compose.production.yml run --rm migrate \
+     alembic upgrade d9e0f1a2b3c4
+   infra/oci/scripts/deploy.sh
+   ```
+
+7. Verificá por HTTPS que el administrador puede iniciar sesión y conserva todas sus operaciones;
+   registrá un usuario de prueba, verificá su email y confirmá que empieza con journal vacío. Recién
+   entonces retirale el modo mantenimiento o la restricción temporal a Caddy. Al quedar públicas
+   las rutas de la aplicación, el registro público queda habilitado; no hay un flag separado.
+
+Antes del paso 5, el rollback consiste en mantener los servicios detenidos, corregir la causa y
+repetir el claim; la simulación siempre hace rollback y la expansión todavía permite ownership
+nulo. Después del contrato sólo puede desplegarse una versión compatible con cuentas. Si falla la
+integridad, detené escrituras y restaurá el backup verificado; no ejecutes un downgrade destructivo.
+
+### Recuperación de acceso administrativo
+
+Desde una terminal privada de la VM, el siguiente comando cambia únicamente el administrador
+seleccionado y revoca todas sus sesiones. La contraseña se ingresa sin eco:
+
+```bash
+docker compose --env-file .env.production -f compose.production.yml run --rm --no-deps api \
+  python scripts/reset_admin_password.py --email ADMIN_EMAIL
+```
+
+No copies la contraseña, tokens de sesión ni links de recuperación a logs, tickets o reportes.
+
+### Señales de seguridad
+
+La API emite eventos JSON `security.*` sin email, IP, user ID, cookie, token ni digest de sesión.
+Configurá el recolector de logs para alertar por `auth_login/failure`, `mail_delivery/failure` y
+`auth_rate_limit/unavailable`. Un administrador autenticado puede consultar
+`GET /api/v1/operations/security`: devuelve conteos agregados desde el último inicio del proceso y
+checks `ok`/`warning` para tasa de login fallido, correo y disponibilidad del rate limiter. No
+publiques cookies para automatizar este chequeo; ejecutalo con una sesión operativa protegida o
+integrá el stream de logs en el monitor externo.
+
 ## Checklist de salida
 
 - [ ] La infraestructura está en la home region y no incluye recursos pagos inesperados.
 - [ ] La IP es `RESERVED`, no efímera.
 - [ ] SSH está limitado a una IP `/32`.
 - [ ] DNS A resuelve a la IP reservada.
+- [ ] SPF, DKIM y DMARC están publicados y el remitente SMTP fue validado.
 - [ ] `.env.production` tiene permisos 600 y no está en Git.
+- [ ] `PUBLIC_BASE_URL`, CORS y `API_DOMAIN` describen el mismo origen HTTPS canónico.
 - [ ] Frontend, API, scheduler, PostgreSQL, Redis y Caddy están `running/healthy`.
 - [ ] Alembic llegó a `head`.
 - [ ] `/health` responde por HTTPS.
 - [ ] El endpoint de data freshness muestra heartbeats recientes.
 - [ ] El timer de backup está activo y un restore de prueba fue validado.
+- [ ] El administrador conserva el journal histórico y un usuario nuevo empieza vacío.
 - [ ] El dashboard carga datos reales y WebSocket por HTTPS.

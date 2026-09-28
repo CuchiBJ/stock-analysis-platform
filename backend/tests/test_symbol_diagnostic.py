@@ -5,7 +5,6 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 
 from app.services.symbol_diagnostic import (
-    diagnose_actionable,
     diagnose_live,
     diagnose_u_and_r,
     diagnose_emerging_leaders,
@@ -14,7 +13,7 @@ from app.services.symbol_diagnostic import (
 
 
 def _passing_metrics():
-    """Synthetic StockMetrics-like that should pass actionable/live/quality_leader."""
+    """Synthetic StockMetrics-like that should pass live/quality-leader checks."""
     return SimpleNamespace(
         symbol="TEST",
         avg_volume_10d=2_000_000,
@@ -55,37 +54,6 @@ def _passing_metrics():
         perf_13w=25.0,
         rsi=60.0,
     )
-
-
-class TestActionable:
-    def test_passes_with_good_metrics(self):
-        check = diagnose_actionable(_passing_metrics())
-        assert check.passes, f"expected pass; failing criteria: {[c.name for c in check.criteria if not c.passes]}"
-
-    def test_fails_when_volume_short(self):
-        m = _passing_metrics()
-        m.avg_volume_10d = 500_000  # below 800k threshold
-        check = diagnose_actionable(m)
-        assert not check.passes
-        # Find the failing criterion
-        names = [c.name for c in check.criteria if not c.passes]
-        assert any("800k" in n for n in names)
-
-    def test_fails_when_ema_distance_too_far(self):
-        m = _passing_metrics()
-        m.distance_to_ema9_atr = 2.0   # outside [-1.0, +0.5]
-        m.distance_to_ema21_atr = 1.5  # also outside
-        check = diagnose_actionable(m)
-        assert not check.passes
-
-    def test_far_from_52w_high_remains_eligible_when_other_gates_pass(self):
-        m = _passing_metrics()
-        m.distance_to_high_52w_atr = -4.39
-
-        check = diagnose_actionable(m)
-
-        assert check.passes
-        assert not any(c.name == "distance to 52W high ≥ -3 ATR" for c in check.criteria)
 
 
 class TestLive:

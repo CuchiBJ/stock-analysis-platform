@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
 import { ExternalLink, Shield } from 'lucide-react'
@@ -83,7 +83,7 @@ export default function RSLeadersQueue({ refreshKey }: Props) {
   // Restaurar preferencia del toggle (default ON) y persistirla.
   useEffect(() => {
     const saved = localStorage.getItem(HIDE_EXTENDED_KEY)
-    if (saved !== null) setHideExtended(saved === '1')
+    if (saved !== null) queueMicrotask(() => setHideExtended(saved === '1'))
   }, [])
   useEffect(() => {
     localStorage.setItem(HIDE_EXTENDED_KEY, hideExtended ? '1' : '0')
@@ -91,8 +91,8 @@ export default function RSLeadersQueue({ refreshKey }: Props) {
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    fetch(`${API_URL}/api/v1/queue/rs-leaders?sort=${sortMode}&window=${window}`)
+    queueMicrotask(() => setLoading(true))
+    apiFetch(`/api/v1/queue/rs-leaders?sort=${sortMode}&window=${window}`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(data => {
         if (cancelled) return

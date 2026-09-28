@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { apiFetch } from '@/lib/api-client';
 
 interface PriceData {
   symbol: string;
@@ -31,7 +32,7 @@ export function usePricePolling(options: UsePricePollingOptions) {
   } = options;
 
   const [prices, setPrices] = useState<Map<string, PriceData>>(new Map());
-  const [metrics, setMetrics] = useState<Map<string, MetricData>>(new Map());
+  const [metrics] = useState<Map<string, MetricData>>(new Map());
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -58,12 +59,10 @@ export function usePricePolling(options: UsePricePollingOptions) {
     setError(null);
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
       // Fetch prices for all symbols
       const pricePromises = symbolsRef.current.map(async (symbol) => {
         try {
-          const response = await fetch(`${apiUrl}/api/v1/stocks/${symbol}/prices?days=1`);
+          const response = await apiFetch(`/api/v1/stocks/${encodeURIComponent(symbol)}/prices?days=1`);
           if (!response.ok) {
             throw new Error(`Failed to fetch prices for ${symbol}`);
           }
@@ -115,7 +114,7 @@ export function usePricePolling(options: UsePricePollingOptions) {
     return () => {
       clearInterval(interval);
     };
-  }, [pollInterval]); // Only pollInterval in dependencies - use refs for enabled/symbols
+  }, [fetchPrices, pollInterval]);
 
   return {
     prices,

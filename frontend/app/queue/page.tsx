@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 import DashboardLayout from '@/components/layout/DashboardLayout'
 import UnderCutRallyQueue from '@/components/queue/UnderCutRallyQueue'
 import EmergingLeadersQueue from '@/components/queue/EmergingLeadersQueue'
@@ -25,10 +25,10 @@ export default function QueuePage() {
   const fetchCounts = useCallback(async () => {
     try {
       const [uar, em, bb, rs] = await Promise.all([
-        fetch(`${API_URL}/api/v1/queue/u-and-r`).then(r => r.ok ? r.json() : []),
-        fetch(`${API_URL}/api/v1/queue/emerging-leaders`).then(r => r.ok ? r.json() : []),
-        fetch(`${API_URL}/api/v1/queue/building-bases`).then(r => r.ok ? r.json() : []),
-        fetch(`${API_URL}/api/v1/queue/rs-leaders`).then(r => r.ok ? r.json() : []),
+        apiFetch('/api/v1/queue/u-and-r').then(r => r.ok ? r.json() : []),
+        apiFetch('/api/v1/queue/emerging-leaders').then(r => r.ok ? r.json() : []),
+        apiFetch('/api/v1/queue/building-bases').then(r => r.ok ? r.json() : []),
+        apiFetch('/api/v1/queue/rs-leaders').then(r => r.ok ? r.json() : []),
       ])
       const count = (d: unknown) =>
         Array.isArray(d) ? d.length : (d as { results?: unknown[] })?.results?.length ?? 0
@@ -44,7 +44,7 @@ export default function QueuePage() {
   }, [])
 
   useEffect(() => {
-    fetchCounts()
+    queueMicrotask(() => void fetchCounts())
     const interval = setInterval(() => {
       fetchCounts()
       setRefreshKey(k => k + 1)

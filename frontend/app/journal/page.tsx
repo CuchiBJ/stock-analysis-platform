@@ -1,7 +1,7 @@
 'use client'
 
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { API_URL } from '@/lib/utils'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { apiFetch } from '@/lib/api-client'
 import DashboardLayout from '@/components/layout/DashboardLayout'
 import Card from '@/components/base/Card'
 import LoadingSkeleton from '@/components/base/LoadingSkeleton'
@@ -111,6 +111,7 @@ export default function JournalPage() {
   const [closeTarget, setCloseTarget] = useState<Trade | null>(null)
   const [editTarget, setEditTarget] = useState<Trade | null>(null)
   const [backfilling, setBackfilling] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [tradeFilter, setTradeFilter] = useState<TradeFilter>('all')
   const [closedSectionOpen, setClosedSectionOpen] = useState(false)
   const [focusRequest, setFocusRequest] = useState<{ decisionId: number; nonce: number } | null>(null)
@@ -132,26 +133,26 @@ export default function JournalPage() {
     [realizedDecisionGroups, tradeFilter],
   )
 
-  async function reload() {
+  const reload = useCallback(async () => {
     setLoading(true)
     try {
       const [s, all, v] = await Promise.all([
-        fetch(`${API_URL}/api/v1/journal/stats`).then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
-        fetch(`${API_URL}/api/v1/journal/trades?closed_only=false`).then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
-        vocab ? Promise.resolve({ json: () => vocab, ok: true } as any) : fetch(`${API_URL}/api/v1/journal/vocab`).then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
+        apiFetch('/api/v1/journal/stats').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
+        apiFetch('/api/v1/journal/trades?closed_only=false').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
+        apiFetch('/api/v1/journal/vocab').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
       ])
       setStats(s)
       setAllTrades(all.trades)
-      if (!vocab) setVocab(v as Vocab)
+      setVocab(v as Vocab)
       setError(null)
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
-  useEffect(() => { reload() }, [])
+  useEffect(() => { queueMicrotask(() => void reload()) }, [reload])
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -159,7 +160,7 @@ export default function JournalPage() {
     setUploading(true); setImportResult(null)
     try {
       const fd = new FormData(); fd.append('file', file)
-      const res = await fetch(`${API_URL}/api/v1/journal/import?replace=true`, { method: 'POST', body: fd })
+      const res = await apiFetch('/api/v1/journal/import?replace=true', { method: 'POST', body: fd })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
       setImportResult(
@@ -167,8 +168,8 @@ export default function JournalPage() {
         (data.parse_errors?.length ? ` · ${data.parse_errors.length} warnings` : '')
       )
       await reload()
-    } catch (err: any) {
-      setImportResult(`Error: ${err.message}`)
+    } catch (err: unknown) {
+      setImportResult(`Error: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setUploading(false)
       if (fileRef.current) fileRef.current.value = ''
@@ -178,7 +179,7 @@ export default function JournalPage() {
   async function backfillRegime() {
     setBackfilling(true); setImportResult(null)
     try {
-      const res = await fetch(`${API_URL}/api/v1/journal/backfill-regime`, { method: 'POST' })
+      const res = await apiFetch('/api/v1/journal/backfill-regime', { method: 'POST' })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
       setImportResult(
@@ -186,8 +187,8 @@ export default function JournalPage() {
         (data.out_of_range ? ` · ${data.out_of_range} fuera del rango de datos (sin métricas en esa fecha)` : '')
       )
       await reload()
-    } catch (err: any) {
-      setImportResult(`Error: ${err.message}`)
+    } catch (err: unknown) {
+      setImportResult(`Error: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setBackfilling(false)
     }
@@ -195,9 +196,29 @@ export default function JournalPage() {
 
   async function deleteTrade(id: number) {
     if (!confirm('¿Borrar este trade? No se puede deshacer.')) return
-    const res = await fetch(`${API_URL}/api/v1/journal/trades/${id}`, { method: 'DELETE' })
+    const res = await apiFetch(`/api/v1/journal/trades/${id}`, { method: 'DELETE' })
     if (res.ok) await reload()
     else alert(`Error: HTTP ${res.status}`)
+  }
+
+  async function exportCsv() {
+    setExporting(true)
+    try {
+      const response = await apiFetch('/api/v1/journal/export.csv')
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const downloadUrl = URL.createObjectURL(await response.blob())
+      const anchor = document.createElement('a')
+      anchor.href = downloadUrl
+      anchor.download = 'journal.csv'
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(downloadUrl)
+    } catch (error) {
+      alert(`Error exportando CSV: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setExporting(false)
+    }
   }
 
   function selectTradeFilter(filter: TradeFilter) {
@@ -230,13 +251,15 @@ export default function JournalPage() {
             >
               <Plus className="w-3.5 h-3.5" /> Nuevo trade
             </button>
-            <a
-              href={`${API_URL}/api/v1/journal/export.csv`}
+            <button
+              type="button"
+              onClick={exportCsv}
+              disabled={exporting}
               className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border border-border bg-card hover:bg-muted/40 transition-colors"
               title="Descarga el journal como CSV (mismo formato que tu sheet). La app es la fuente de verdad; esto mantiene tu Excel como respaldo actualizado."
             >
-              <Download className="w-3.5 h-3.5" /> Exportar CSV
-            </a>
+              <Download className="w-3.5 h-3.5" /> {exporting ? 'Exportando…' : 'Exportar CSV'}
+            </button>
             <label className="cursor-pointer inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border border-border bg-card hover:bg-muted/40 transition-colors">
               <Upload className="w-3.5 h-3.5" />
               {uploading ? 'Subiendo…' : 'Importar CSV'}
@@ -258,7 +281,7 @@ export default function JournalPage() {
         {stats && stats.overall.n === 0 && openPositionGroups.length === 0 && dcaPositionGroups.length === 0 && (
           <Card className="p-6 text-center">
             <p className="text-sm text-muted-foreground">
-              No hay trades cargados. Cargá uno con "Nuevo trade" o subí el CSV histórico con "Importar CSV".
+              No hay trades cargados. Cargá uno con &quot;Nuevo trade&quot; o subí el CSV histórico con &quot;Importar CSV&quot;.
             </p>
           </Card>
         )}
@@ -851,7 +874,7 @@ function ClosedTradesTable({
 
   useEffect(() => {
     if (!focusRequest) return
-    setExpanded(prev => new Set(prev).add(focusRequest.decisionId))
+    queueMicrotask(() => setExpanded(prev => new Set(prev).add(focusRequest.decisionId)))
     window.requestAnimationFrame(() => {
       document.getElementById(`journal-decision-${focusRequest.decisionId}`)?.scrollIntoView({
         behavior: 'smooth',
@@ -1041,31 +1064,6 @@ function RunnerBreakEvenBadge() {
   )
 }
 
-function BreakdownTable({ rows, firstCol }: { rows: (SetupRow | ContextRow)[], firstCol: 'setup' | 'context' }) {
-  return (
-    <table className="w-full text-xs">
-      <thead className="border-b border-border">
-        <tr className="text-left text-[10px] uppercase tracking-widest text-muted-foreground">
-          <th className="px-3 py-2 font-medium">{firstCol}</th>
-          <th className="px-3 py-2 font-medium text-right">N</th>
-          <th className="px-3 py-2 font-medium text-right">WR</th>
-          <th className="px-3 py-2 font-medium text-right">Expect</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r: any) => (
-          <tr key={r[firstCol]} className="border-b border-border/50 last:border-0 hover:bg-muted/20">
-            <td className="px-3 py-2 font-mono text-foreground">{r[firstCol]}</td>
-            <td className={`px-3 py-2 text-right tabular-nums ${r.n < 5 ? 'text-amber-400' : 'text-muted-foreground'}`}>{r.n}</td>
-            <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtPct(r.win_rate)}</td>
-            <td className={`px-3 py-2 text-right tabular-nums ${colorPnl(r.expectancy)}`}>{fmtMoney(r.expectancy)}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  )
-}
-
 function RiskEvolutionTable({ rows }: { rows: RiskEvolutionRow[] }) {
   if (rows.length === 0) {
     return <div className="px-4 py-3 text-xs text-muted-foreground">Sin trades con entry_date — no hay evolución que mostrar.</div>
@@ -1241,34 +1239,5 @@ function SetupRegimeHeatmap({ rows }: { rows: SetupRegimeMatrixRow[] }) {
         </tbody>
       </table>
     </div>
-  )
-}
-
-function MatrixTable({ rows }: { rows: MatrixRow[] }) {
-  return (
-    <table className="w-full text-xs">
-      <thead className="border-b border-border">
-        <tr className="text-left text-[10px] uppercase tracking-widest text-muted-foreground">
-          <th className="px-3 py-2 font-medium">Setup</th>
-          <th className="px-3 py-2 font-medium">Contexto</th>
-          <th className="px-3 py-2 font-medium text-right">N</th>
-          <th className="px-3 py-2 font-medium text-right">WR</th>
-          <th className="px-3 py-2 font-medium text-right">Expect</th>
-          <th className="px-3 py-2 font-medium text-right">Total P&L</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map(r => (
-          <tr key={`${r.setup}-${r.context}`} className="border-b border-border/50 last:border-0 hover:bg-muted/20">
-            <td className="px-3 py-2 font-mono text-foreground">{r.setup}</td>
-            <td className="px-3 py-2 font-mono text-muted-foreground">{r.context}</td>
-            <td className={`px-3 py-2 text-right tabular-nums ${r.n < 5 ? 'text-amber-400' : 'text-muted-foreground'}`}>{r.n}</td>
-            <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtPct(r.win_rate)}</td>
-            <td className={`px-3 py-2 text-right tabular-nums ${colorPnl(r.expectancy)}`}>{fmtMoney(r.expectancy)}</td>
-            <td className={`px-3 py-2 text-right tabular-nums ${colorPnl(r.total_pnl)}`}>{fmtMoney(r.total_pnl)}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
   )
 }

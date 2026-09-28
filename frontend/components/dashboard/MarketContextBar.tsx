@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { API_URL } from '@/lib/utils'
+import { apiFetch } from '@/lib/api-client'
 import MarketContextDrawer from './MarketContextDrawer'
 
 // Mirror of backend Phase 1 rules — kept in sync with context_decision_filter.py
@@ -328,13 +328,13 @@ export default function MarketContextBar() {
 
   const fetchContext = useCallback(async () => {
     try {
-      const r = await fetch(`${API_URL}/api/v1/market-context/current`)
+      const r = await apiFetch('/api/v1/market-context/current')
       if (r.ok) setCtx(await r.json())
     } catch {}
   }, [])
 
   useEffect(() => {
-    fetchContext()
+    queueMicrotask(() => void fetchContext())
     const interval = setInterval(fetchContext, 60_000)
     return () => clearInterval(interval)
   }, [fetchContext])

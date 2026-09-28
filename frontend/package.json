@@ -4,9 +4,15 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types lib/*.test.mjs",
+    "test:e2e:setups-forming": "node --test tests/setups-forming.e2e.mjs",
+    "test:e2e:auth-https": "node --test tests/auth-https.e2e.mjs",
+    "test:e2e:shared-browser": "node --test tests/shared-browser.e2e.mjs",
+    "test:e2e:pipeline-health": "node --test tests/pipeline-health.e2e.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.17.0",

@@ -8,7 +8,7 @@ fi
 
 SOURCE_ENV="$1"
 API_DOMAIN="$2"
-CORS_ORIGINS="${3:-http://localhost:3000}"
+CORS_ORIGINS="${3:-https://$API_DOMAIN}"
 ROOT_DIR="${ROOT_DIR:-/opt/stock-analysis}"
 TARGET_ENV="$ROOT_DIR/.env.production"
 
@@ -22,10 +22,12 @@ set -a
 source "$SOURCE_ENV"
 set +a
 
-if [[ -z "${POLYGON_API_KEY:-}" ]]; then
-  echo "POLYGON_API_KEY is missing from $SOURCE_ENV" >&2
-  exit 1
-fi
+for required_name in POLYGON_API_KEY SMTP_HOST SMTP_USERNAME SMTP_PASSWORD SMTP_FROM_EMAIL; do
+  if [[ -z "${!required_name:-}" ]]; then
+    echo "$required_name is missing from $SOURCE_ENV" >&2
+    exit 1
+  fi
+done
 
 postgres_password="$(openssl rand -hex 32)"
 temporary_env="$(mktemp "$ROOT_DIR/.env.production.XXXXXX")"
@@ -38,6 +40,19 @@ umask 077
   printf 'POSTGRES_PASSWORD=%s\n' "$postgres_password"
   printf 'DATABASE_URL=postgresql+asyncpg://stock_app:%s@postgres:5432/stock_analysis\n' "$postgres_password"
   printf 'REDIS_URL=redis://redis:6379/0\n'
+  printf 'APP_ENVIRONMENT=production\n'
+  printf 'PUBLIC_BASE_URL=https://%s\n' "$API_DOMAIN"
+  printf 'MAILER_BACKEND=smtp\n'
+  printf 'SMTP_HOST=%s\n' "$SMTP_HOST"
+  printf 'SMTP_PORT=%s\n' "${SMTP_PORT:-587}"
+  printf 'SMTP_USERNAME=%s\n' "$SMTP_USERNAME"
+  printf 'SMTP_PASSWORD=%s\n' "$SMTP_PASSWORD"
+  printf 'SMTP_FROM_EMAIL=%s\n' "$SMTP_FROM_EMAIL"
+  printf 'SMTP_FROM_NAME=%q\n' "${SMTP_FROM_NAME:-Stock Analysis Platform}"
+  printf 'SMTP_USE_STARTTLS=%s\n' "${SMTP_USE_STARTTLS:-true}"
+  printf 'SMTP_USE_SSL=%s\n' "${SMTP_USE_SSL:-false}"
+  printf 'SMTP_TIMEOUT_SECONDS=%s\n' "${SMTP_TIMEOUT_SECONDS:-10}"
+  printf 'AUTH_RATE_LIMIT_FAIL_OPEN=false\n'
   printf 'POLYGON_API_KEY=%s\n' "$POLYGON_API_KEY"
   printf 'ANTHROPIC_API_KEY=%s\n' "${ANTHROPIC_API_KEY:-}"
   printf 'IBKR_FLEX_TOKEN=%s\n' "${IBKR_FLEX_TOKEN:-}"

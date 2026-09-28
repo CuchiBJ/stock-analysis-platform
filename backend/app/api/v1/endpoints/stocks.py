@@ -10,7 +10,6 @@ from app.models.stock import Stock, StockPrice, StockMetrics, TransitionObservat
 from app.schemas.stock import Stock as StockSchema, StockPrice as StockPriceSchema, StockMetrics as StockMetricsSchema
 from app.services.quality_leader_gate import evaluate_minervini_criteria
 from app.services.symbol_diagnostic import (
-    diagnose_actionable,
     diagnose_live,
     diagnose_u_and_r,
     diagnose_emerging_leaders,
@@ -18,6 +17,7 @@ from app.services.symbol_diagnostic import (
     diagnose_rs_leaders,
     list_check_to_dict,
 )
+from app.services.forming_setup_service import FormationSetupService
 from app.services.group_strength_service import (
     fetch_current_group_strengths,
     compute_group_multiplier,
@@ -27,7 +27,6 @@ from app.services.context_decision_filter import (
     compute_context_multiplier,
 )
 from app.services.benchmarks import is_benchmark, compute_index_trend
-from app.services.actionable_ranking import get_rs_pullback_baselines
 
 router = APIRouter()
 
@@ -277,8 +276,16 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
     }
 
     # Run the diagnostics
+    formation_check = await FormationSetupService(db).diagnose_symbol(sym)
     lists = [
-        list_check_to_dict(diagnose_actionable(metrics)),
+        formation_check or {
+            "key": "forming",
+            "name": "Setups Forming",
+            "passes": False,
+            "status": "ineligible",
+            "criteria": [],
+            "rejection_reasons": ["metrics_not_in_current_snapshot"],
+        },
         list_check_to_dict(diagnose_live(metrics, has_recent_non_stable)),
         list_check_to_dict(diagnose_u_and_r(metrics, history_25d, has_recent_2d_obs)),
         list_check_to_dict(diagnose_emerging_leaders(metrics)),
@@ -333,11 +340,6 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
         except Exception as e:
             _log.warning(f"diagnostic: rank for {sym} in {list_key} failed: {e}")
 
-    async def _fetch_actionable_rows():
-        from app.api.v1.endpoints.transitions import get_actionable_setups
-        resp = await get_actionable_setups(limit=12, db=db)
-        return resp.get("setups", [])
-
     async def _fetch_live_rows():
         from app.api.v1.endpoints.transitions import get_live_transitions
         resp = await get_live_transitions(limit=20, background_tasks=None, db=db)
@@ -359,9 +361,6 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
         from app.services.setup_queue_service import SetupQueueService
         return await SetupQueueService(db).list_rs_leaders()
 
-    await _augment_with_rank("actionable", _fetch_actionable_rows, [
-        {"field": "priority_score", "direction": "desc", "label": "priority_score"},
-    ])
     await _augment_with_rank("live", _fetch_live_rows, [
         {"field": "transition", "direction": "category", "label": "transition type (entering_pullback primero)"},
         {"field": "is_pre_reclaim", "direction": "desc_bool", "label": "is_pre_reclaim flag"},
@@ -382,59 +381,6 @@ async def get_symbol_diagnostic(symbol: str, db: AsyncSession = Depends(get_db))
     await _augment_with_rank("rs_leaders", _fetch_rs_leaders_rows, [
         {"field": "rs_spy", "direction": "desc", "label": "RS vs SPY"},
     ])
-
-    # Per-symbol priority_score breakdown for /actionable — works even when the symbol
-    # is below the top-12 cutoff. This is what answers "what's holding me back?".
-    try:
-        from app.api.v1.endpoints.transitions import _calculate_priority_score_with_breakdown
-        from app.services.transition_engine import TransitionEngine
-        from app.services.market_regime_engine import MarketRegimeEngine
-
-        # Find the /actionable list check to attach breakdown to it.
-        # Compute regardless of pass/fail — the breakdown shows where the score
-        # components sit even when the symbol doesn't qualify (educational).
-        actionable_check = next((l for l in lists if l["key"] == "actionable"), None)
-        if actionable_check:
-            t_engine = TransitionEngine(db)
-            r_engine = MarketRegimeEngine(db)
-            regime = await r_engine.detect_regime()
-            # days_in_state: best-effort from setup_state_log
-            from app.api.v1.endpoints.transitions import _get_days_in_state
-            dis_map = await _get_days_in_state(db, [sym])
-            days_in_state = dis_map.get(sym, 1)
-            rs_baseline_map = await get_rs_pullback_baselines(db, [metrics])
-            base_score, breakdown = await _calculate_priority_score_with_breakdown(
-                metrics,
-                regime,
-                t_engine,
-                db,
-                days_in_state,
-                rs_baseline_map.get(sym),
-            )
-            ctx_v = ctx_mult.score_multiplier
-            grp_v = group_mult.score_multiplier
-            final_unclamped = base_score * ctx_v * grp_v
-            final = min(1.0, final_unclamped)
-            breakdown_full = dict(breakdown)
-            breakdown_full["ctx_multiplier"] = {
-                "value": ctx_v,
-                "max_value": 1.10,
-                "kind": "market_wide",
-            }
-            breakdown_full["group_multiplier"] = {
-                "value": grp_v,
-                "max_value": 1.15,
-                "kind": "group_rotation",
-                "badge": group_mult.badge,
-                "group": stock.market_group,
-            }
-            breakdown_full["final_priority_unclamped"] = round(final_unclamped, 4)
-            breakdown_full["final_priority"] = round(final, 4)
-            breakdown_full["clamped"] = final_unclamped > 1.0
-            actionable_check["score_breakdown"] = breakdown_full
-    except Exception as e:
-        import logging as _log_mod
-        _log_mod.getLogger(__name__).warning(f"diagnostic: score_breakdown for {sym} failed: {e}")
 
     # Quality Assessment — top-of-page plain-language narrative answering
     # "why is this symbol where it is, and what would push it to top?"
@@ -632,195 +578,67 @@ def _build_benchmark_assessment(stock, m):
     return assessment, benchmark_context
 
 
-def _build_quality_assessment(stock, m, lists, ctx_mult, group_mult) -> dict:
-    """Generate plain-language assessment of where the symbol stands and what's
-    blocking it from being top-tier.
-
-    Returns:
-      {
-        verdict: "elite" | "strong" | "mid" | "weak" | "disqualified",
-        headline: str,
-        strengths: [str],
-        gaps: [{name, severity, what_to_do}],
-      }
-    """
-    strengths: list[str] = []
-    gaps: list[dict] = []
-
-    actionable_check = next((l for l in lists if l["key"] == "actionable"), None)
-    bd = actionable_check.get("score_breakdown") if actionable_check else None
-
-    # Disqualified: fails the institutional liquidity prereq
-    if not actionable_check or not bd:
+def _build_quality_assessment(stock, metrics, lists, ctx_mult, group_mult) -> dict:
+    """Summarize the shared Setups Forming diagnosis in operator language."""
+    check = next((item for item in lists if item["key"] == "forming"), None)
+    if check is None:
         return {
             "verdict": "disqualified",
-            "headline": "Sin datos suficientes para evaluar.",
+            "headline": "No hay diagnóstico de formación disponible.",
             "strengths": [],
             "gaps": [],
         }
 
-    # Detect why criteria fails (if it does). Classify each fail into a category
-    # and surface the actual failing criteria in the gaps. Headline reflects the
-    # PRIMARY blocker but the operator always sees the full list.
-    failing = [c for c in actionable_check.get("criteria", []) if not c["passes"]]
-    if failing:
-        def has_kw(c, *kws):
-            n = c["name"].lower()
-            return any(k.lower() in n for k in kws)
-
-        liquidity_fails = [c for c in failing if has_kw(c, "avg_volume", "≥ 800k", "≥ 700k", "≥ 500k", "≥ $5", "current_price ≥")]
-        volatility_fails = [c for c in failing if has_kw(c, "adr_percent", "adr ≥")]
-        structure_fails  = [c for c in failing if has_kw(c, "sma150", "sma200", "perf_1y", "52w low", "52W low", "52w high", "52W high", "price > ema50", "price > sma")]
-        ema_fails        = [c for c in failing if has_kw(c, "ema9 distance", "ema21 distance", "ema9 or ema21")]
-        pq_fails         = [c for c in failing if has_kw(c, "pullback_quality")]
-
-        # Build a gap entry per failing criterion (REAL granular info)
-        gap_list = [{
-            "name": c["name"],
-            "severity": "blocker",
-            "what_to_do": f"Valor actual: {c['actual']} — umbral: {c['threshold']}.",
-        } for c in failing]
-
-        # Pick the most specific headline based on which category has fails
-        if liquidity_fails:
-            headline = "Descalificado por liquidez — volumen/precio mínimo no se cumple."
-            verdict = "disqualified"
-        elif volatility_fails and not structure_fails and not ema_fails:
-            headline = f"ADR insuficiente — la acción no se mueve lo suficiente diario para el setup ({m.adr_percent:.2f}% vs ≥4% requerido)."
-            verdict = "weak"
-        elif structure_fails:
-            # Build a specific reason describing which structural criteria fail
-            reasons = []
-            if any("perf_1y" in c["name"] for c in structure_fails):
-                reasons.append(f"perf_1y={m.perf_1y:.0f}% (Stage 2 requiere >30%)")
-            if any("52w low" in c["name"].lower() for c in structure_fails):
-                if m.low_52w and m.low_52w > 0 and m.current_price:
-                    pct = (m.current_price - m.low_52w) / m.low_52w * 100
-                    reasons.append(
-                        f"recuperación desde mín 52w insuficiente ({pct:.0f}% sobre low, requiere ≥50%)"
-                    )
-                else:
-                    reasons.append("recuperación desde mín 52w insuficiente")
-            if any("52w high" in c["name"].lower() for c in structure_fails):
-                reasons.append("muy lejos del máximo 52w (>3 ATR)")
-            if any("sma" in c["name"].lower() for c in structure_fails):
-                reasons.append("SMAs no alineadas (medias largas no en orden alcista)")
-            if any("ema50" in c["name"].lower() for c in structure_fails):
-                reasons.append("precio bajo EMA50")
-            headline = f"Setup roto — estructura no es de tendencia alcista ({'; '.join(reasons) if reasons else 'criterios Minervini fallan'})."
-            verdict = "weak"
-        elif ema_fails:
-            d9 = m.distance_to_ema9_atr
-            d21 = m.distance_to_ema21_atr
-            headline = f"Fuera de zona de pullback — precio extendido (EMA9 {d9:+.2f} ATR, EMA21 {d21:+.2f} ATR; rango requerido [-1.0, +0.5])."
-            verdict = "mid"
-        elif pq_fails:
-            headline = f"Pullback quality bajo ({m.pullback_quality_score:.0f}/100 < 55 requerido)."
-            verdict = "weak"
-        else:
-            headline = f"Falla 1+ criterio del setup institucional."
-            verdict = "weak"
-
-        return {"verdict": verdict, "headline": headline, "strengths": [], "gaps": gap_list}
-
-    # Criteria passed — analyze the score breakdown to find gaps
-    components = bd["components"]
-    pq_comp = next((c for c in components if c["name"] == "pullback_quality"), None)
-    fresh_comp = next((c for c in components if c["name"] == "freshness"), None)
-    regime_comp = next((c for c in components if c["name"] == "regime_alignment"), None)
-
-    final = bd["final_priority"]
-
-    # Pullback quality analysis
-    if pq_comp:
-        pq_pct = pq_comp["value"]
-        if pq_pct >= 85:
-            strengths.append(f"Pullback de alta calidad ({pq_pct:.0f}/100) — estructura técnica sólida")
-        elif pq_pct >= 70:
-            sub = pq_comp.get("sub_components", [])
-            weakest = sorted(sub, key=lambda s: s["points"] / s["max_points"] if s["max_points"] else 1)[:2]
-            issues = "; ".join(s["verdict"] for s in weakest)
-            gaps.append({
-                "name": "Pullback quality mid-tier",
+    status = check.get("status", "ineligible")
+    score = check.get("formation_score")
+    failing = [
+        criterion
+        for criterion in check.get("criteria", [])
+        if not criterion.get("passes")
+    ]
+    if status == "promoted_to_feed":
+        return {
+            "verdict": "strong",
+            "headline": "Promovido al Setup Feed: ya produjo una transición operativa.",
+            "strengths": ["Salió de preparación para evitar duplicación entre paneles."],
+            "gaps": [],
+        }
+    if status == "eligible_ranked":
+        headline = (
+            f"Setup en formación rankeado con score {score:.1f}/100."
+            if score is not None
+            else "Setup en formación rankeado."
+        )
+        return {
+            "verdict": "strong",
+            "headline": headline,
+            "strengths": ["Estructura institucional intacta; esperando transición."],
+            "gaps": [],
+        }
+    if status == "eligible_below_cutoff":
+        return {
+            "verdict": "mid",
+            "headline": "Estructura válida, debajo del corte de seis candidatos.",
+            "strengths": ["Pasa la elegibilidad institucional."],
+            "gaps": [{
+                "name": "Prioridad relativa",
                 "severity": "medium",
-                "what_to_do": f"Score {pq_pct:.0f}/100 (top suele ser 85+). Sub-issues: {issues}",
-            })
-        else:
-            sub = pq_comp.get("sub_components", [])
-            weakest = sorted(sub, key=lambda s: s["points"] / s["max_points"] if s["max_points"] else 1)[:3]
-            issues = "; ".join(s["verdict"] for s in weakest)
-            gaps.append({
-                "name": "Pullback quality bajo",
-                "severity": "high",
-                "what_to_do": f"Score {pq_pct:.0f}/100 lejos del top. Principales gaps: {issues}",
-            })
-
-    # Freshness analysis
-    if fresh_comp:
-        fr_pct = fresh_comp["value"]
-        if fr_pct >= 100:
-            strengths.append("Freshness en peak (1-3 días en estado)")
-        elif fr_pct >= 75:
-            strengths.append(f"Freshness buena ({fresh_comp['note']})")
-        else:
-            gaps.append({
-                "name": "Setup envejecido",
-                "severity": "medium" if fr_pct >= 40 else "high",
-                "what_to_do": f"{fresh_comp['note']}. Solo una nueva transición resetea esto — esperar o descartar.",
-            })
-
-    # Regime analysis
-    if regime_comp:
-        if regime_comp["value"] >= 0.20:
-            strengths.append("Régimen de mercado favorable (risk_on)")
-        elif regime_comp["value"] <= 0.10:
-            gaps.append({
-                "name": "Régimen de mercado adverso",
-                "severity": "medium",
-                "what_to_do": "Risk-off general. Reducir tamaño o esperar mejora del contexto macro.",
-            })
-
-    # Multipliers
-    ctx_v = bd["ctx_multiplier"]["value"]
-    grp_v = bd["group_multiplier"]["value"]
-    if ctx_v >= 1.10:
-        strengths.append("Contexto multidimensional fuerte (× 1.10)")
-    elif ctx_v < 1.00:
-        gaps.append({
-            "name": "Contexto suprime el score",
-            "severity": "high" if ctx_v <= 0.7 else "medium",
-            "what_to_do": f"Multiplier × {ctx_v:.2f}. Participation/leadership en deterioro — esperar mejora del contexto macro.",
-        })
-
-    if grp_v >= 1.15:
-        strengths.append(f"Grupo líder rotacionalmente — {bd['group_multiplier'].get('group','')} (top 20%)")
-    elif grp_v <= 0.85:
-        gaps.append({
-            "name": "Grupo rotacionalmente débil",
-            "severity": "medium",
-            "what_to_do": f"Grupo {bd['group_multiplier'].get('group','')} en bottom 20%. Penalty × 0.85. Esperar rotación al grupo o buscar setups en grupos fuertes.",
-        })
-
-    # Final verdict
-    if final >= 0.95:
-        verdict = "elite"
-        headline = "Setup de élite. Cerca del top en cada dimensión medida."
-    elif final >= 0.85:
-        verdict = "strong"
-        headline = "Setup fuerte. Pocas áreas por mejorar."
-    elif final >= 0.70:
-        verdict = "mid"
-        headline = "Setup mid-tier. Pasa criterios pero hay gaps específicos para subir."
-    elif final >= 0.50:
-        verdict = "weak"
-        headline = "Setup débil. Pasa el filtro pero el score compuesto es bajo."
-    else:
-        verdict = "weak"
-        headline = "Score muy bajo. Probablemente mejor mirar otros setups."
-
+                "what_to_do": "Esperar mayor cercanía al trigger, contracción o mejora de RS.",
+            }],
+        }
     return {
-        "verdict": verdict,
-        "headline": headline,
-        "strengths": strengths,
-        "gaps": gaps,
+        "verdict": "weak" if failing else "mid",
+        "headline": "No califica para Setups Forming en el snapshot actual.",
+        "strengths": [],
+        "gaps": [
+            {
+                "name": criterion["name"],
+                "severity": "blocker",
+                "what_to_do": (
+                    f"Valor actual: {criterion.get('actual')} — "
+                    f"umbral: {criterion.get('threshold')}."
+                ),
+            }
+            for criterion in failing
+        ],
     }
