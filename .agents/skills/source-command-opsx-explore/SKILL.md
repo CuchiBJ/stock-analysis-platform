@@ -1,177 +1,78 @@
 ---
 name: "source-command-opsx-explore"
-description: "Enter explore mode - think through ideas, investigate problems, clarify requirements"
+description: "Run the migrated opsx-explore command to investigate ideas or clarify requirements without implementing"
 ---
 
 # source-command-opsx-explore
 
-Use this skill when the user asks to run the migrated source command `opsx-explore`.
+Use this skill only when the user invokes or asks for the migrated
+`/opsx:explore` command. Treat the command argument as the topic or OpenSpec change
+to explore. If no topic is available from the argument or conversation, ask what
+the user wants to explore.
 
-## Command Template
+Act as a thinking partner. Explore the problem, inspect relevant repository
+evidence, compare options, and surface risks without implementing application code.
 
-Enter explore mode. Think deeply. Visualize freely. Follow the conversation wherever it goes.
+## Boundaries
 
-**IMPORTANT: Explore mode is for thinking, not implementing.** You may read files, search code, and investigate the codebase, but you must NEVER write code or implement features. If the user asks you to implement something, remind them to exit explore mode first and create a change proposal. You MAY create OpenSpec artifacts (proposals, designs, specs) if the user asks—that's capturing thinking, not implementing.
+- Exploration is for analysis, not implementation. Do not edit repository files.
+- If the user asks to implement, explain that explore mode is read-only and offer
+  to move to a proposal or apply workflow after leaving explore mode.
+- The only editing exception is OpenSpec artifacts, which may be created or
+  updated only when the user asks to capture the discussion.
+- Do not force a proposal, fixed sequence, or final decision. Follow the user's
+  question and ask only clarifications that materially affect the analysis.
+- Ground conclusions in repository evidence. Challenge assumptions when evidence
+  points elsewhere.
+- Use a diagram or comparison table only when it makes a relationship materially
+  easier to understand.
 
-**This is a stance, not a workflow.** There are no fixed steps, no required sequence, no mandatory outputs. You're a thinking partner helping the user explore.
+## Context routing
 
-**Input**: The argument after `/opsx:explore` is whatever the user wants to think about. Could be:
-- A vague idea: "real-time collaboration"
-- A specific problem: "the auth system is getting unwieldy"
-- A change name: "add-dark-mode" (to explore in context of that change)
-- A comparison: "postgres vs sqlite for this"
-- Nothing (just enter explore mode)
+Start from the command argument. Do not inspect unrelated OpenSpec changes.
 
----
+- If the argument names a change, use that change.
+- If it plausibly refers to an existing change but no name is clear, list compact
+  active-change metadata:
 
-## The Stance
+  ```bash
+  openspec list --json | jq '{changes:[.changes[] | select(.status != "complete")]}'
+  ```
 
-- **Curious, not prescriptive** - Ask questions that emerge naturally, don't follow a script
-- **Open threads, not interrogations** - Surface multiple interesting directions and let the user follow what resonates. Don't funnel them through a single path of questions.
-- **Visual** - Use ASCII diagrams liberally when they'd help clarify thinking
-- **Adaptive** - Follow interesting threads, pivot when new information emerges
-- **Patient** - Don't rush to conclusions, let the shape of the problem emerge
-- **Grounded** - Explore the actual codebase when relevant, don't just theorize
+- If it is independent of existing changes, explore the relevant code or
+  documentation directly.
 
----
+When a change is relevant, treat its artifacts as an index and open only what the
+question needs:
 
-## What You Might Do
+| Question | Initial context |
+|---|---|
+| Scope, motivation, non-goals | Relevant section of `proposal.md` |
+| Architecture or tradeoff | Relevant section of `design.md` |
+| Required behavior | Matching capability spec under `specs/` |
+| Progress or next work | Pending task entries in `tasks.md` |
 
-Depending on what the user brings, you might:
+Search headings, capability names, task tags, symbols, and implementation notes
+before reading a whole artifact. Inspect only the code paths needed to validate the
+current claim. Expand context when artifacts conflict, the question crosses
+capabilities, or the initial evidence is insufficient; briefly state why expansion
+is needed.
 
-**Explore the problem space**
-- Ask clarifying questions that emerge from what they said
-- Challenge assumptions
-- Reframe the problem
-- Find analogies
+## Capturing decisions
 
-**Investigate the codebase**
-- Map existing architecture relevant to the discussion
-- Find integration points
-- Identify patterns already in use
-- Surface hidden complexity
+Do not update artifacts automatically. When a useful decision crystallizes, offer
+to capture it in the appropriate place:
 
-**Compare options**
-- Brainstorm multiple approaches
-- Build comparison tables
-- Sketch tradeoffs
-- Recommend a path (if asked)
+| Decision | Artifact |
+|---|---|
+| Scope or non-goal | `proposal.md` |
+| Architecture or tradeoff | `design.md` |
+| Requirement or scenario | `specs/<capability>/spec.md` |
+| New implementation work | `tasks.md` |
 
-**Visualize**
-```
-┌─────────────────────────────────────────┐
-│     Use ASCII diagrams liberally        │
-├─────────────────────────────────────────┤
-│                                         │
-│      ┌────────┐         ┌────────┐      │
-│      │ State  │────────▶│ State  │      │
-│      │   A    │         │   B    │      │
-│      └────────┘         └────────┘      │
-│                                         │
-│   System diagrams, state machines,      │
-│   data flows, architecture sketches,    │
-│   dependency graphs, comparison tables  │
-│                                         │
-└─────────────────────────────────────────┘
-```
+## Completion
 
-**Surface risks and unknowns**
-- Identify what could go wrong
-- Find gaps in understanding
-- Suggest spikes or investigations
-
----
-
-## OpenSpec Awareness
-
-You have full context of the OpenSpec system. Use it naturally, don't force it.
-
-### Check for context
-
-At the start, quickly check what exists:
-```bash
-openspec list --json
-```
-
-This tells you:
-- If there are active changes
-- Their names, schemas, and status
-- What the user might be working on
-
-If the user mentioned a specific change name, read its artifacts for context.
-
-### When no change exists
-
-Think freely. When insights crystallize, you might offer:
-
-- "This feels solid enough to start a change. Want me to create a proposal?"
-- Or keep exploring - no pressure to formalize
-
-### When a change exists
-
-If the user mentions a change or you detect one is relevant:
-
-1. **Read existing artifacts for context**
-   - `openspec/changes/<name>/proposal.md`
-   - `openspec/changes/<name>/design.md`
-   - `openspec/changes/<name>/tasks.md`
-   - etc.
-
-2. **Reference them naturally in conversation**
-   - "Your design mentions using Redis, but we just realized SQLite fits better..."
-   - "The proposal scopes this to premium users, but we're now thinking everyone..."
-
-3. **Offer to capture when decisions are made**
-
-    | Insight Type               | Where to Capture               |
-    |----------------------------|--------------------------------|
-    | New requirement discovered | `specs/<capability>/spec.md` |
-    | Requirement changed        | `specs/<capability>/spec.md` |
-    | Design decision made       | `design.md`                  |
-    | Scope changed              | `proposal.md`                |
-    | New work identified        | `tasks.md`                   |
-    | Assumption invalidated     | Relevant artifact              |
-
-   Example offers:
-   - "That's a design decision. Capture it in design.md?"
-   - "This is a new requirement. Add it to specs?"
-   - "This changes scope. Update the proposal?"
-
-4. **The user decides** - Offer and move on. Don't pressure. Don't auto-capture.
-
----
-
-## What You Don't Have To Do
-
-- Follow a script
-- Ask the same questions every time
-- Produce a specific artifact
-- Reach a conclusion
-- Stay on topic if a tangent is valuable
-- Be brief (this is thinking time)
-
----
-
-## Ending Discovery
-
-There's no required ending. Discovery might:
-
-- **Flow into a proposal**: "Ready to start? I can create a change proposal."
-- **Result in artifact updates**: "Updated design.md with these decisions"
-- **Just provide clarity**: User has what they need, moves on
-- **Continue later**: "We can pick this up anytime"
-
-When things crystallize, you might offer a summary - but it's optional. Sometimes the thinking IS the value.
-
----
-
-## Guardrails
-
-- **Don't implement** - Never write code or implement features. Creating OpenSpec artifacts is fine, writing application code is not.
-- **Don't fake understanding** - If something is unclear, dig deeper
-- **Don't rush** - Discovery is thinking time, not task time
-- **Don't force structure** - Let patterns emerge naturally
-- **Don't auto-capture** - Offer to save insights, don't just do it
-- **Do visualize** - A good diagram is worth many paragraphs
-- **Do explore the codebase** - Ground discussions in reality
-- **Do question assumptions** - Including the user's and your own
+There is no required ending. At a useful stopping point, optionally summarize the
+clearest finding, meaningful alternatives or risks, and open questions. If the
+discussion is ready for formalization, offer to create or update OpenSpec
+artifacts; otherwise stop after providing clarity.

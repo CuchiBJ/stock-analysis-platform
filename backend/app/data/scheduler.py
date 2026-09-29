@@ -11,6 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sess
 from app.data.ingestors.stock_ingestor import StockIngestor
 from app.data.ingestors.price_ingestor import PriceIngestor
 from app.data.ingestors.metrics_calculator import MetricsCalculator
+# The scheduler is a standalone process, so it does not load the auth routes that
+# normally register User. JournalTrade has a string relationship to User; both
+# model modules must be imported before SQLAlchemy configures its mappers.
+from app.models import user as _user_models  # noqa: F401
 from app.core.config import settings
 from app.universe.universe_engine import UniverseEngine
 from app.universe.tiers.tier_manager import UniverseTier

@@ -1,11 +1,16 @@
 """Tests for the pipeline-health-visibility surface.
 
 Covered:
+  - standalone scheduler boot — all ORM relationships resolve in a clean process
   - compute_market_state — pure function, all 5 session phases
   - record_cycle — upsert semantics, last_success_at preservation, DB-error safety
 """
 import asyncio
+import os
+import subprocess
+import sys
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,7 +24,6 @@ from app.api.v1.endpoints.health import _coverage, compute_market_state, router
 from app.core.deps import get_db
 from app.data.pipeline_heartbeat import record_cycle
 from app.data.scheduler import DataScheduler
-from app.models import user as _user_models  # noqa: F401  # Register ORM relationships.
 
 
 ET = pytz.timezone("US/Eastern")
@@ -27,6 +31,31 @@ ET = pytz.timezone("US/Eastern")
 
 def _et(year, month, day, hour, minute):
     return ET.localize(datetime(year, month, day, hour, minute))
+
+
+def test_scheduler_entrypoint_configures_all_mappers_in_clean_process():
+    """The standalone scheduler must register models normally loaded by API routes."""
+    backend_root = Path(__file__).resolve().parent.parent
+    environment = {
+        **os.environ,
+        "DATABASE_URL": "postgresql+asyncpg://user:pass@localhost/test",
+        "POLYGON_API_KEY": "test-only",
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import app.data.scheduler; "
+            "from sqlalchemy.orm import configure_mappers; configure_mappers()",
+        ],
+        cwd=backend_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 # ---- compute_market_state ----------------------------------------------------
