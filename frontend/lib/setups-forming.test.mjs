@@ -4,6 +4,7 @@ import test from 'node:test'
 
 const dashboardUrl = new URL('../app/dashboard/page.tsx', import.meta.url)
 const componentUrl = new URL('../components/dashboard/SetupsForming.tsx', import.meta.url)
+const catalogPageUrl = new URL('../app/setups-forming/page.tsx', import.meta.url)
 const canonicalWebSocketUrl = new URL('../hooks/useWebSocket.ts', import.meta.url)
 const legacyWebSocketUrl = new URL('../app/hooks/useWebSocket.ts', import.meta.url)
 
@@ -17,8 +18,19 @@ test('formation panel uses the protected contract and enforces six-card scarcity
   const source = await readFile(componentUrl, 'utf8')
   assert.match(source, /transitions\/forming\?limit=6/)
   assert.match(source, /setups\.slice\(0, 6\)/)
+  assert.match(source, /href="\/setups-forming"/)
+  assert.match(source, /Ver más/)
   assert.match(source, /No hay estructuras suficientemente preparadas/)
   assert.doesNotMatch(source, /continuation_prob|confidence|freshness|buy/i)
+})
+
+test('formation catalog requests and renders the complete ranked candidate set', async () => {
+  const source = await readFile(catalogPageUrl, 'utf8')
+  assert.match(source, /transitions\/forming\/all/)
+  assert.match(source, /data\.setups\.map/)
+  assert.match(source, /<FormationCard/)
+  assert.match(source, /Volver al dashboard/)
+  assert.doesNotMatch(source, /setups\.slice\(0, 6\)/)
 })
 
 test('dashboard websocket imports resolve to one canonical hook', async () => {

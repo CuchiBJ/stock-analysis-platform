@@ -68,13 +68,15 @@ function marketContext() {
   }
 }
 
-function formingSetup() {
+function formingSetup(overrides = {}) {
   return {
     symbol: 'DOCN',
     current_price: 45.2,
     change_pct: 1.4,
     formation_state: 'ORDERLY_PULLBACK',
     formation_score: 78,
+    rank: 1,
+    eligible_count: 2,
     formation_narrative: 'Pullback ordenado con contracción; todavía espera confirmación en EMA9.',
     primary_risk: 'La trayectoria de fuerza relativa aún es neutral.',
     next_trigger: 'EMA9',
@@ -83,6 +85,7 @@ function formingSetup() {
     contraction_evidence: 'Rango y volumen contrayéndose.',
     rs_direction: 'IMPROVING',
     group_strength: { group: 'Software - Infrastructure', badge: 'leader' },
+    ...overrides,
   }
 }
 
@@ -143,6 +146,13 @@ function createMockApi(state) {
     }
     if (request.method === 'GET' && url.pathname === '/api/v1/transitions/forming') {
       const setups = state.empty ? [] : [formingSetup()]
+      return json(response, 200, { setups, total_eligible: state.empty ? 0 : 2, context: {} })
+    }
+    if (request.method === 'GET' && url.pathname === '/api/v1/transitions/forming/all') {
+      const setups = state.empty ? [] : [
+        formingSetup(),
+        formingSetup({ symbol: 'BEFX', rank: 2, formation_score: 74 }),
+      ]
       return json(response, 200, { setups, total_eligible: setups.length, context: {} })
     }
     if (request.method === 'GET' && url.pathname === '/api/v1/transitions/live') {
@@ -377,6 +387,15 @@ test('authenticated formation workflow covers preparation, promotion, and scarci
     assert.match(dashboard.formingText, /DOCN/)
     assert.doesNotMatch(dashboard.formingText, /PROMO/)
     assert.match(dashboard.feedText, /PROMO/)
+
+    const openedCatalog = await client.evaluate(`(() => {
+      const link = [...document.querySelectorAll('a')].find(node => node.textContent.includes('Ver más'));
+      link?.click();
+      return Boolean(link);
+    })()`)
+    assert.equal(openedCatalog, true)
+    await waitForEvaluation(client, `location.pathname === '/setups-forming'`, 'formation catalog navigation')
+    await waitForEvaluation(client, `document.body.innerText.includes('DOCN') && document.body.innerText.includes('BEFX')`, 'complete formation catalog')
 
     await client.send('Page.navigate', { url: `http://127.0.0.1:${appPort}/stock/PROMO` })
     await waitForEvaluation(client, `document.body.innerText.includes('PROMOVIDO AL SETUP FEED')`, 'promoted symbol diagnostic')

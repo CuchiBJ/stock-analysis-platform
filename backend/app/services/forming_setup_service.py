@@ -201,17 +201,19 @@ class FormationSetupService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def get_forming_setups(self, limit: int = MAX_FORMATION_RESULTS) -> dict[str, Any]:
-        limit = min(MAX_FORMATION_RESULTS, max(1, limit))
+    async def get_forming_setups(self, limit: int | None = MAX_FORMATION_RESULTS) -> dict[str, Any]:
+        if limit is not None:
+            limit = min(MAX_FORMATION_RESULTS, max(1, limit))
         evaluations, context = await self._analyze()
         ranked = self._rank(evaluations)
-        cutoff = ranked[limit - 1].score if len(ranked) >= limit else None
+        response_limit = len(ranked) if limit is None else limit
+        cutoff = ranked[response_limit - 1].score if response_limit and len(ranked) >= response_limit else None
         for index, item in enumerate(ranked, 1):
             item.rank = index
             if item.response is not None:
                 item.response.update(rank=index, eligible_count=len(ranked))
-        returned = ranked[:limit]
-        return {"setups": [item.response for item in returned if item.response], "context_snapshot": context, "total_eligible": len(ranked), "returned_count": len(returned), "minimum_score": MIN_FORMATION_SCORE, "cutoff_score": cutoff, "limit": limit}
+        returned = ranked if limit is None else ranked[:limit]
+        return {"setups": [item.response for item in returned if item.response], "context_snapshot": context, "total_eligible": len(ranked), "returned_count": len(returned), "minimum_score": MIN_FORMATION_SCORE, "cutoff_score": cutoff, "limit": response_limit}
 
     async def diagnose_symbol(self, symbol: str) -> dict[str, Any] | None:
         evaluations, context = await self._analyze()

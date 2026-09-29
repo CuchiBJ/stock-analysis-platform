@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from inspect import signature
 
@@ -132,6 +133,44 @@ def test_rank_excludes_current_feed_symbols_and_preserves_scarcity_order():
         item("DOCN", 68.0),
     ])
     assert [candidate.symbol for candidate in ranked] == ["BE", "DOCN"]
+
+
+def test_full_catalog_preserves_all_eligible_candidates_in_rank_order(monkeypatch):
+    def item(symbol, score):
+        return CandidateEvaluation(
+            symbol=symbol,
+            eligible=True,
+            criteria=[],
+            rejection_reasons=[],
+            state=SetupState.CONTROLLED_PULLBACK,
+            score=score,
+            score_breakdown={},
+            trigger_distance=0.2,
+            structural_score=80.0,
+            response={"symbol": symbol},
+        )
+
+    candidates = [item(f"S{index}", 80.0 - index) for index in range(8)]
+    service = FormationSetupService(None)
+
+    async def analyze():
+        return candidates, None
+
+    monkeypatch.setattr(service, "_analyze", analyze)
+
+    async def load_both():
+        return (
+            await service.get_forming_setups(limit=6),
+            await service.get_forming_setups(limit=None),
+        )
+
+    dashboard, catalog = asyncio.run(load_both())
+
+    assert dashboard["returned_count"] == 6
+    assert catalog["returned_count"] == 8
+    assert catalog["total_eligible"] == 8
+    assert [setup["symbol"] for setup in catalog["setups"]] == [f"S{index}" for index in range(8)]
+    assert [setup["rank"] for setup in catalog["setups"]] == list(range(1, 9))
 
 
 @pytest.mark.parametrize(

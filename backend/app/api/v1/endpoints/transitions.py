@@ -58,6 +58,14 @@ async def get_forming_setups(
     return await FormationSetupService(db).get_forming_setups(limit=limit)
 
 
+@router.get("/forming/all", response_model=FormationEnvelopeResponse)
+async def get_all_forming_setups(
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the complete ranked formation catalog for progressive disclosure."""
+    return await FormationSetupService(db).get_forming_setups(limit=None)
+
+
 @router.get("/operational/{symbol}")
 async def get_symbol_operational_transition(
     symbol: str,

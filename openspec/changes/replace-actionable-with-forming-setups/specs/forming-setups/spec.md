@@ -74,15 +74,23 @@ Each eligible candidate SHALL receive a `formation_score` in `[0, 100]` composed
 - **THEN** its weighted component contributions SHALL sum to the reported pre-clamp score
 - **AND** its final `formation_score` SHALL equal that score clamped to `[0, 100]`
 
-### Requirement: Setups Forming SHALL enforce scarcity
+### Requirement: Setups Forming SHALL enforce dashboard scarcity with full detail on demand
 
-The endpoint SHALL return at most six candidates, ordered by formation score descending, then trigger proximity, then structural integrity. The default minimum formation score SHALL be 55. The system SHALL return an empty list rather than lower eligibility or score thresholds.
+The dashboard endpoint and panel SHALL return at most six candidates, ordered by formation score descending, then trigger proximity, then structural integrity. The default minimum formation score SHALL be 55. The system SHALL return an empty list rather than lower eligibility or score thresholds. When more candidates qualify, the panel SHALL provide a `Ver más` link to a dedicated Setups Forming page. That page SHALL expose every candidate that passed the same eligibility, invalidation, feed-exclusion, and minimum-score rules, preserving the canonical ranking and card-based preparation language.
 
 #### Scenario: More than six candidates qualify
 
 - **GIVEN** ten candidates have formation scores at or above 55
 - **WHEN** the endpoint is called with its default limit
 - **THEN** it SHALL return exactly the highest-ranked six
+
+#### Scenario: Operator opens the complete ranked list
+
+- **GIVEN** more than six candidates pass the formation criteria
+- **WHEN** the operator selects `Ver más` from the dashboard panel
+- **THEN** a dedicated page SHALL show all currently eligible candidates in canonical rank order
+- **AND** the dashboard SHALL remain limited to six candidates
+- **AND** selecting a candidate SHALL open its symbol detail
 
 #### Scenario: No candidate reaches the threshold
 

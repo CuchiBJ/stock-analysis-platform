@@ -60,9 +60,9 @@ State age is returned as `structural_age_days` but contributes zero points. Setu
 
 Alternative considered: reset `days_in_state` whenever an `entering_pullback` observation appears. Rejected because repeated intraday/daily observations could make a long-running episode look perpetually fresh. A future explicit transition-episode model may add opportunity age, but it is not required for this preparation list.
 
-### D5: Preserve scarcity and allow an honest empty state
+### D5: Preserve dashboard scarcity and disclose the complete candidate set on demand
 
-Return at most six candidates with a default minimum formation score of 55. Never lower the threshold to fill the panel. Sort by formation score descending, then trigger proximity, then structural integrity. The response includes total eligible count and context snapshot so the UI can distinguish scarcity from data failure.
+Return at most six candidates in the dashboard with a default minimum formation score of 55. Never lower the threshold to fill the panel. Sort by formation score descending, then trigger proximity, then structural integrity. The response includes total eligible count and context snapshot so the UI can distinguish scarcity from data failure. A separate protected catalog route returns the full qualifying ranking for a dedicated Setups Forming page reached through `Ver más`; it reuses the same analysis and cards so the detail view cannot drift from the dashboard criteria.
 
 ### D6: Put preparation before execution without confusing their roles
 
@@ -78,7 +78,7 @@ Implementation starts by ensuring `refine-actionable-ranking` is archived or oth
 
 ## Risks / Trade-offs
 
-- **[Risk] The new panel becomes a generic screener.** → Keep a hard maximum of six, retain institutional/invalidation gates, provide compact narratives, and allow an empty result.
+- **[Risk] The new panel becomes a generic screener.** → Keep a hard maximum of six on the dashboard, retain institutional/invalidation gates in the full detail view, use the same compact narratives, and allow an empty result.
 - **[Risk] Removing the near-high gate admits damaged laggards.** → Preserve long-term structure, run invalidation first, expose RS deterioration, and require minimum formation score.
 - **[Risk] Excluding live symbols drifts from the actual feed.** → Share the live selector/service rather than reimplementing transition rules or inferring from stale observation rows.
 - **[Risk] Weight changes merely encode the BE outcome.** → Validate against a broader historical fixture set including successful and failed formations; BE and DOCN are shape examples, not golden tickers.

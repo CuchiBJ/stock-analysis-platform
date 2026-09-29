@@ -48,3 +48,10 @@
 - [x] 7.3 [priority-engine] Run the broader backend suite and relevant Ruff/mypy checks, reporting any pre-existing or environment-blocked failures separately. (`pytest tests`: 448 passed; Ruff and mypy are not installed in the backend venv.)
 - [x] 7.4 [forming-setups] Perform an authenticated browser smoke check of market context → Setups Forming → Setup Feed → symbol diagnostic, including an empty panel and a promoted symbol.
 - [x] 7.5 [forming-setups] Review the final diff for unrelated changes, verify OpenSpec artifacts, confirm no schema migration or new dependency was introduced unexpectedly, and document rollback/deployment ordering.
+
+## 8. Full formation catalog
+
+- [x] 8.1 [forming-setups] Add a protected catalog route that returns every candidate passing the existing formation criteria in canonical rank order while preserving the six-result dashboard contract.
+- [x] 8.2 [forming-setups] Add a `Ver más` affordance to the dashboard panel and a dedicated authenticated page that renders the full ranked candidate list with the established formation cards and complete loading, empty, error, and retry states.
+- [x] 8.3 [forming-setups] Add focused backend and frontend contract tests for the full catalog and dashboard-to-detail navigation.
+- [x] 8.4 [forming-setups] Run focused tests plus frontend lint, typecheck, and production build; review the final diff for unrelated changes.

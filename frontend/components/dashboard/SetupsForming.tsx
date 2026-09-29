@@ -12,12 +12,13 @@ import { useWebSocket } from '@/hooks/useWebSocket'
 
 type Badge = 'leader' | 'neutral' | 'weak'
 
-interface FormationSetup {
+export interface FormationSetup {
   symbol: string
   current_price: number | null
   change_pct: number | null
   formation_state: string
   formation_score: number
+  rank: number
   formation_narrative: string
   primary_risk: string
   next_trigger: string
@@ -28,7 +29,7 @@ interface FormationSetup {
   group_strength: { group: string | null; badge: Badge }
 }
 
-interface FormationEnvelope {
+export interface FormationEnvelope {
   setups: FormationSetup[]
   total_eligible: number
 }
@@ -37,7 +38,7 @@ function formatState(value: string) {
   return value.replaceAll('_', ' ')
 }
 
-function FormationCard({ setup }: { setup: FormationSetup }) {
+export function FormationCard({ setup }: { setup: FormationSetup }) {
   const distance = setup.distance_to_trigger_atr == null
     ? 'sin dato'
     : `${setup.distance_to_trigger_atr >= 0 ? '+' : ''}${setup.distance_to_trigger_atr.toFixed(2)} ATR`
@@ -52,7 +53,10 @@ function FormationCard({ setup }: { setup: FormationSetup }) {
     >
       <div className="flex items-start justify-between gap-2">
         <div>
-          <div className="text-sm font-bold tracking-wide text-white">{setup.symbol}</div>
+          <div className="flex items-baseline gap-2">
+            <div className="text-sm font-bold tracking-wide text-white">{setup.symbol}</div>
+            <span className="text-[9px] font-mono text-white/30">#{setup.rank}</span>
+          </div>
           {price && <div className="text-[10px] font-mono text-white/50">{price}</div>}
         </div>
         <div className="text-right text-base font-bold tabular-nums text-cyan-300">
@@ -110,7 +114,16 @@ export default function SetupsForming() {
           </div>
           <p className="mt-1 text-xs text-white/40">Preparación previa: estructuras sanas que todavía no activaron el Setup Feed.</p>
         </div>
-        {data && <span className="text-xs text-white/35">{data.setups.length} de {data.total_eligible}</span>}
+        {data && (
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-white/35">{data.setups.length} de {data.total_eligible}</span>
+            {data.total_eligible > data.setups.length && (
+              <Link href="/setups-forming" className="text-xs font-medium text-cyan-300 hover:text-cyan-200">
+                Ver más
+              </Link>
+            )}
+          </div>
+        )}
       </div>
 
       {loading ? (
