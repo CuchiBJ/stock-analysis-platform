@@ -82,6 +82,16 @@ The unchanged source backup was restored again into a second empty PostgreSQL vo
 - Shared-browser Chromium smoke passed: the second user observed no first-user profile, journal rows, statistics, drafts, or account balance.
 - The adversarial API matrix passed for independent list, stats, export, import/replace, create, edit, close, delete, stop history, queue-to-trade, backfill, and broker-ID behavior; foreign identifiers returned indistinguishable not-found responses without mutation.
 
+## Production execution
+
+- A fresh pre-migration backup was created at `stock_analysis_20260928T184048Z.dump` (261,743,753 bytes; SHA-256 `96aca9c96deef0eb30da304afb2d18a7345b288130088246551f93afdea517a8`).
+- The integrity preflight removed the same 9 orphan stop events identified by rehearsal and retained 20 valid stop events.
+- Expansion advanced production from `b7c8d9e0f1a2` to `c8d9e0f1a2b3`; a verified active administrator was bootstrapped without exposing its password.
+- Claim dry-run and execution both preserved all aggregate values and checksums while assigning all 65 trades. A second dry-run selected 0 trades, proving production idempotence.
+- Contract advanced production to `d9e0f1a2b3c4 (head)`. API, frontend, scheduler, PostgreSQL, and Redis returned healthy.
+- Production runs in administrator-only mode. The canonical HTTPS origin is accepted for credentialed requests; registration and recovery remain disabled.
+- Authenticated browser verification loaded the administrator dashboard and historical journal. The duplicate legacy WebSocket hook discovered during this verification was removed in hotfix `61ed4bd`; the rebuilt production bundle contains no legacy reconnect-loop module and a fresh browser load reports no console errors.
+
 ## Result
 
-The migration is operationally rehearsed and its data invariants pass. Production execution still requires a maintenance window, real administrator identity, and explicit execution of the documented backup/preflight/expand/bootstrap/claim/contract sequence. SMTP is required only if public account flows are enabled; the selected administrator-only mode uses the disabled mailer and server-side password reset.
+The migration is operationally rehearsed and complete in production. Its data invariants pass, all legacy trades belong to the verified administrator, and the deployed application is healthy. SMTP remains unnecessary while public account flows are disabled; administrative recovery uses the server-side password reset.
