@@ -87,6 +87,68 @@ function MetricRow({ label, value }: { label: string; value: ReactNode }) {
   )
 }
 
+const BREADTH_ROWS = [
+  {
+    key: 'new_52w_highs_vs_lows',
+    label: 'Nuevos máximos vs nuevos mínimos (52 semanas)',
+    positive: 'Nuevos máximos',
+    negative: 'Nuevos mínimos',
+  },
+  {
+    key: 'up_from_open_vs_down',
+    label: 'Suben desde la apertura vs bajan',
+    positive: 'Suben',
+    negative: 'Bajan',
+  },
+  {
+    key: 'up_4pct_vs_down_4pct',
+    label: 'Suben ≥4% vs bajan ≥4%',
+    positive: 'Suben ≥4%',
+    negative: 'Bajan ≥4%',
+  },
+] as const
+
+function BreadthComparisonRows({ comparisons }: {
+  comparisons: NonNullable<MarketContextData['participation']['breadth_comparisons']>
+}) {
+  return (
+    <div className="mt-4 space-y-4" aria-label={`Amplitud OHLC del mercado para ${comparisons.date}`}>
+      <p className="text-[10px] text-white/35">Amplitud OHLC · {comparisons.date}</p>
+      {BREADTH_ROWS.map(({ key, label, positive, negative }) => {
+        const measure = comparisons[key]
+        const noCoverage = measure.eligible_symbols === 0
+        const noEvents = measure.up_count + measure.down_count === 0
+        const ratio = measure.up_ratio
+        const coverage = `${measure.eligible_symbols} elegibles · ${measure.excluded_symbols} excluidas`
+        return (
+          <div key={key} aria-label={`${label}. ${coverage}`}>
+            <div className="flex items-start justify-between gap-3">
+              <span className="text-xs leading-5 text-white/80">{label}</span>
+              <span className="shrink-0 text-xs font-mono font-semibold text-sky-300">
+                {noCoverage ? 'Sin datos' : noEvents || ratio == null ? 'Sin eventos' : `${Math.round(ratio * 100)}%`}
+              </span>
+            </div>
+            {!noCoverage && !noEvents && ratio != null && (
+              <div
+                className="mt-1.5 h-2 overflow-hidden rounded-full bg-white/10"
+                role="img"
+                aria-label={`${Math.round(ratio * 100)}% positivos entre eventos positivos y negativos`}
+              >
+                <div className="h-full rounded-full bg-sky-400" style={{ width: `${Math.max(0, Math.min(100, ratio * 100))}%` }} />
+              </div>
+            )}
+            <div className="mt-1 flex items-center justify-between gap-3 text-[11px] text-white/50">
+              <span>{measure.up_count} {positive}</span>
+              <span>{measure.down_count} {negative}</span>
+            </div>
+            <p className="text-[10px] text-white/35" aria-label={`Cobertura: ${coverage}`}>{coverage}</p>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function SectionHeader({ title, descriptor, delta, deltaUnit }: {
   title: string
   descriptor: string
@@ -196,7 +258,25 @@ export default function MarketContextDrawer({ ctx, onClose }: Props) {
             />
             <MetricRow label="Breadth above EMA21"  value={<span className={breadthLevelColor(p.metrics.breadth_above_ema21 * 100)}>{(p.metrics.breadth_above_ema21 * 100).toFixed(1)}%</span>} />
             <MetricRow label="Breadth momentum 5d"  value={`${(p.metrics.breadth_momentum_5d * 100).toFixed(2)}pp`} />
-            <MetricRow label="Highs / lows ratio"   value={p.metrics.highs_lows_ratio.toFixed(2)} />
+            <div>
+              <MetricRow label="Ratio proximidad / distancia a máximos" value={p.metrics.highs_lows_ratio.toFixed(2)} />
+            </div>
+            {p.breadth_comparisons && <BreadthComparisonRows comparisons={p.breadth_comparisons} />}
+            <details className="mt-3 text-[11px] text-white/45">
+              <summary className="w-fit cursor-pointer rounded-sm focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400">
+                Cómo se calcula la amplitud
+              </summary>
+              <div className="mt-2 space-y-1.5 leading-relaxed">
+                {p.breadth_comparisons && (
+                  <>
+                    <p>Máximos y mínimos nuevos: el máximo o mínimo intradiario supera o perfora las 252 ruedas previas completas.</p>
+                    <p>Desde apertura: último cierre de la fecha mostrada frente a la apertura de esa rueda. ±4% compara el cierre con el de la rueda previa disponible.</p>
+                    <p>La barra es positivos ÷ eventos positivos y negativos. La cobertura indica símbolos elegibles y excluidos; empates no generan eventos.</p>
+                  </>
+                )}
+                <p>El ratio de proximidad compara acciones cerca de máximos de 52 semanas con las alejadas de esos máximos; no cuenta nuevos extremos.</p>
+              </div>
+            </details>
           </section>
 
           {/* ── Section 2: Leadership ── */}

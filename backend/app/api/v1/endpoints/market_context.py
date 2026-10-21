@@ -104,6 +104,7 @@ async def get_current_market_context(db: AsyncSession = Depends(get_db)):
             "delta_sample_size_20d": ctx.participation.delta_sample_size_20d,
             "metrics":              ctx.participation.metrics,
             "history":              ctx.participation_history,
+            "breadth_comparisons":  ctx.participation.breadth_comparisons,
         },
         "leadership": {
             "descriptor": ctx.leadership.descriptor,

@@ -40,6 +40,7 @@ from app.services.market_health import (
 )
 from app.services.market_regime_engine import MarketRegimeAnalysis, MarketRegimeEngine
 from app.services.quality_leader_gate import SMA150_SMA200_MIN_RATIO, is_quality_leader
+from app.services.market_context_breadth import calculate_breadth_comparisons
 from app.services.universe_filters import QUALITY_FILTERS
 
 # Calendar-day proxies for trading-day windows (Decision 5 in design).
@@ -88,6 +89,7 @@ class ParticipationAnalysis:
     delta_5d: float            # breadth_momentum_5d expressed in percentage points
     delta_sample_size_20d: int
     metrics: dict
+    breadth_comparisons: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -195,6 +197,7 @@ class MarketContextEngine:
         universe_size = await self._universe_size(as_of)
         regime = await MarketRegimeEngine(self._db).detect_regime(as_of)
         participation = await self._participation(as_of)
+        participation.breadth_comparisons = await calculate_breadth_comparisons(self._db, as_of)
         # Build the widest historical window first. The health series is also
         # reused by leadership level and the short dashboard sparklines, avoiding
         # dozens of per-day round trips during a cold load.

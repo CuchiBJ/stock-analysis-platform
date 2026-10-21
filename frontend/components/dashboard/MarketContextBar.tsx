@@ -22,11 +22,27 @@ interface HistoryPoint {
   value: number
 }
 
+interface BreadthMeasure {
+  up_count: number
+  down_count: number
+  eligible_symbols: number
+  excluded_symbols: number
+  up_ratio: number | null
+}
+
+interface BreadthComparisons {
+  date: string
+  new_52w_highs_vs_lows: BreadthMeasure
+  up_from_open_vs_down: BreadthMeasure
+  up_4pct_vs_down_4pct: BreadthMeasure
+}
+
 interface ParticipationData {
   descriptor: string
   delta_5d: number
   delta_sample_size_20d: number
   history?: HistoryPoint[]
+  breadth_comparisons?: BreadthComparisons
   metrics: {
     breadth_above_ema21:       number
     breadth_above_ema50:       number
