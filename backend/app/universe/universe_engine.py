@@ -233,9 +233,8 @@ class UniverseEngine:
         if not existing_stock.scalar_one_or_none():
             db_stock = Stock(
                 symbol=candidate.symbol.upper(),
-                company_name=candidate.symbol,
+                name=candidate.symbol,
                 is_active=True,
-                added_at=datetime.utcnow()
             )
             db.add(db_stock)
             await db.commit()

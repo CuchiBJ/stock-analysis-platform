@@ -58,6 +58,61 @@ def test_scheduler_entrypoint_configures_all_mappers_in_clean_process():
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("stock_exists", [False, True])
+def test_discovery_candidate_onboards_stock_for_scheduler(monkeypatch, stock_exists):
+    from app.models.stock import Stock
+    from app.models.universe import InstrumentIdentity, UniverseEnrichment, UniverseTier
+    from app.universe import universe_engine
+    from app.universe.discovery.auto_discovery import DiscoveryCandidate, DiscoveryTrigger
+    from app.universe.identity.canonical_identity import CanonicalIdentityManager
+
+    engine = universe_engine.UniverseEngine.__new__(universe_engine.UniverseEngine)
+    engine.identity_manager = CanonicalIdentityManager()
+    engine.lifecycle_tracker = MagicMock()
+    event_bus = MagicMock()
+    monkeypatch.setattr(universe_engine, "universe_event_bus", event_bus)
+    candidate = DiscoveryCandidate(
+        symbol="abcd",
+        trigger=DiscoveryTrigger.VOLUME_EXPLOSION,
+        timestamp=datetime(2026, 10, 1),
+        data={"relative_volume": 4.0},
+        confidence=80,
+        priority=1,
+    )
+    existing_stock = Stock(symbol="ABCD", name="Existing company", is_active=True)
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[
+        SimpleNamespace(scalar_one_or_none=lambda: None),
+        SimpleNamespace(scalar_one_or_none=lambda: existing_stock if stock_exists else None),
+    ])
+    db.commit = AsyncMock()
+
+    identity = asyncio.run(engine.process_discovery_candidate(candidate, db))
+
+    assert identity.current_symbol == "ABCD"
+    added = [call.args[0] for call in db.add.call_args_list]
+    assert isinstance(added[0], InstrumentIdentity)
+    assert isinstance(added[1], UniverseEnrichment)
+    assert isinstance(added[2], UniverseTier)
+    stocks = [record for record in added if isinstance(record, Stock)]
+    if stock_exists:
+        assert stocks == []
+        assert existing_stock.name == "Existing company"
+    else:
+        assert len(stocks) == 1
+        assert stocks[0].symbol == "ABCD"
+        assert stocks[0].name == candidate.symbol
+        assert stocks[0].is_active is True
+    assert db.commit.await_count == (3 if stock_exists else 4)
+    engine.lifecycle_tracker.track_emerging_leader.assert_called_once()
+    event_bus.emit_new_leader_discovered.assert_called_once_with(
+        symbol=candidate.symbol,
+        trigger=candidate.trigger.value,
+        confidence=candidate.confidence,
+        discovery_data=candidate.data,
+    )
+
+
 # ---- compute_market_state ----------------------------------------------------
 
 def test_market_state_pre_market_weekday():
