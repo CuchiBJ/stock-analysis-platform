@@ -17,6 +17,7 @@ from app.api.v1.endpoints.calibration import (
     _classify,
     _rates,
     _reclassify_observation_regimes,
+    _reclassify_observation_outcomes,
 )
 from app.services.transition_engine import OperationalTransition
 from app.services.calibration_statistics import (
@@ -205,3 +206,41 @@ def test_regime_reclassification_groups_dates_and_counts_changes():
         "unresolved_dates": [],
     }
     assert db.committed is True
+
+
+def test_outcome_reclassification_dispatches_pullbacks_without_changing_other_rules(monkeypatch):
+    from app.services.outcome_tracker import OutcomeTracker
+
+    pullback = SimpleNamespace(transition_type="entering_pullback", outcome_status="SUCCESS")
+    insufficient = SimpleNamespace(transition_type="entering_pullback", outcome_status="INSUFFICIENT_DATA")
+    other = SimpleNamespace(
+        transition_type="support_holding", outcome_status="FAILURE",
+        max_drawdown_atr_within_10d=-1.0, max_gain_atr_within_10d=2.0,
+        pct_5d=1.0, broke_ema50_within_10d=False,
+    )
+
+    class Db:
+        committed = False
+
+        async def execute(self, statement):
+            self.statement = statement
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [pullback, insufficient, other]))
+
+        async def commit(self):
+            self.committed = True
+
+    rebuilt = []
+
+    async def reevaluate(self, obs, as_of_date):
+        rebuilt.append((obs, as_of_date))
+        obs.outcome_status = "FAILURE" if obs is pullback else "NEUTRAL"
+
+    monkeypatch.setattr(OutcomeTracker, "reevaluate_pullback", reevaluate)
+    db = Db()
+    as_of = date(2026, 6, 30)
+    result = asyncio.run(_reclassify_observation_outcomes(db, as_of))
+    assert rebuilt == [(pullback, as_of), (insufficient, as_of)]
+    assert result == {"evaluated": 3, "changed": 3,
+                      "by_status": {"FAILURE": 1, "NEUTRAL": 1, "SUCCESS": 1}}
+    assert db.committed is True
+    assert other.outcome_status == "SUCCESS"

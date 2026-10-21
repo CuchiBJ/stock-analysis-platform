@@ -12,7 +12,7 @@ from datetime import date, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, select, func, update
+from sqlalchemy import and_, or_, select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
@@ -262,17 +262,28 @@ async def scan_now(
 @router.post("/reclassify", tags=["admin"])
 async def reclassify_outcomes(db: AsyncSession = Depends(get_db)):
     """Re-corre la clasificación de outcome sobre observaciones ya resueltas
-    usando los campos crudos persistidos (no re-descarga precios). Necesario
-    tras cambiar la regla de clasificación para que la calibración refleje la
-    nueva definición sin esperar a acumular observaciones nuevas.
+    usando datos persistidos (no re-descarga precios). Los pullbacks requieren
+    sus velas ordenadas; las demás transiciones usan los campos agregados.
+    Permite aplicar una nueva regla al historial sin esperar a acumular
+    observaciones nuevas.
     """
+    return await _reclassify_observation_outcomes(db, date.today())
+
+
+async def _reclassify_observation_outcomes(db: AsyncSession, as_of_date: date) -> dict:
     from collections import Counter
 
     from app.services.outcome_tracker import OutcomeTracker
 
     resolved_or_neutral = ("SUCCESS", "FAILURE", "NEUTRAL")
     q = select(TransitionObservation).where(
-        TransitionObservation.outcome_status.in_(resolved_or_neutral)
+        or_(
+            TransitionObservation.outcome_status.in_(resolved_or_neutral),
+            and_(
+                TransitionObservation.transition_type == "entering_pullback",
+                TransitionObservation.outcome_status == "INSUFFICIENT_DATA",
+            ),
+        )
     )
     observations = (await db.execute(q)).scalars().all()
 
@@ -280,9 +291,14 @@ async def reclassify_outcomes(db: AsyncSession = Depends(get_db)):
     changed = 0
     by_status: Counter = Counter()
     for obs in observations:
-        new_status = tracker._classify_outcome(obs)
-        if new_status != obs.outcome_status:
+        old_status = obs.outcome_status
+        if obs.transition_type == "entering_pullback":
+            await tracker.reevaluate_pullback(obs, as_of_date)
+            new_status = obs.outcome_status
+        else:
+            new_status = tracker._classify_outcome(obs)
             obs.outcome_status = new_status
+        if new_status != old_status:
             changed += 1
         by_status[new_status] += 1
 

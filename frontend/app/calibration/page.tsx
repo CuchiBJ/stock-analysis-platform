@@ -283,6 +283,9 @@ export default function CalibrationPage() {
             <p className="text-center text-[11px] text-muted-foreground">
               Delivered = SUCCESS ÷ (SUCCESS + FAILURE + NEUTRAL). Drift compara Recent 21d contra los 180d anteriores y sólo cambia cuando los intervalos Wilson 95% dejan de superponerse.
             </p>
+            <p className="text-center text-[11px] text-muted-foreground">
+              Entering pullback: test de EMA9/EMA21 recuperado al cierre, seguido en otra sesión por un avance de al menos 1,5 ATR desde la detección y cierre sobre EMA9, dentro de las 10 sesiones posteriores. Las mechas bajo EMA9/EMA21 son válidas; un cierre bajo EMA21 o tocar EMA50 invalida el resultado. Sólo se evalúan sesiones cerradas.
+            </p>
           </>
         )}
       </div>

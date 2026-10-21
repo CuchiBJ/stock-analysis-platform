@@ -1,8 +1,9 @@
 """Unit tests for OutcomeTracker._classify_outcome.
 
-Targets the PRE_RECLAIM rule, which defines SUCCESS as a real forward
+Targets the shared PRE_RECLAIM rule, which defines SUCCESS as a real forward
 advance (>=1.5 ATR) rather than merely touching the EMA — see
-`backend/app/services/outcome_tracker.py`.
+`backend/app/services/outcome_tracker.py`. Entering pullbacks have separate
+chronological support coverage in test_pullback_outcome.py.
 """
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ from app.services.outcome_tracker import OutcomeTracker
 def _obs(**kwargs):
     """Minimal observation stub with the fields _classify_outcome reads."""
     defaults = dict(
-        transition_type="entering_pullback",
+        transition_type="volume_dry_up",
         max_drawdown_atr_within_10d=None,
         max_gain_atr_within_10d=None,
         pct_5d=None,
@@ -65,3 +66,8 @@ class TestPreReclaimClassification:
             obs = _obs(transition_type=t, max_gain_atr_within_10d=1.5,
                        max_drawdown_atr_within_10d=-1.0)
             assert tracker._classify_outcome(obs) == "SUCCESS", t
+
+    def test_entering_pullback_cannot_use_aggregate_success(self):
+        obs = _obs(transition_type="entering_pullback",
+                   max_gain_atr_within_10d=2.0, max_drawdown_atr_within_10d=-1.0)
+        assert tracker._classify_outcome(obs) == "INSUFFICIENT_DATA"

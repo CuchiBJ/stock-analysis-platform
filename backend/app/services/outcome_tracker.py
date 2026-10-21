@@ -1,9 +1,11 @@
 from datetime import date, datetime, timedelta
+from math import isfinite
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from sqlalchemy.dialects.postgresql import insert
 from app.models.stock import TransitionObservation, StockPrice
+from app.services.pullback_outcome import classify_entering_pullback
 import logging
 
 logger = logging.getLogger(__name__)
@@ -89,7 +91,7 @@ class OutcomeTracker:
             pass
 
     async def _evaluate_one(self, obs: TransitionObservation, as_of_date: date) -> None:
-        end_date = obs.date_detected + timedelta(days=30)
+        end_date = min(obs.date_detected + timedelta(days=30), as_of_date)
         q = (
             select(StockPrice)
             .where(
@@ -101,6 +103,10 @@ class OutcomeTracker:
             )
             .order_by(StockPrice.date)
         )
+        if obs.transition_type == 'entering_pullback':
+            # Today's OHLC row is mutable during market hours. Only earlier
+            # sessions can settle this chronological support/continuation rule.
+            q = q.where(StockPrice.date < as_of_date)
         prices = (await self.db.execute(q)).scalars().all()
 
         if not prices:
@@ -108,6 +114,14 @@ class OutcomeTracker:
                 obs.outcome_status = 'INSUFFICIENT_DATA'
                 obs.outcome_evaluated_at = datetime.utcnow()
             return
+
+        pullback_status = None
+        if obs.transition_type == 'entering_pullback':
+            pullback_status = self._classify_outcome(obs, prices[:10])
+            if pullback_status == 'INSUFFICIENT_DATA':
+                obs.outcome_status = pullback_status
+                obs.outcome_evaluated_at = datetime.utcnow()
+                return
 
         base = obs.price_at_detection
         atr = obs.atr_at_detection or 0.0
@@ -121,8 +135,12 @@ class OutcomeTracker:
             obs.pct_5d = (prices[4].close - base) / base * 100 if base else None
 
         if len(prices) >= 20 and obs.price_20d is None:
-            obs.price_20d = prices[19].close
-            obs.pct_20d = (prices[19].close - base) / base * 100 if base else None
+            close_20d = prices[19].close
+            # Optional diagnostics beyond the outcome window must not abort
+            # classification when an otherwise usable series has missing data.
+            if close_20d is not None and isfinite(close_20d) and close_20d > 0:
+                obs.price_20d = close_20d
+                obs.pct_20d = (close_20d - base) / base * 100 if base else None
 
         if len(prices) >= 10 and obs.outcome_status == 'PENDING':
             window = prices[:10]
@@ -141,11 +159,31 @@ class OutcomeTracker:
             obs.reached_ema21_within_10d = bool(ema21 and max(closes) >= ema21)
             obs.broke_ema50_within_10d = bool(ema50 and min(closes) < ema50)
 
-            obs.outcome_status = self._classify_outcome(obs)
+            obs.outcome_status = pullback_status or self._classify_outcome(obs, window)
             obs.outcome_evaluated_at = datetime.utcnow()
 
-    def _classify_outcome(self, obs: TransitionObservation) -> str:
+    async def reevaluate_pullback(self, obs: TransitionObservation, as_of_date: date) -> None:
+        """Rebuild a historical pullback from prices, discarding stale outcomes."""
+        if obs.transition_type != 'entering_pullback':
+            raise ValueError('Only entering_pullback uses chronological reevaluation')
+        for field in (
+            'price_1d', 'price_5d', 'price_20d', 'pct_1d', 'pct_5d', 'pct_20d',
+            'max_gain_within_10d', 'max_drawdown_within_10d',
+            'max_gain_atr_within_10d', 'max_drawdown_atr_within_10d',
+            'reached_ema21_within_10d', 'broke_ema50_within_10d',
+            'outcome_evaluated_at',
+        ):
+            setattr(obs, field, None)
+        obs.outcome_status = 'PENDING'
+        await self._evaluate_one(obs, as_of_date)
+
+    def _classify_outcome(self, obs: TransitionObservation, prices=None) -> str:
         t = obs.transition_type
+        if t == 'entering_pullback':
+            # Aggregate extrema cannot establish support before continuation.
+            if prices is None:
+                return 'INSUFFICIENT_DATA'
+            return classify_entering_pullback(obs, prices)
         dd_atr = obs.max_drawdown_atr_within_10d
         gain_atr = obs.max_gain_atr_within_10d
         pct_5d = obs.pct_5d
