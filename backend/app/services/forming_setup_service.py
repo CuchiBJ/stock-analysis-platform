@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import and_, func, select
@@ -294,10 +294,7 @@ class FormationSetupService:
         metrics_rows = [row[0] for row in rows]
         symbols = [row.symbol for row in metrics_rows]
         latest_date = max(row.date for row in metrics_rows)
-        history = (await self.db.execute(select(StockMetrics).where(StockMetrics.symbol.in_(symbols), StockMetrics.date < latest_date).order_by(StockMetrics.date.desc()))).scalars().all()
-        previous: dict[str, StockMetrics] = {}
-        for row in history:
-            previous.setdefault(row.symbol, row)
+        previous = await self._previous_metrics(symbols, latest_date)
         rs_baselines = await get_five_session_rs_baselines(self.db, metrics_rows)
         feed_symbols = await LiveTransitionSelector(self.db).current_symbols()
         group_performances = await fetch_current_group_strengths(self.db)
@@ -336,6 +333,27 @@ class FormationSetupService:
                 response = {"symbol": metrics.symbol, "current_price": round(metrics.current_price, 2) if metrics.current_price is not None else None, "change_pct": day_change_pct(metrics, previous.get(metrics.symbol)), "formation_state": state.value, "formation_score": score, "rank": 0, "eligible_count": 0, "formation_narrative": f"{state.value.replace('_', ' ').capitalize()} structure; {direction.replace('_', ' ')} toward {trigger}.", "primary_risk": risk, "next_trigger": trigger, "distance_to_trigger_atr": trigger_atr, "distance_to_trigger_pct": trigger_pct, "distance_to_high_52w_atr": metrics.distance_to_high_52w_atr, "structural_age_days": ages.get(metrics.symbol), "structure_evidence": structure, "contraction_evidence": contraction, "rs_direction": rs_status, "group_strength": {"group": market_group, "badge": group.badge}, "context_warnings": multiplier.surface_warnings, "score_breakdown": breakdown}
             evaluations.append(CandidateEvaluation(metrics.symbol, eligible, criteria, reasons, state, score, breakdown, abs(_trigger_gap(trigger_atr)) if _trigger_gap(trigger_atr) is not None else float("inf"), structural_score, response, promoted))
         return evaluations, context
+
+    async def _previous_metrics(self, symbols: list[str], latest_date: date) -> dict[str, StockMetrics]:
+        # Select the single historical row actually consumed per symbol in SQL.
+        # Loading the entire universe history here makes every diagnostic request
+        # allocate ORM objects proportional to the accumulated metrics history.
+        previous_dates = (
+            select(StockMetrics.symbol, func.max(StockMetrics.date).label("previous_date"))
+            .where(StockMetrics.symbol.in_(symbols), StockMetrics.date < latest_date)
+            .group_by(StockMetrics.symbol)
+            .subquery()
+        )
+        rows = (await self.db.execute(
+            select(StockMetrics).join(
+                previous_dates,
+                and_(
+                    StockMetrics.symbol == previous_dates.c.symbol,
+                    StockMetrics.date == previous_dates.c.previous_date,
+                ),
+            )
+        )).scalars().all()
+        return {row.symbol: row for row in rows}
 
     @staticmethod
     def _rank(evaluations: list[CandidateEvaluation]) -> list[CandidateEvaluation]:

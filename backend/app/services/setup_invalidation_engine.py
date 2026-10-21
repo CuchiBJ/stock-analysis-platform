@@ -151,25 +151,14 @@ class SetupInvalidationEngine:
     
     def _is_sloppy_pullback(self, metrics: StockMetrics) -> bool:
         """
-        Detect sloppy pullbacks - lack of controlled structure.
-        
-        Invalidation criteria (relaxed):
-        - weekly_volatility_contraction < 0.1 (no contraction)
-        - OR weekly_tightness < 0.2 (very loose)
-        - OR weekly range > 15% (wide bars)
+        Detect very loose weekly structure: weekly_tightness < 0.2.
+
+        Lack of volatility contraction is preparation evidence, not proof of
+        structural failure. It remains an input to formation scoring.
         """
-        if metrics.weekly_volatility_contraction is not None:
-            if metrics.weekly_volatility_contraction < 0.1:
-                return True
-        
         if metrics.weekly_tightness is not None:
             if metrics.weekly_tightness < 0.2:
                 return True
-        
-        # Check weekly range (if available from other metrics)
-        # This would need to be calculated from price data
-        # For now, skip if not directly available in StockMetrics
-        
         return False
     
     def _is_excessive_volatility(self, metrics: StockMetrics) -> bool:

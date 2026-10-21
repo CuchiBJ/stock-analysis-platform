@@ -36,6 +36,8 @@ Alternative considered: repurpose `/transitions/actionable` in place. Rejected b
 
 Stage one uses the latest metrics row per symbol, the canonical `QUALITY_FILTERS`, market capitalization of at least $600M, price above EMA50 and SMA150, SMA150 above SMA200, price at least `1.5 × low_52w`, and `perf_1y > 30`. It then runs the existing setup invalidation engine. Any `BROKEN`, `DISTRIBUTION`, or invalidated candidate is rejected before scoring.
 
+The shared engine distinguishes preparation quality from failure: low weekly volatility contraction no longer independently triggers `sloppy_pullback`. That metric compares recent weekly-return dispersion with the start of the loaded history; lack of contraction does not establish structural damage. It continues to influence orderliness/contraction scoring. Weekly tightness below 0.20 still triggers `sloppy_pullback`, and all other invalidation checks remain intact. This correction applies to all consumers of the shared engine, without symbol exceptions, metric-window changes, or Setup Feed selection changes.
+
 There is no hard `distance_to_high_52w_atr` predicate and no requirement that EMA9/EMA21 already be inside the Setup Feed trigger band. The 52-week-high distance is returned as context. This preserves institutional structure while allowing earlier pullbacks and contractions to surface.
 
 Alternative considered: simply widen the old near-high gate from three to five ATR. Rejected because it creates another cliff and still confuses structural quality with preparation timing.

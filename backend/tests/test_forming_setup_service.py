@@ -13,7 +13,7 @@ from app.services.forming_setup_service import (
     evaluate_formation_eligibility,
 )
 from app.services.group_strength_service import GroupMultiplier
-from app.services.setup_invalidation_engine import InvalidationReason
+from app.services.setup_invalidation_engine import InvalidationReason, SetupInvalidationEngine
 from app.services.setup_lifecycle_engine import SetupState
 
 
@@ -28,6 +28,7 @@ def metrics(**overrides):
         "weekly_trend_quality": 0.82, "weekly_tightness": 0.68,
         "weekly_volatility_contraction": 0.62, "volume_contraction": 0.55,
         "relative_volume": 0.72, "relative_strength_spy": 106.0,
+        "pullback_quality_score": 75.0, "distance_to_ema50": 11.0,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -64,6 +65,63 @@ def test_weak_rs_is_context_not_a_hard_gate():
         invalidation_reasons=[InvalidationReason.RS_DETERIORATION],
     )
     assert reasons == []
+
+
+@pytest.mark.parametrize("contraction", [-0.2, 0.0, 0.09, None])
+def test_orderly_non_contracting_structure_passes_shared_invalidation_and_eligibility(contraction):
+    candidate = metrics(weekly_tightness=0.4, weekly_volatility_contraction=contraction)
+    validity = SetupInvalidationEngine(None).check_setup_validity(candidate)
+    assert validity.is_valid
+    _, reasons = evaluate_formation_eligibility(
+        candidate, market_cap=2_000_000_000,
+        state=SetupState.CONTROLLED_PULLBACK,
+        invalidation_reasons=validity.invalidation_reasons,
+    )
+    assert reasons == []
+
+
+@pytest.mark.parametrize("tightness, rejected", [(0.19, True), (0.20, False)])
+def test_contraction_cannot_rescue_loose_structure(tightness, rejected):
+    candidate = metrics(weekly_tightness=tightness, weekly_volatility_contraction=0.7)
+    validity = SetupInvalidationEngine(None).check_setup_validity(candidate)
+    _, reasons = evaluate_formation_eligibility(
+        candidate, market_cap=2_000_000_000,
+        state=SetupState.CONTROLLED_PULLBACK,
+        invalidation_reasons=validity.invalidation_reasons,
+    )
+    assert (InvalidationReason.SLOPPY_PULLBACK in validity.invalidation_reasons) is rejected
+    assert ("invalidation_clear" in reasons) is rejected
+
+
+def test_non_contracting_structure_still_rejects_heavy_selling():
+    candidate = metrics(weekly_tightness=0.4, weekly_volatility_contraction=0.0,
+                        relative_volume=3.5, pullback_quality_score=20.0)
+    validity = SetupInvalidationEngine(None).check_setup_validity(candidate)
+    _, reasons = evaluate_formation_eligibility(
+        candidate, market_cap=2_000_000_000,
+        state=SetupState.CONTROLLED_PULLBACK,
+        invalidation_reasons=validity.invalidation_reasons,
+    )
+    assert not validity.is_valid
+    assert "heavy_selling" in reasons
+    assert "invalidation_clear" in reasons
+
+
+def test_contraction_still_affects_score_without_changing_other_components():
+    def score(contraction):
+        return calculate_formation_score(
+            metrics(weekly_tightness=0.4, weekly_volatility_contraction=contraction),
+            previous=None, rs_baseline=None, regime="transition",
+            group=GroupMultiplier(1.0, "neutral"),
+        )
+
+    flat, contracting = score(0.0), score(0.6)
+    assert contracting["final_score"] - flat["final_score"] == pytest.approx(3.0)
+    for key in FORMATION_WEIGHTS:
+        if key != "orderliness_contraction":
+            assert flat["components"][key] == contracting["components"][key]
+    component = flat["components"]["orderliness_contraction"]
+    assert component["inputs"]["weekly_volatility_contraction"] == 0.0
 
 
 def test_score_uses_declared_weights_and_missing_rs_history_is_neutral():

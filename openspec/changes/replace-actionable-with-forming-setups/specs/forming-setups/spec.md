@@ -42,6 +42,24 @@ Every formation candidate SHALL use the latest metrics snapshot and pass canonic
 
 The formation pipeline SHALL run the existing setup invalidation logic and current lifecycle deterioration checks before calculating a positive formation score. A candidate classified as `BROKEN`, `DISTRIBUTION`, or invalidated for any hard reason SHALL NOT be ranked.
 
+Low weekly volatility contraction alone SHALL NOT constitute structural invalidation. It SHALL remain an input to the orderliness/contraction score. The shared invalidation engine SHALL retain `sloppy_pullback` rejection when `weekly_tightness < 0.20`, independently of contraction, and SHALL preserve all other invalidation checks.
+
+#### Scenario: An orderly structure need not be contracting to remain eligible
+
+- **GIVEN** a candidate passes the institutional and lifecycle gates
+- **AND** weekly tightness is at least 0.20, weekly volatility contraction is below 0.10, and no other hard invalidation applies
+- **WHEN** formation eligibility is evaluated
+- **THEN** lack of contraction SHALL NOT exclude it
+- **AND** the contraction input SHALL still affect its formation score
+- **AND** the minimum score and current-feed exclusion SHALL still apply
+
+#### Scenario: Contraction cannot rescue very loose structure
+
+- **GIVEN** weekly tightness is below 0.20, even with strong volatility contraction
+- **WHEN** the shared invalidation engine evaluates the candidate
+- **THEN** it SHALL report `sloppy_pullback`
+- **AND** formation eligibility SHALL reject it before scoring
+
 #### Scenario: Attractive proximity cannot rescue distribution
 
 - **GIVEN** a candidate is close to EMA9 and has strong weekly tightness
