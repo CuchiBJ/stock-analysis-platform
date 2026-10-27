@@ -15,6 +15,7 @@ interface DashboardLayoutProps {
 
 const navItems = [
   { href: '/dashboard',   label: 'Dashboard'   },
+  { href: '/market-context', label: 'Market context' },
   { href: '/queue',       label: 'Queue'       },
   { href: '/calibration', label: 'Calibration' },
   { href: '/journal',     label: 'Journal'     },
@@ -31,20 +32,20 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
       {/* Header */}
       <nav className="border-b border-border bg-card">
         <div className="container mx-auto px-4 py-3">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-4">
               <Link href="/" className="text-xl font-bold text-foreground">
                 Stock Analysis
               </Link>
               <PipelineHealthChip />
             </div>
-            <div className="flex items-center gap-6">
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
               {navItems.map((item) => (
                 <Link
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    'text-sm font-medium transition-colors',
+                    'whitespace-nowrap text-sm font-medium transition-colors',
                     pathname === item.href
                       ? 'text-foreground'
                       : 'text-muted-foreground hover:text-foreground'

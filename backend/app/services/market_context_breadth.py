@@ -9,10 +9,10 @@ from typing import Any
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.stock import StockMetrics, StockPrice
+from app.models.stock import Stock, StockMetrics, StockPrice
 from app.services.universe_filters import QUALITY_FILTERS
 
-ANNUAL_LOOKBACK_SESSIONS = 252
+EXTREME_LOOKBACK_SESSIONS = 1
 
 
 def _valid_price(value: Any) -> bool:
@@ -27,6 +27,24 @@ def _decimal(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
+def evaluate_session_extreme(
+    current_high: Any, current_low: Any, prior_pairs: list[tuple[Any, Any]],
+) -> tuple[bool, bool, bool]:
+    """Return (eligible, new_high, new_low) for the immediately preceding session."""
+    if len(prior_pairs) != EXTREME_LOOKBACK_SESSIONS:
+        return False, False, False
+    if (not _valid_price(current_high) or not _valid_price(current_low)
+            or _decimal(current_high) < _decimal(current_low)):
+        return False, False, False
+    for high, low in prior_pairs:
+        if (not _valid_price(high) or not _valid_price(low)
+                or _decimal(high) < _decimal(low)):
+            return False, False, False
+    high_event = _decimal(current_high) > max(_decimal(high) for high, _ in prior_pairs)
+    low_event = _decimal(current_low) < min(_decimal(low) for _, low in prior_pairs)
+    return True, high_event, low_event
+
+
 def _measure(up: int, down: int, eligible: int, universe: int) -> dict[str, int | float | None]:
     events = up + down
     return {
@@ -39,13 +57,13 @@ def _measure(up: int, down: int, eligible: int, universe: int) -> dict[str, int 
 
 
 async def calculate_breadth_comparisons(
-    db: AsyncSession, as_of: date,
+    db: AsyncSession, as_of: date, *, include_constituents: bool = False,
 ) -> dict[str, Any]:
     """Calculate OHLC breadth using filtered symbols and available market sessions.
 
-    Each query is set-based. Annual coverage requires a valid high and low for
-    each of the same 252 SPY market-session dates, so orphan rows cannot create
-    phantom sessions or extend the window.
+    Each query is set-based. Coverage requires valid highs and lows for the
+    current and immediately preceding stored SPY session. Orphan rows and
+    older symbol prices cannot replace that reference session.
     """
     symbol_query = (
         select(StockMetrics.symbol)
@@ -68,12 +86,12 @@ async def calculate_breadth_comparisons(
         .where(StockPrice.symbol == "SPY", StockPrice.date < as_of)
         .distinct()
         .order_by(desc(StockPrice.date))
-        .limit(ANNUAL_LOOKBACK_SESSIONS)
+        .limit(EXTREME_LOOKBACK_SESSIONS)
     )).scalars().all()
 
-    annual_highs: dict[str, list[Any]] = {}
-    annual_lows: dict[str, list[Any]] = {}
-    if len(prior_dates) == ANNUAL_LOOKBACK_SESSIONS:
+    session_highs: dict[str, list[Any]] = {}
+    session_lows: dict[str, list[Any]] = {}
+    if len(prior_dates) == EXTREME_LOOKBACK_SESSIONS:
         history_rows = (await db.execute(
             select(StockPrice.symbol, StockPrice.date, StockPrice.high, StockPrice.low)
             .join(symbol_query, symbol_query.c.symbol == StockPrice.symbol)
@@ -83,28 +101,37 @@ async def calculate_breadth_comparisons(
         for row in history_rows:
             history.setdefault(row.symbol, {})[row.date] = (row.high, row.low)
         for symbol, by_date in history.items():
-            if len(by_date) != ANNUAL_LOOKBACK_SESSIONS or any(
-                day not in by_date or not _valid_price(by_date[day][0]) or not _valid_price(by_date[day][1])
-                or _decimal(by_date[day][0]) < _decimal(by_date[day][1])
-                for day in prior_dates
-            ):
+            if len(by_date) != EXTREME_LOOKBACK_SESSIONS or any(day not in by_date for day in prior_dates):
                 continue
-            annual_highs[symbol] = [by_date[day][0] for day in prior_dates]
-            annual_lows[symbol] = [by_date[day][1] for day in prior_dates]
+            session_highs[symbol] = [by_date[day][0] for day in prior_dates]
+            session_lows[symbol] = [by_date[day][1] for day in prior_dates]
 
-    annual_up = annual_down = 0
-    annual_eligible = 0
+    high_symbols: list[str] = []
+    low_symbols: list[str] = []
+    session_eligible_symbols: set[str] = set()
+    session_up = session_down = 0
+    session_eligible = 0
     for symbol, row in current.items():
-        prior_highs = annual_highs.get(symbol)
-        prior_lows = annual_lows.get(symbol)
-        if (prior_highs is None or prior_lows is None or not _valid_price(row.high)
-                or not _valid_price(row.low) or _decimal(row.high) < _decimal(row.low)):
+        prior_highs = session_highs.get(symbol)
+        prior_lows = session_lows.get(symbol)
+        if prior_highs is None or prior_lows is None:
             continue
-        annual_eligible += 1
-        if _decimal(row.high) > max(_decimal(value) for value in prior_highs):
-            annual_up += 1
-        if _decimal(row.low) < min(_decimal(value) for value in prior_lows):
-            annual_down += 1
+        eligible, high_event, low_event = evaluate_session_extreme(
+            row.high, row.low, list(zip(prior_highs, prior_lows)),
+        )
+        if not eligible:
+            continue
+        session_eligible += 1
+        if include_constituents:
+            session_eligible_symbols.add(symbol)
+        if high_event:
+            session_up += 1
+            if include_constituents:
+                high_symbols.append(symbol)
+        if low_event:
+            session_down += 1
+            if include_constituents:
+                low_symbols.append(symbol)
 
     opening_up = opening_down = opening_eligible = 0
     for row in current.values():
@@ -138,9 +165,39 @@ async def calculate_breadth_comparisons(
         elif close <= previous * Decimal("0.96"):
             move_down += 1
 
-    return {
+    result = {
         "date": as_of.isoformat(),
-        "new_52w_highs_vs_lows": _measure(annual_up, annual_down, annual_eligible, universe_size),
+        "new_session_highs_vs_lows": _measure(session_up, session_down, session_eligible, universe_size),
         "up_from_open_vs_down": _measure(opening_up, opening_down, opening_eligible, universe_size),
         "up_4pct_vs_down_4pct": _measure(move_up, move_down, move_eligible, universe_size),
     }
+
+    if include_constituents:
+        metadata = {}
+        if universe_symbols:
+            rows = (await db.execute(
+                select(Stock.symbol, Stock.name, Stock.sector).where(Stock.symbol.in_(universe_symbols))
+            )).all()
+            metadata = {row.symbol: row for row in rows}
+        sectors: dict[str, dict[str, Any]] = {}
+        sector_by_symbol: dict[str, str] = {}
+        for symbol in sorted(universe_symbols):
+            stock = metadata.get(symbol)
+            sector = (stock.sector or "").strip() if stock else ""
+            sector = sector or "Sin sector"
+            sector_by_symbol[symbol] = sector
+            group = sectors.setdefault(sector, {
+                "sector": sector, "highs": [], "lows": [],
+                "eligible_symbols": 0, "excluded_symbols": 0,
+            })
+            if symbol in session_eligible_symbols:
+                group["eligible_symbols"] += 1
+            else:
+                group["excluded_symbols"] += 1
+        for side, members in (("highs", high_symbols), ("lows", low_symbols)):
+            for symbol in sorted(members):
+                stock = metadata.get(symbol)
+                group = sectors[sector_by_symbol[symbol]]
+                group[side].append({"symbol": symbol, "name": stock.name if stock else symbol})
+        result["new_session_highs_vs_lows"]["sectors"] = [sectors[key] for key in sorted(sectors)]
+    return result

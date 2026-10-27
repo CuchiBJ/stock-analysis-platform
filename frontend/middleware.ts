@@ -17,6 +17,7 @@ export function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     '/dashboard/:path*',
+    '/market-context/:path*',
     '/queue/:path*',
     '/calibration/:path*',
     '/journal/:path*',

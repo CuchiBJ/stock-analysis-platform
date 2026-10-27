@@ -32,7 +32,7 @@ interface BreadthMeasure {
 
 interface BreadthComparisons {
   date: string
-  new_52w_highs_vs_lows: BreadthMeasure
+  new_session_highs_vs_lows: BreadthMeasure
   up_from_open_vs_down: BreadthMeasure
   up_4pct_vs_down_4pct: BreadthMeasure
 }

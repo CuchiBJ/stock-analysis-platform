@@ -21,6 +21,7 @@ from app.universe.tiers.tier_manager import UniverseTier
 from app.services.websocket_manager import websocket_manager
 from app.services.task_error_tracker import track_task_errors
 from app.data.pipeline_heartbeat import record_cycle
+from app.data.post_close_cycle import PostCloseCycle, SlowMetricsRun
 from sqlalchemy import func
 from datetime import datetime, time, timedelta
 import pytz
@@ -60,6 +61,7 @@ class DataScheduler:
         # the heartbeat so processed/expected come from the same set. See
         # trigger_metrics_update.
         self._slow_last_attempted = 0
+        self._post_close_cycle = PostCloseCycle()
 
         # Initialize UniverseEngine for discovery and health monitoring
         self.universe_engine = UniverseEngine(polygon_api_key=settings.polygon_api_key)
@@ -109,18 +111,23 @@ class DataScheduler:
         return symbols, today
 
     async def trigger_metrics_update(self, limit=None, symbols=None):
+        """Preserve the public covered-symbol count for manual and periodic callers."""
+        return (await self._trigger_metrics_run(limit=limit, symbols=symbols)).covered
+
+    async def _trigger_metrics_run(self, limit=None, symbols=None, *, refresh=False):
         """SLOW metrics calculation — covers all symbols with today's price.
 
         Args:
             limit: optional cap on number of symbols (backward compat for manual endpoint).
             symbols: explicit list to process (skips dynamic discovery).
+            refresh: recalculate after EOD even if a pre-EOD row was recently written.
         """
         from sqlalchemy import select
         from app.models.stock import StockMetrics as StockMetricsModel
 
         if self._slow_running:
             logger.info("SLOW cycle still running — skipping")
-            return 0
+            return SlowMetricsRun(skipped=True)
         self._slow_running = True
         count = 0
         self._slow_last_attempted = 0
@@ -130,7 +137,7 @@ class DataScheduler:
                 async with self._get_db() as db:
                     symbols, snapshot_date = await self._get_slow_symbols_and_date(db)
             if not symbols:
-                return 0
+                return SlowMetricsRun(snapshot_date=snapshot_date)
             if limit:
                 symbols = symbols[:limit]
 
@@ -154,12 +161,12 @@ class DataScheduler:
                 async with semaphore:
                     try:
                         async with self._get_db() as db:
-                            if snapshot_date:
+                            if snapshot_date and not refresh:
                                 existing = await db.execute(
                                     select(StockMetricsModel.updated_at)
                                     .where(
                                         StockMetricsModel.symbol == sym,
-                                        StockMetricsModel.date >= snapshot_date,
+                                        StockMetricsModel.date == snapshot_date,
                                         StockMetricsModel.updated_at >= fresh_cutoff,
                                     )
                                     .limit(1)
@@ -167,7 +174,9 @@ class DataScheduler:
                                 if existing.scalar():
                                     return 'skipped'
                             calculator = MetricsCalculator(db)
-                            await calculator.calculate_metrics_for_symbol(sym)
+                            metrics = await calculator.calculate_metrics_for_symbol(sym)
+                            if metrics is None or (snapshot_date and metrics.date != snapshot_date):
+                                return 'failed'
                             await db.commit()
                             return 'written'
                     except Exception:
@@ -188,7 +197,7 @@ class DataScheduler:
             logger.info(
                 f"SLOW metrics: {covered}/{len(symbols)} covered "
                 f"({written} written, {skipped} fresh-skip, {len(symbols) - covered} failed) "
-                f"in {duration}s ({covered/duration:.0f}/s)"
+                f"in {duration}s ({covered/max(duration, 0.01):.0f}/s)"
             )
             asyncio.create_task(self._broadcast_metrics_updated(written, tier='all'))
             # Evaluate pending outcomes after each successful SLOW cycle
@@ -197,7 +206,7 @@ class DataScheduler:
             asyncio.create_task(self._batch_scan_transitions())
         finally:
             self._slow_running = False
-        return count
+        return SlowMetricsRun(covered=count, attempted=len(symbols), snapshot_date=snapshot_date)
 
     @track_task_errors(task_name="batch_scan_transitions")
     async def _batch_scan_transitions(self) -> None:
@@ -511,8 +520,6 @@ class DataScheduler:
         last_tier_reevaluation = None
         last_health_check = None
         last_lifecycle_tracking = None
-        last_post_close_cycle_date = None  # date — fires once per weekday after close
-        post_close_window_start = time(16, 10)  # let yfinance settle for ~10 min
         
         # Load tiers from database
         async with self._get_db() as db:
@@ -678,33 +685,13 @@ class DataScheduler:
                 # reflect the actual close, not the last 15-min snapshot before 16:00 ET.
                 # Uses Polygon Grouped Daily Bars (~3 sec for 6600+ symbols) instead of
                 # yfinance bulk (5-28 min). yfinance is the fallback if Polygon fails.
-                # Fires once per weekday, ~10 min after close.
-                if (now.weekday() < 5
-                        and current_time >= post_close_window_start
-                        and last_post_close_cycle_date != now.date()):
-                    logger.info(f"Post-close cycle (Polygon EOD): current time {current_time}")
-                    pc_t0 = _time.monotonic()
-                    pc_status = "ok"
-                    pc_error = None
-                    pc_count: Optional[int] = None
-                    try:
-                        await self._update_prices_polygon_eod(now.date())
-                        pc_count = await self.trigger_metrics_update()
-                        after = datetime.now(et_tz)
-                        last_price_update = after
-                        last_metrics_update = after
-                    except Exception as e:
-                        logger.error(f"Post-close cycle failed: {e}")
-                        pc_status = "failed"
-                        pc_error = str(e)
-                    await self._record_heartbeat(
-                        "post_close_cycle",
-                        duration_seconds=_time.monotonic() - pc_t0,
-                        symbols_processed=pc_count,
-                        status=pc_status,
-                        error_message=pc_error,
-                    )
-                    last_post_close_cycle_date = now.date()
+                # Complete only after posture persistence; failed/skipped cycles
+                # retry at most every five minutes during the same eligible day.
+                post_close = await self._post_close_cycle.run_if_due(self)
+                if post_close is not None and post_close.success:
+                    after = datetime.now(et_tz)
+                    last_price_update = after
+                    last_metrics_update = after
 
                 # Discovery scans - run once daily after market close
                 if last_discovery_scan is None or (now - last_discovery_scan).total_seconds() >= 86400:
@@ -775,10 +762,10 @@ class DataScheduler:
                 ingestor = StockIngestor(db)
                 symbols = await ingestor.get_active_symbols(limit=None)
 
-            # Reference instruments live in stock_prices but need not be stock
-            # setups in the active universe. Keep their closes fresh explicitly.
-            from app.services.sector_etf_momentum import BENCHMARK, SECTOR_ETFS
-            symbols = list(dict.fromkeys([*symbols, BENCHMARK, *SECTOR_ETFS]))
+            # Market context references need fresh closes independently of the
+            # active stock universe.
+            from app.services.benchmarks import compose_market_context_symbols
+            symbols = compose_market_context_symbols(symbols)
 
             logger.info(f"Starting yfinance price update for {len(symbols)} symbols")
             count = await asyncio.get_event_loop().run_in_executor(

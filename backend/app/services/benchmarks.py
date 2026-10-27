@@ -11,9 +11,26 @@ These are exactly the symbols enumerated in the `indices` table
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional
 
 BENCHMARK_SYMBOLS = frozenset({"SPY", "QQQ", "IWM", "DIA"})
+MARKET_CONTEXT_BENCHMARKS = ("SPY", "QQQ")
+
+
+def compose_market_context_symbols(symbols: Iterable[str]) -> list[str]:
+    """Add the Market Context benchmarks and sector ETFs to a symbol sequence.
+
+    Preserve the caller's order, append missing references once, and leave the
+    input untouched. IWM/DIA remain recognized benchmarks but are not added to
+    these Market Context ingestion paths.
+    """
+    from app.services.sector_etf_momentum import SECTOR_ETFS
+
+    result = list(dict.fromkeys(symbols))
+    for symbol in (*MARKET_CONTEXT_BENCHMARKS, *SECTOR_ETFS):
+        if symbol not in result:
+            result.append(symbol)
+    return result
 
 
 def is_benchmark(symbol: Optional[str]) -> bool:

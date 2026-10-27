@@ -102,8 +102,8 @@ class PolygonEODIngestor:
         # not candidates for the setup scanners.
         result = await self.db.execute(select(Stock.symbol))
         universe = {row[0] for row in result.fetchall()}
-        from app.services.sector_etf_momentum import BENCHMARK, SECTOR_ETFS
-        universe.update({BENCHMARK, *SECTOR_ETFS})
+        from app.services.benchmarks import compose_market_context_symbols
+        universe = set(compose_market_context_symbols(universe))
 
         in_universe = [b for b in bars if b["symbol"] in universe]
         skipped_invalid = sum(

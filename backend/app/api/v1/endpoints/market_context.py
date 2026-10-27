@@ -1,6 +1,8 @@
 """API endpoint for Market Context Engine — Phase 1."""
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +11,7 @@ from app.core.deps import get_db
 from app.models.stock import StockPrice, StockMetrics
 from app.services.benchmarks import compute_index_trend
 from app.services.market_context_engine import MarketContextEngine
+from app.services.market_posture_record_service import market_posture_record_service, serialize_posture
 
 router = APIRouter(prefix="/market-context", tags=["market-context"])
 
@@ -76,6 +79,12 @@ async def get_current_market_context(db: AsyncSession = Depends(get_db)):
     if ctx is None:
         raise HTTPException(status_code=404, detail="No market data available — stock_metrics is empty")
 
+    response = _serialize_context(ctx, await _build_index_block(db))
+    await market_posture_record_service.observe(db, ctx.as_of, response["posture"])
+    return response
+
+
+def _serialize_context(ctx, index):
     return {
         "as_of": ctx.as_of.isoformat(),
         "universe_size": ctx.universe_size,
@@ -91,13 +100,7 @@ async def get_current_market_context(db: AsyncSession = Depends(get_db)):
                 "pullback_environment_quality": ctx.regime.pullback_environment_quality,
             },
         },
-        "posture": None if ctx.posture is None else {
-            "state":       ctx.posture.state,
-            "instruction": ctx.posture.instruction,
-            "reasons":     ctx.posture.reasons,
-            "unlock":      ctx.posture.unlock,
-            "policy":      ctx.posture.policy,
-        },
+        "posture": serialize_posture(ctx.posture),
         "participation": {
             "descriptor":           ctx.participation.descriptor,
             "delta_5d":             ctx.participation.delta_5d,
@@ -149,5 +152,57 @@ async def get_current_market_context(db: AsyncSession = Depends(get_db)):
             "series":                 ctx.health.series,
         },
         "engines_pending": ctx.engines_pending,
-        "index": await _build_index_block(db),
+        "index": index,
     }
+
+
+@router.get("/overview")
+async def get_market_context_overview(db: AsyncSession = Depends(get_db)):
+    from app.services.market_context_overview import get_overview_evidence
+
+    engine = MarketContextEngine(db)
+    ctx = await engine.analyze()
+    if ctx is None:
+        raise HTTPException(status_code=404, detail="No market data available — stock_metrics is empty")
+    evolution = await engine.evolution_history(ctx.as_of)
+    evidence = await get_overview_evidence(db, ctx.as_of)
+    spy = evidence["indices"][0]
+    index = {key: value for key, value in spy.items()
+             if key not in ("date", "previous_date", "previous_price", "metrics_date")}
+    context = _serialize_context(ctx, index if spy["price"] is not None else None)
+    posture_observed = await market_posture_record_service.observe(
+        db, ctx.as_of, context["posture"]
+    )
+    # Counts and constituents must reflect the same calculation, even when the
+    # engine's own cached context predates a data refresh within this session.
+    context["participation"]["breadth_comparisons"] = evidence["breadth"]
+    posture_history = {"status": "unavailable", "records": []}
+    spy_date = market_posture_record_service.valid_date(spy.get("date"))
+    as_of = market_posture_record_service.valid_date(ctx.as_of)
+    if posture_observed and as_of is not None:
+        reference_dates = [as_of]
+        if spy_date == as_of:
+            previous_date = market_posture_record_service.valid_date(spy.get("previous_date"))
+            if previous_date is not None and previous_date < as_of:
+                reference_dates.append(previous_date)
+        posture_history = await market_posture_record_service.history(db, reference_dates)
+    return {"context": context, "indices": evidence["indices"], "extremes": evidence["extremes"],
+            "evolution": evolution, "posture_history": posture_history}
+
+
+@router.get("/volatility")
+async def get_market_volatility(as_of: date):
+    import asyncio
+    from app.services.market_volatility import get_vix_current_quote, get_vix_quote
+
+    daily, current = await asyncio.gather(get_vix_quote(as_of), get_vix_current_quote(as_of))
+    return {"vix": daily, "current_quote": current}
+
+
+@router.get("/sector-evolution")
+async def get_market_context_sector_evolution(
+    as_of: date, db: AsyncSession = Depends(get_db),
+):
+    from app.services.market_context_sector_evolution import get_sector_evolution
+
+    return await get_sector_evolution(db, as_of)

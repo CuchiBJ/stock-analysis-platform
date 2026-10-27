@@ -159,7 +159,7 @@ class MarketContextEngine:
         self._db = db
         self._daily_series_cache: dict[date, list] = {}
 
-    async def analyze(self) -> Optional[MarketContext]:
+    async def analyze(self, *, use_cache: bool = True) -> Optional[MarketContext]:
         """Return MarketContext for the latest as_of date, or None if DB is empty."""
         as_of = await self._latest_date()
         if as_of is None:
@@ -168,7 +168,7 @@ class MarketContextEngine:
         # cold calculation should reach PostgreSQL; followers wait briefly and
         # then receive the populated cache instead of duplicating the full job.
         async with _cache_lock:
-            return await self._analyze_for(as_of, use_cache=True)
+            return await self._analyze_for(as_of, use_cache=use_cache)
 
     async def analyze_as_of(self, target: date) -> Optional[MarketContext]:
         """Reconstruct the market context as it stood on `target`.
@@ -185,6 +185,13 @@ class MarketContextEngine:
         if as_of is None:
             return None
         return await self._analyze_for(as_of, use_cache=False)
+
+    async def evolution_history(self, as_of: date) -> list[dict]:
+        """Return up to twenty dated dimensions without legacy null-to-zero coercion."""
+        from app.services.market_context_evolution import serialize_evolution
+
+        rows = await self._daily_dimension_series(as_of, 20)
+        return serialize_evolution(rows, as_of)
 
     async def _analyze_for(self, as_of: date, *, use_cache: bool) -> MarketContext:
         # Cache hit within TTL

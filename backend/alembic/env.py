@@ -22,6 +22,7 @@ from app.models.user import (
     User,
     UserProfile,
 )
+from app.models.market_posture_record import MarketPostureRecord  # noqa: F401
 
 config = context.config
 

@@ -45,7 +45,7 @@ function context() {
       },
       breadth_comparisons: {
         date: '2026-10-20',
-        new_52w_highs_vs_lows: { up_count: 12, down_count: 3, eligible_symbols: 450, excluded_symbols: 50, up_ratio: 0.8 },
+        new_session_highs_vs_lows: { up_count: 12, down_count: 3, eligible_symbols: 450, excluded_symbols: 50, up_ratio: 0.8 },
         up_from_open_vs_down: { up_count: 300, down_count: 100, eligible_symbols: 480, excluded_symbols: 20, up_ratio: 0.75 },
         up_4pct_vs_down_4pct: { up_count: 0, down_count: 0, eligible_symbols: 430, excluded_symbols: 70, up_ratio: null },
       },
@@ -70,7 +70,7 @@ function render(ctx = context()) {
 
 test('renders OHLC breadth counts, date, coverage and zero-event state', () => {
   const html = render()
-  assert.match(html, /Nuevos máximos vs nuevos mínimos \(52 semanas\)/)
+  assert.match(html, /Nuevos máximos vs nuevos mínimos \(sesión anterior\)/)
   assert.match(html, /Suben desde la apertura vs bajan/)
   assert.match(html, /Suben ≥4% vs bajan ≥4%/)
   assert.match(html, /2026-10-20/)
@@ -83,7 +83,7 @@ test('renders OHLC breadth counts, date, coverage and zero-event state', () => {
 
 test('renders missing coverage as no data and keeps legacy responses working', () => {
   const noCoverage = context()
-  noCoverage.participation.breadth_comparisons.new_52w_highs_vs_lows = {
+  noCoverage.participation.breadth_comparisons.new_session_highs_vs_lows = {
     up_count: 0, down_count: 0, eligible_symbols: 0, excluded_symbols: 500, up_ratio: null,
   }
   assert.match(render(noCoverage), /Sin datos/)
@@ -93,4 +93,15 @@ test('renders missing coverage as no data and keeps legacy responses working', (
   const legacyHtml = render(legacy)
   assert.match(legacyHtml, /Ratio proximidad \/ distancia a máximos/)
   assert.doesNotMatch(legacyHtml, /Suben desde la apertura vs bajan/)
+})
+
+
+test('does not relabel annual payloads as previous-session extremes', () => {
+  const legacy = context()
+  const comparisons = legacy.participation.breadth_comparisons
+  comparisons.new_52w_highs_vs_lows = comparisons.new_session_highs_vs_lows
+  delete comparisons.new_session_highs_vs_lows
+  const html = render(legacy)
+  assert.doesNotMatch(html, /Nuevos máximos vs nuevos mínimos \(sesión anterior\)/)
+  assert.match(html, /Suben desde la apertura vs bajan/)
 })

@@ -89,8 +89,8 @@ function MetricRow({ label, value }: { label: string; value: ReactNode }) {
 
 const BREADTH_ROWS = [
   {
-    key: 'new_52w_highs_vs_lows',
-    label: 'Nuevos máximos vs nuevos mínimos (52 semanas)',
+    key: 'new_session_highs_vs_lows',
+    label: 'Nuevos máximos vs nuevos mínimos (sesión anterior)',
     positive: 'Nuevos máximos',
     negative: 'Nuevos mínimos',
   },
@@ -116,6 +116,7 @@ function BreadthComparisonRows({ comparisons }: {
       <p className="text-[10px] text-white/35">Amplitud OHLC · {comparisons.date}</p>
       {BREADTH_ROWS.map(({ key, label, positive, negative }) => {
         const measure = comparisons[key]
+        if (!measure) return null
         const noCoverage = measure.eligible_symbols === 0
         const noEvents = measure.up_count + measure.down_count === 0
         const ratio = measure.up_ratio
@@ -269,7 +270,7 @@ export default function MarketContextDrawer({ ctx, onClose }: Props) {
               <div className="mt-2 space-y-1.5 leading-relaxed">
                 {p.breadth_comparisons && (
                   <>
-                    <p>Máximos y mínimos nuevos: el máximo o mínimo intradiario supera o perfora las 252 ruedas previas completas.</p>
+                    <p>Máximos y mínimos nuevos: el máximo intradiario supera el máximo de la sesión anterior del calendario SPY, o el mínimo intradiario cae por debajo del mínimo de esa sesión.</p>
                     <p>Desde apertura: último cierre de la fecha mostrada frente a la apertura de esa rueda. ±4% compara el cierre con el de la rueda previa disponible.</p>
                     <p>La barra es positivos ÷ eventos positivos y negativos. La cobertura indica símbolos elegibles y excluidos; empates no generan eventos.</p>
                   </>
